@@ -1,0 +1,59 @@
+# 依赖
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# 构建产物
+dist/
+build/
+*.tgz
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 测试覆盖率
+coverage/
+.nyc_output/
+
+# 缓存
+.cache/
+.temp/
+
+
+# Python项目标准.gitignore
+# Virtual Environment
+venv/
+env/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/

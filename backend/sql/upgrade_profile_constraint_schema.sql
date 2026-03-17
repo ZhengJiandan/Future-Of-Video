@@ -1,0 +1,43 @@
+ALTER TABLE `pipeline_character_profiles`
+  ADD COLUMN `archetype` VARCHAR(100) NULL AFTER `role`,
+  ADD COLUMN `age_range` VARCHAR(50) NULL AFTER `archetype`,
+  ADD COLUMN `gender_presentation` VARCHAR(50) NULL AFTER `age_range`,
+  ADD COLUMN `core_appearance` TEXT NULL AFTER `personality`,
+  ADD COLUMN `hair` TEXT NULL AFTER `core_appearance`,
+  ADD COLUMN `face_features` TEXT NULL AFTER `hair`,
+  ADD COLUMN `body_shape` TEXT NULL AFTER `face_features`,
+  ADD COLUMN `outfit` TEXT NULL AFTER `body_shape`,
+  ADD COLUMN `gear` TEXT NULL AFTER `outfit`,
+  ADD COLUMN `color_palette` TEXT NULL AFTER `gear`,
+  ADD COLUMN `visual_do_not_change` TEXT NULL AFTER `color_palette`,
+  ADD COLUMN `speaking_style` TEXT NULL AFTER `visual_do_not_change`,
+  ADD COLUMN `common_actions` TEXT NULL AFTER `speaking_style`,
+  ADD COLUMN `emotion_baseline` TEXT NULL AFTER `common_actions`,
+  ADD COLUMN `forbidden_behaviors` TEXT NULL AFTER `emotion_baseline`,
+  ADD COLUMN `llm_summary` TEXT NULL AFTER `prompt_hint`,
+  ADD COLUMN `image_prompt_base` TEXT NULL AFTER `llm_summary`,
+  ADD COLUMN `video_prompt_base` TEXT NULL AFTER `image_prompt_base`,
+  ADD COLUMN `negative_prompt` TEXT NULL AFTER `video_prompt_base`,
+  ADD COLUMN `must_keep` JSON NULL AFTER `tags`,
+  ADD COLUMN `forbidden_traits` JSON NULL AFTER `must_keep`,
+  ADD COLUMN `aliases` JSON NULL AFTER `forbidden_traits`,
+  ADD COLUMN `profile_version` INT NOT NULL DEFAULT 1 AFTER `aliases`;
+
+ALTER TABLE `pipeline_scene_profiles`
+  ADD COLUMN `story_function` VARCHAR(100) NULL AFTER `description`,
+  ADD COLUMN `scene_rules` TEXT NULL AFTER `location`,
+  ADD COLUMN `architecture_style` TEXT NULL AFTER `atmosphere`,
+  ADD COLUMN `color_palette` TEXT NULL AFTER `architecture_style`,
+  ADD COLUMN `llm_summary` TEXT NULL AFTER `prompt_hint`,
+  ADD COLUMN `image_prompt_base` TEXT NULL AFTER `llm_summary`,
+  ADD COLUMN `video_prompt_base` TEXT NULL AFTER `image_prompt_base`,
+  ADD COLUMN `negative_prompt` TEXT NULL AFTER `video_prompt_base`,
+  ADD COLUMN `allowed_characters` JSON NULL AFTER `tags`,
+  ADD COLUMN `props_must_have` JSON NULL AFTER `allowed_characters`,
+  ADD COLUMN `props_forbidden` JSON NULL AFTER `props_must_have`,
+  ADD COLUMN `must_have_elements` JSON NULL AFTER `props_forbidden`,
+  ADD COLUMN `forbidden_elements` JSON NULL AFTER `must_have_elements`,
+  ADD COLUMN `camera_preferences` JSON NULL AFTER `forbidden_elements`,
+  ADD COLUMN `profile_version` INT NOT NULL DEFAULT 1 AFTER `camera_preferences`;
+
+CREATE INDEX `ix_pipeline_character_profiles_archetype` ON `pipeline_character_profiles` (`archetype`);

@@ -1,0 +1,17 @@
+[
+  {
+    "id": "66faa448eaaf4c279e6c12b7d49983b4",
+    "name": "威龙",
+    "role": "一突",
+    "description": "中国特种兵",
+    "appearance": "很帅",
+    "personality": "冷静，勇猛",
+    "prompt_hint": "",
+    "tags": [
+      "王宇昊"
+    ],
+    "source": "library",
+    "created_at": "2026-03-16T14:13:05.557526",
+    "updated_at": "2026-03-16T14:13:05.557526"
+  }
+]

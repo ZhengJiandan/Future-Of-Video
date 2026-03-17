@@ -1,0 +1,14 @@
+Enter the absolute path where the nvm-windows zip file is extracted/copied to: [I] <MMKV.cpp:166::initialize> version v2.2.4, page size 4096, arch x86_64
+[I] <MMKV.cpp:223::initializeMMKV> root dir: C:\Users\zheng'lei\AppData\LocalLow\SogouPY\mmkv
+[I] <MMKV.cpp:254::mmkvWithID> prepare to load engine_0 (id 199f881e96d23462532ce1f38a05ca5f) from rootPath C:\Users\zheng'lei\AppData\LocalLow\SogouPY\mmkv
+[I] <MemoryFile_Win32.cpp:79::open> open fd[0000000000000448], flag 7, C:\Users\zheng'lei\AppData\LocalLow\SogouPY\mmkv\engine_0
+[I] <MemoryFile_Win32.cpp:211::mmapOrCleanup> mmap to address [0000027FD8460000], [C:\Users\zheng'lei\AppData\LocalLow\SogouPY\mmkv\engine_0]
+[I] <MemoryFile_Win32.cpp:85::close> closing fd[0000000000000448], C:\Users\zheng'lei\AppData\LocalLow\SogouPY\mmkv\engine_0
+[I] <MemoryFile_Win32.cpp:79::open> open fd[000000000000044C], flag 7, C:\Users\zheng'lei\AppData\LocalLow\SogouPY\mmkv\engine_0.crc
+[I] <MemoryFile_Win32.cpp:211::mmapOrCleanup> mmap to address [0000027FD8470000], [C:\Users\zheng'lei\AppData\LocalLow\SogouPY\mmkv\engine_0.crc]
+[I] <MemoryFile_Win32.cpp:616::isDiskOfMMAPFileCorrupted> first byte of the file: 0xe752ec0b
+[I] <MemoryFile_Win32.cpp:616::isDiskOfMMAPFileCorrupted> first byte of the file: 0x1258
+[I] <MMKV_IO.cpp:244::loadMetaInfoAndCheck> meta file [engine_0] has flag [0]
+[I] <MMKV_IO.cpp:84::loadFromFile> loading [engine_0] with 4696 actual size, file size 8192, InterProcess 1, meta info version:4
+[I] <MMKV_IO.cpp:89::loadFromFile> loading [engine_0] with crc 3880971275 sequence 76 version 4
+[I] <MMKV_IO.cpp:133::loadFromFile> loaded [engine_0] with 7 key-values

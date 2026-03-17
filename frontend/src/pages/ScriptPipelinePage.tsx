@@ -1,0 +1,2000 @@
+import React, { useEffect, useRef, useState } from 'react'
+import {
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  Col,
+  Collapse,
+  Descriptions,
+  Empty,
+  Image,
+  Input,
+  InputNumber,
+  Modal,
+  Progress,
+  Row,
+  Select,
+  Space,
+  Spin,
+  Switch,
+  Tag,
+  Typography,
+  Upload,
+  UploadFile,
+  UploadProps,
+  message,
+} from 'antd'
+import {
+  CheckCircleOutlined,
+  DownloadOutlined,
+  EditOutlined,
+  EyeOutlined,
+  FileImageOutlined,
+  FileTextOutlined,
+  FolderOpenOutlined,
+  LeftOutlined,
+  PlayCircleOutlined,
+  PlusOutlined,
+  RightOutlined,
+  TeamOutlined,
+  VideoCameraOutlined,
+} from '@ant-design/icons'
+import { useNavigate } from 'react-router-dom'
+import {
+  CharacterProfile,
+  GeneratedScriptResponse,
+  PrepareCharactersResponse,
+  ReferenceImageAsset,
+  RenderClipResult,
+  RenderStatusResponse,
+  SceneProfile,
+  ScriptSummary,
+  SegmentItem,
+  SegmentKeyframes,
+  resolveAssetUrl,
+  scriptPipelineApi,
+} from '../services/api'
+import { useProjectStore } from '../stores/project'
+
+const { Title, Paragraph, Text } = Typography
+const { TextArea } = Input
+
+const stepItems = [
+  { title: '输入需求', subtitle: '创意、角色、参考图', icon: <FileTextOutlined /> },
+  { title: '审核剧本', subtitle: '查看并编辑完整剧本', icon: <EditOutlined /> },
+  { title: '审核片段', subtitle: '确认拆分和 Prompt', icon: <CheckCircleOutlined /> },
+  { title: '审核首尾帧', subtitle: '确认关键帧连续性', icon: <FileImageOutlined /> },
+  { title: '生成视频', subtitle: '调用 provider 并轮询', icon: <VideoCameraOutlined /> },
+  { title: '查看结果', subtitle: '成片与片段结果', icon: <EyeOutlined /> },
+]
+
+const statusColorMap: Record<string, string> = {
+  queued: 'default',
+  processing: 'processing',
+  completed: 'success',
+  failed: 'error',
+}
+
+const buildSummary = (generated?: GeneratedScriptResponse | null) => generated?.summary || null
+
+const buildUploadFileList = (assets: ReferenceImageAsset[]): UploadFile[] =>
+  assets.map((asset) => ({
+    uid: asset.id,
+    name: asset.original_filename || asset.filename,
+    status: 'done',
+    url: resolveAssetUrl(asset.url),
+  }))
+
+const hasMeaningfulProjectState = (state: {
+  userInput: string
+  projectTitle: string
+  selectedCharacterIds: string[]
+  selectedSceneIds: string[]
+  referenceImages: ReferenceImageAsset[]
+  scriptDraft: string
+  segments: SegmentItem[]
+  keyframes: SegmentKeyframes[]
+  renderTaskId: string | null
+  currentStep: number
+}) =>
+  Boolean(
+    state.userInput.trim() ||
+      state.scriptDraft.trim() ||
+      state.selectedCharacterIds.length ||
+      state.selectedSceneIds.length ||
+      state.referenceImages.length ||
+      state.segments.length ||
+      state.keyframes.length ||
+      state.renderTaskId ||
+      state.currentStep > 0 ||
+      state.projectTitle !== '未命名项目',
+  )
+
+const PreviewAsset: React.FC<{
+  assetUrl?: string
+  assetType?: string
+  title: string
+}> = ({ assetUrl, assetType, title }) => {
+  const resolvedUrl = resolveAssetUrl(assetUrl)
+
+  if (!resolvedUrl) {
+    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="结果未生成" />
+  }
+
+  if (assetType?.startsWith('image/')) {
+    return (
+      <Image
+        alt={title}
+        src={resolvedUrl}
+        style={{ width: '100%', borderRadius: 12, objectFit: 'cover' }}
+        preview={{ mask: '预览' }}
+      />
+    )
+  }
+
+  return <video controls src={resolvedUrl} style={{ width: '100%', borderRadius: 12, background: '#000' }} />
+}
+
+const downloadAsset = (assetUrl?: string, filename?: string) => {
+  const resolvedUrl = resolveAssetUrl(assetUrl)
+  if (!resolvedUrl) {
+    message.warning('当前资源还不可下载')
+    return
+  }
+
+  const link = document.createElement('a')
+  link.href = resolvedUrl
+  if (filename) {
+    link.download = filename
+  }
+  link.target = '_blank'
+  link.rel = 'noopener noreferrer'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+}
+
+export const ScriptPipelinePage: React.FC = () => {
+  const navigate = useNavigate()
+  const flowTrackRef = useRef<HTMLDivElement | null>(null)
+  const stepButtonRefs = useRef<Array<HTMLButtonElement | null>>([])
+  const suppressProjectSaveRef = useRef(true)
+  const creatingProjectRef = useRef(false)
+  const selectedProjectId = useProjectStore((state) => state.currentProjectId)
+  const projectStoreHydrated = useProjectStore((state) => state.hydrated)
+  const setCurrentProjectId = useProjectStore((state) => state.setCurrentProjectId)
+  const clearCurrentProjectId = useProjectStore((state) => state.clearCurrentProjectId)
+
+  const [currentStep, setCurrentStep] = useState(0)
+  const [transitionDirection, setTransitionDirection] = useState<'forward' | 'backward'>('forward')
+  const [userInput, setUserInput] = useState('')
+  const [stylePreference, setStylePreference] = useState('写实战术电影感')
+  const [projectTitle, setProjectTitle] = useState('未命名项目')
+  const [maxSegmentDuration, setMaxSegmentDuration] = useState<number>(10)
+  const [targetTotalDuration, setTargetTotalDuration] = useState<number | null>(null)
+  const [provider, setProvider] = useState('auto')
+  const [resolution, setResolution] = useState('720p')
+  const [aspectRatio, setAspectRatio] = useState('16:9')
+  const [watermark, setWatermark] = useState(false)
+  const [providerModel, setProviderModel] = useState('doubao-seedance-1-5-pro-251215')
+  const [cameraFixed, setCameraFixed] = useState(false)
+  const [generateAudio, setGenerateAudio] = useState(true)
+  const [returnLastFrame, setReturnLastFrame] = useState(false)
+  const [serviceTier, setServiceTier] = useState('default')
+  const [seedInput, setSeedInput] = useState<number | null>(null)
+
+  const [referenceImages, setReferenceImages] = useState<ReferenceImageAsset[]>([])
+  const [uploadFileList, setUploadFileList] = useState<UploadFile[]>([])
+  const [characterProfiles, setCharacterProfiles] = useState<CharacterProfile[]>([])
+  const [selectedCharacterIds, setSelectedCharacterIds] = useState<string[]>([])
+  const [sceneProfiles, setSceneProfiles] = useState<SceneProfile[]>([])
+  const [selectedSceneIds, setSelectedSceneIds] = useState<string[]>([])
+
+  const [scriptLoading, setScriptLoading] = useState(false)
+  const [splitLoading, setSplitLoading] = useState(false)
+  const [keyframeLoading, setKeyframeLoading] = useState(false)
+  const [renderStarting, setRenderStarting] = useState(false)
+  const [charactersLoading, setCharactersLoading] = useState(false)
+  const [scenesLoading, setScenesLoading] = useState(false)
+
+  const [error, setError] = useState<string | null>(null)
+
+  const [generatedScript, setGeneratedScript] = useState<GeneratedScriptResponse | null>(null)
+  const [characterPrepareResult, setCharacterPrepareResult] = useState<PrepareCharactersResponse | null>(null)
+  const [characterConfirmOpen, setCharacterConfirmOpen] = useState(false)
+  const [preparingCharacters, setPreparingCharacters] = useState(false)
+  const [confirmedLibraryCharacterIds, setConfirmedLibraryCharacterIds] = useState<string[]>([])
+  const [confirmedTemporaryCharacterIds, setConfirmedTemporaryCharacterIds] = useState<string[]>([])
+  const [scriptDraft, setScriptDraft] = useState('')
+  const [scriptSummary, setScriptSummary] = useState<ScriptSummary | null>(null)
+  const [segments, setSegments] = useState<SegmentItem[]>([])
+  const [keyframes, setKeyframes] = useState<SegmentKeyframes[]>([])
+  const [renderTaskId, setRenderTaskId] = useState<string | null>(null)
+  const [renderStatus, setRenderStatus] = useState<RenderStatusResponse | null>(null)
+  const [projectHydrating, setProjectHydrating] = useState(true)
+  const [savingTemporaryCharacterIds, setSavingTemporaryCharacterIds] = useState<string[]>([])
+
+  const resetLocalState = () => {
+    setCurrentStep(0)
+    setTransitionDirection('forward')
+    setUserInput('')
+    setStylePreference('写实战术电影感')
+    setProjectTitle('未命名项目')
+    setMaxSegmentDuration(10)
+    setTargetTotalDuration(null)
+    setProvider('auto')
+    setResolution('720p')
+    setAspectRatio('16:9')
+    setWatermark(false)
+    setProviderModel('doubao-seedance-1-5-pro-251215')
+    setCameraFixed(false)
+    setGenerateAudio(true)
+    setReturnLastFrame(false)
+    setServiceTier('default')
+    setSeedInput(null)
+    setReferenceImages([])
+    setUploadFileList([])
+    setSelectedCharacterIds([])
+    setSelectedSceneIds([])
+    setGeneratedScript(null)
+    setCharacterPrepareResult(null)
+    setCharacterConfirmOpen(false)
+    setPreparingCharacters(false)
+    setConfirmedLibraryCharacterIds([])
+    setConfirmedTemporaryCharacterIds([])
+    setScriptDraft('')
+    setScriptSummary(null)
+    setSegments([])
+    setKeyframes([])
+    setRenderTaskId(null)
+    setRenderStatus(null)
+    setSavingTemporaryCharacterIds([])
+    setError(null)
+  }
+
+  useEffect(() => {
+    const fetchCharacters = async () => {
+      setCharactersLoading(true)
+      try {
+        const response = await scriptPipelineApi.listCharacters()
+        setCharacterProfiles(response.data.items || [])
+      } catch {
+        message.error('角色档案加载失败')
+      } finally {
+        setCharactersLoading(false)
+      }
+    }
+
+    fetchCharacters()
+  }, [])
+
+  useEffect(() => {
+    const fetchScenes = async () => {
+      setScenesLoading(true)
+      try {
+        const response = await scriptPipelineApi.listScenes()
+        setSceneProfiles(response.data.items || [])
+      } catch {
+        message.error('场景档案加载失败')
+      } finally {
+        setScenesLoading(false)
+      }
+    }
+
+    fetchScenes()
+  }, [])
+
+  useEffect(() => {
+    if (!projectStoreHydrated) {
+      return
+    }
+
+    let active = true
+
+    const applyProjectState = (item: Record<string, unknown>) => {
+      const state = (item.state as Record<string, unknown>) || {}
+      const restoredReferenceImages = Array.isArray(state.referenceImages)
+        ? (state.referenceImages as ReferenceImageAsset[])
+        : []
+      const restoredGeneratedScript =
+        state.generatedScript && typeof state.generatedScript === 'object'
+          ? (state.generatedScript as GeneratedScriptResponse)
+          : null
+      const restoredScriptSummary =
+        state.scriptSummary && typeof state.scriptSummary === 'object'
+          ? (state.scriptSummary as ScriptSummary)
+          : null
+      const restoredSegments = Array.isArray(state.segments) ? (state.segments as SegmentItem[]) : []
+      const restoredKeyframes = Array.isArray(state.keyframes) ? (state.keyframes as SegmentKeyframes[]) : []
+      const restoredRenderStatus =
+        state.renderStatus && typeof state.renderStatus === 'object'
+          ? (state.renderStatus as RenderStatusResponse)
+          : null
+
+      setCurrentStep(Number(state.currentStep ?? item.current_step ?? 0))
+      setTransitionDirection(state.transitionDirection === 'backward' ? 'backward' : 'forward')
+      setUserInput(String(state.userInput || ''))
+      setStylePreference(String(state.stylePreference || '写实战术电影感'))
+      setProjectTitle(String(state.projectTitle || item.project_title || '未命名项目'))
+      setMaxSegmentDuration(Number(state.maxSegmentDuration || 10))
+      setTargetTotalDuration(
+        state.targetTotalDuration === null || state.targetTotalDuration === undefined
+          ? null
+          : Number(state.targetTotalDuration),
+      )
+      setProvider(String(state.provider || 'auto'))
+      setResolution(String(state.resolution || '720p'))
+      setAspectRatio(String(state.aspectRatio || '16:9'))
+      setWatermark(Boolean(state.watermark))
+      setProviderModel(String(state.providerModel || 'doubao-seedance-1-5-pro-251215'))
+      setCameraFixed(Boolean(state.cameraFixed))
+      setGenerateAudio(state.generateAudio === false ? false : true)
+      setReturnLastFrame(Boolean(state.returnLastFrame))
+      setServiceTier(String(state.serviceTier || 'default'))
+      setSeedInput(
+        state.seedInput === null || state.seedInput === undefined || state.seedInput === ''
+          ? null
+          : Number(state.seedInput),
+      )
+      setReferenceImages(restoredReferenceImages)
+      setUploadFileList(buildUploadFileList(restoredReferenceImages))
+      setSelectedCharacterIds(
+        Array.isArray(state.selectedCharacterIds) ? (state.selectedCharacterIds as string[]) : [],
+      )
+      setSelectedSceneIds(Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : [])
+      setGeneratedScript(restoredGeneratedScript)
+      setScriptDraft(String(state.scriptDraft || ''))
+      setScriptSummary(restoredScriptSummary)
+      setSegments(restoredSegments)
+      setKeyframes(restoredKeyframes)
+      setRenderTaskId(
+        typeof state.renderTaskId === 'string' && state.renderTaskId
+          ? state.renderTaskId
+          : String(item.last_render_task_id || '') || null,
+      )
+      setRenderStatus(restoredRenderStatus)
+    }
+
+    const restoreProject = async () => {
+      setProjectHydrating(true)
+      try {
+        let item: Record<string, unknown> | null = null
+        if (selectedProjectId) {
+          try {
+            const response = await scriptPipelineApi.getProject(selectedProjectId)
+            item = response.data.item as Record<string, unknown> | null
+          } catch {
+            clearCurrentProjectId()
+          }
+        }
+
+        if (!item) {
+          const response = await scriptPipelineApi.getCurrentProject()
+          item = response.data.item as Record<string, unknown> | null
+          if (item?.id) {
+            setCurrentProjectId(String(item.id))
+          }
+        }
+
+        if (!active) {
+          return
+        }
+        if (!item?.state) {
+          resetLocalState()
+          return
+        }
+        applyProjectState(item)
+      } catch {
+        message.error('恢复当前项目失败')
+      } finally {
+        if (active) {
+          setProjectHydrating(false)
+          suppressProjectSaveRef.current = false
+        }
+      }
+    }
+
+    restoreProject()
+
+    return () => {
+      active = false
+    }
+  }, [clearCurrentProjectId, projectStoreHydrated, selectedProjectId, setCurrentProjectId])
+
+  useEffect(() => {
+    if (!renderTaskId) {
+      return
+    }
+
+    let active = true
+    let timer: number | undefined
+
+    const fetchStatus = async () => {
+      try {
+        const response = await scriptPipelineApi.getRenderStatus(renderTaskId)
+        if (!active) {
+          return
+        }
+
+        setRenderStatus(response.data)
+
+        if (response.data.status === 'completed') {
+          setCurrentStep(5)
+          return
+        }
+
+        if (response.data.status === 'failed') {
+          setError(response.data.error || '渲染失败')
+          return
+        }
+
+        timer = window.setTimeout(fetchStatus, 1500)
+      } catch (pollError: unknown) {
+        if (!active) {
+          return
+        }
+        const responseError = pollError as { response?: { data?: { detail?: string } } }
+        setError(responseError.response?.data?.detail || '查询渲染状态失败')
+      }
+    }
+
+    fetchStatus()
+
+    return () => {
+      active = false
+      if (timer) {
+        window.clearTimeout(timer)
+      }
+    }
+  }, [renderTaskId])
+
+  useEffect(() => {
+    const track = flowTrackRef.current
+    const activeButton = stepButtonRefs.current[currentStep]
+    if (!track || !activeButton) {
+      return
+    }
+
+    const targetLeft =
+      activeButton.offsetLeft - track.clientWidth / 2 + activeButton.clientWidth / 2
+
+    track.scrollTo({
+      left: Math.max(0, targetLeft),
+      behavior: 'smooth',
+    })
+  }, [currentStep])
+
+  useEffect(() => {
+    if (projectHydrating || suppressProjectSaveRef.current) {
+      return
+    }
+
+    const stateForSave = {
+      currentStep,
+      transitionDirection,
+      userInput,
+      stylePreference,
+      projectTitle,
+      maxSegmentDuration,
+      targetTotalDuration,
+      provider,
+      resolution,
+      aspectRatio,
+      watermark,
+      providerModel,
+      cameraFixed,
+      generateAudio,
+      returnLastFrame,
+      serviceTier,
+      seedInput,
+      referenceImages,
+      selectedCharacterIds,
+      selectedSceneIds,
+      generatedScript,
+      scriptDraft,
+      scriptSummary,
+      segments,
+      keyframes,
+      renderTaskId,
+    }
+
+    if (
+      !hasMeaningfulProjectState({
+        userInput,
+        projectTitle,
+        selectedCharacterIds,
+        selectedSceneIds,
+        referenceImages,
+        scriptDraft,
+        segments,
+        keyframes,
+        renderTaskId,
+        currentStep,
+      })
+    ) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      const payload = {
+        project_title: projectTitle.trim() || '未命名项目',
+        current_step: currentStep,
+        state: stateForSave,
+        status: renderTaskId ? 'in_progress' : currentStep >= 5 ? 'completed' : 'draft',
+        last_render_task_id: renderTaskId || undefined,
+        summary: scriptSummary?.synopsis || '',
+      }
+
+      const persist = async () => {
+        try {
+          if (selectedProjectId) {
+            await scriptPipelineApi.updateProject(selectedProjectId, payload)
+            return
+          }
+
+          if (creatingProjectRef.current) {
+            return
+          }
+
+          creatingProjectRef.current = true
+          const response = await scriptPipelineApi.createProject(payload)
+          setCurrentProjectId(response.data.item.id)
+        } catch {
+          message.error('项目自动保存失败')
+        } finally {
+          creatingProjectRef.current = false
+        }
+      }
+
+      void persist()
+    }, 800)
+
+    return () => window.clearTimeout(timer)
+  }, [
+    aspectRatio,
+    cameraFixed,
+    currentStep,
+    generatedScript,
+    generateAudio,
+    keyframes,
+    keyframeLoading,
+    maxSegmentDuration,
+    projectHydrating,
+    projectTitle,
+    provider,
+    providerModel,
+    referenceImages,
+    renderTaskId,
+    resolution,
+    returnLastFrame,
+    scriptDraft,
+    scriptSummary,
+    seedInput,
+    segments,
+    selectedCharacterIds,
+    selectedSceneIds,
+    serviceTier,
+    stylePreference,
+    targetTotalDuration,
+    transitionDirection,
+    userInput,
+    watermark,
+    selectedProjectId,
+    setCurrentProjectId,
+  ])
+
+  const handleReferenceUpload: UploadProps['customRequest'] = async (options) => {
+    const file = options.file as File
+    try {
+      const response = await scriptPipelineApi.uploadReferenceImage(file)
+      const asset = response.data
+      const uploadItem: UploadFile = {
+        uid: asset.id,
+        name: asset.original_filename || asset.filename,
+        status: 'done',
+        url: resolveAssetUrl(asset.url),
+      }
+
+      setReferenceImages((previous) => [...previous, asset])
+      setUploadFileList((previous) => [...previous, uploadItem])
+      message.success(`${file.name} 上传成功`)
+      options.onSuccess?.(asset)
+    } catch (uploadError) {
+      const responseError = uploadError as { response?: { data?: { detail?: string } } }
+      const detail = responseError.response?.data?.detail || '参考图上传失败'
+      message.error(detail)
+      options.onError?.(new Error(detail))
+    }
+  }
+
+  const handleReferenceRemove: UploadProps['onRemove'] = (file) => {
+    setUploadFileList((previous) => previous.filter((item) => item.uid !== file.uid))
+    setReferenceImages((previous) => previous.filter((item) => item.id !== file.uid))
+    return true
+  }
+
+  const runGenerateScript = async ({
+    libraryCharacterIds,
+    temporaryCharacters,
+  }: {
+    libraryCharacterIds: string[]
+    temporaryCharacters: CharacterProfile[]
+  }) => {
+    if (!userInput.trim()) {
+      return
+    }
+
+    setCurrentStep(1)
+    setScriptLoading(true)
+    setError(null)
+    setGeneratedScript(null)
+    setSegments([])
+    setKeyframes([])
+    setRenderTaskId(null)
+    setRenderStatus(null)
+
+    try {
+      const response = await scriptPipelineApi.generateScript({
+        user_input: userInput.trim(),
+        style: stylePreference.trim(),
+        target_total_duration: targetTotalDuration || undefined,
+        selected_character_ids: libraryCharacterIds,
+        selected_scene_ids: selectedSceneIds,
+        character_profiles: temporaryCharacters,
+        reference_images: referenceImages,
+      })
+      setGeneratedScript(response.data)
+      setCharacterPrepareResult(null)
+      setCharacterConfirmOpen(false)
+      setScriptDraft(response.data.script_text)
+      setScriptSummary(buildSummary(response.data))
+      setSelectedCharacterIds(response.data.selected_character_ids || [])
+      setSelectedSceneIds(response.data.selected_scene_ids || [])
+      setProjectTitle(response.data.summary.title || '未命名项目')
+      setCurrentStep(1)
+    } catch (requestError: unknown) {
+      const responseError = requestError as { response?: { data?: { detail?: string } } }
+      setError(responseError.response?.data?.detail || '完整剧本生成失败')
+      setCurrentStep(0)
+    } finally {
+      setScriptLoading(false)
+    }
+  }
+
+  const handleGenerateScript = async () => {
+    if (!userInput.trim()) {
+      return
+    }
+
+    setPreparingCharacters(true)
+    setError(null)
+
+    try {
+      const response = await scriptPipelineApi.prepareCharacters({
+        user_input: userInput.trim(),
+        style: stylePreference.trim(),
+        target_total_duration: targetTotalDuration || undefined,
+        selected_character_ids: selectedCharacterIds,
+      })
+      setCharacterPrepareResult(response.data)
+      setConfirmedLibraryCharacterIds(response.data.selected_character_ids || [])
+      setConfirmedTemporaryCharacterIds((response.data.temporary_character_profiles || []).map((item) => item.id))
+      setCharacterConfirmOpen(true)
+    } catch (requestError: unknown) {
+      const responseError = requestError as { response?: { data?: { detail?: string } } }
+      setError(responseError.response?.data?.detail || '角色确认分析失败')
+    } finally {
+      setPreparingCharacters(false)
+    }
+  }
+
+  const handleConfirmCharactersAndGenerate = async () => {
+    const temporaryCharacters = (characterPrepareResult?.temporary_character_profiles || []).filter((profile) =>
+      confirmedTemporaryCharacterIds.includes(profile.id),
+    )
+    await runGenerateScript({
+      libraryCharacterIds: confirmedLibraryCharacterIds,
+      temporaryCharacters,
+    })
+  }
+
+  const handleSaveTemporaryCharacter = async (profile: CharacterProfile) => {
+    const profileId = profile.id
+    if (!profileId || savingTemporaryCharacterIds.includes(profileId)) {
+      return
+    }
+
+    setSavingTemporaryCharacterIds((previous) => [...previous, profileId])
+    try {
+      const response = await scriptPipelineApi.createCharacter({
+        name: profile.name,
+        category: profile.category,
+        role: profile.role,
+        archetype: profile.archetype,
+        age_range: profile.age_range,
+        gender_presentation: profile.gender_presentation,
+        description: profile.description,
+        appearance: profile.appearance,
+        personality: profile.personality,
+        core_appearance: profile.core_appearance,
+        hair: profile.hair,
+        face_features: profile.face_features,
+        body_shape: profile.body_shape,
+        outfit: profile.outfit,
+        gear: profile.gear,
+        color_palette: profile.color_palette,
+        visual_do_not_change: profile.visual_do_not_change,
+        speaking_style: profile.speaking_style,
+        common_actions: profile.common_actions,
+        emotion_baseline: profile.emotion_baseline,
+        forbidden_behaviors: profile.forbidden_behaviors,
+        prompt_hint: profile.prompt_hint,
+        llm_summary: profile.llm_summary,
+        image_prompt_base: profile.image_prompt_base,
+        video_prompt_base: profile.video_prompt_base,
+        negative_prompt: profile.negative_prompt,
+        tags: profile.tags,
+        must_keep: profile.must_keep,
+        forbidden_traits: profile.forbidden_traits,
+        aliases: profile.aliases,
+        profile_version: profile.profile_version,
+        source: 'library',
+        reference_image_url: profile.reference_image_url,
+        reference_image_original_name: profile.reference_image_original_name,
+        three_view_image_url: profile.three_view_image_url,
+        three_view_prompt: profile.three_view_prompt,
+      })
+      const createdProfile = response.data
+      setCharacterProfiles((previous) => [createdProfile, ...previous.filter((item) => item.id !== createdProfile.id)])
+      message.success(`已将临时角色「${profile.name}」保存到角色档案库`)
+    } catch (requestError: unknown) {
+      const responseError = requestError as { response?: { data?: { detail?: string } } }
+      message.error(responseError.response?.data?.detail || '保存临时角色失败')
+    } finally {
+      setSavingTemporaryCharacterIds((previous) => previous.filter((item) => item !== profileId))
+    }
+  }
+
+  const handleSplitScript = async () => {
+    if (!scriptDraft.trim()) {
+      return
+    }
+
+    setCurrentStep(2)
+    setSplitLoading(true)
+    setError(null)
+    setSegments([])
+    setKeyframes([])
+    setRenderTaskId(null)
+    setRenderStatus(null)
+
+    try {
+      const response = await scriptPipelineApi.splitScript({
+        script_text: scriptDraft,
+        max_segment_duration: maxSegmentDuration,
+        target_total_duration: targetTotalDuration || undefined,
+      })
+      setSegments(response.data.segments)
+      setKeyframes([])
+      setCurrentStep(2)
+    } catch (requestError: unknown) {
+      const responseError = requestError as { response?: { data?: { detail?: string } } }
+      setError(responseError.response?.data?.detail || '视频片段拆分失败')
+      setCurrentStep(1)
+    } finally {
+      setSplitLoading(false)
+    }
+  }
+
+  const handleSegmentChange = (index: number, patch: Partial<SegmentItem>) => {
+    setSegments((previous) =>
+      previous.map((segment, segmentIndex) => (segmentIndex === index ? { ...segment, ...patch } : segment)),
+    )
+  }
+
+  const handleGenerateKeyframes = async () => {
+    if (!segments.length) {
+      return
+    }
+
+    setCurrentStep(3)
+    setKeyframeLoading(true)
+    setError(null)
+    setKeyframes([])
+    setRenderTaskId(null)
+    setRenderStatus(null)
+
+    try {
+      const response = await scriptPipelineApi.generateKeyframes({
+        project_title: projectTitle.trim() || '未命名项目',
+        style: stylePreference.trim(),
+        selected_character_ids: selectedCharacterIds,
+        selected_scene_ids: selectedSceneIds,
+        reference_images: referenceImages,
+        segments,
+      })
+      setKeyframes(response.data.keyframes)
+      setCurrentStep(3)
+    } catch (requestError: unknown) {
+      const responseError = requestError as { response?: { data?: { detail?: string } } }
+      setError(responseError.response?.data?.detail || '首尾帧生成失败')
+      setCurrentStep(2)
+    } finally {
+      setKeyframeLoading(false)
+    }
+  }
+
+  const handleStartRender = async () => {
+    if (!segments.length) {
+      return
+    }
+
+    setCurrentStep(4)
+    setRenderStarting(true)
+    setError(null)
+    setRenderTaskId(null)
+    setRenderStatus(null)
+
+    try {
+      const response = await scriptPipelineApi.renderProject({
+        project_title: projectTitle.trim() || '未命名项目',
+        provider,
+        resolution,
+        aspect_ratio: aspectRatio,
+        watermark,
+        provider_model: providerModel,
+        camera_fixed: cameraFixed,
+        generate_audio: generateAudio,
+        return_last_frame: returnLastFrame,
+        service_tier: serviceTier,
+        seed: seedInput === null ? undefined : seedInput,
+        selected_character_ids: selectedCharacterIds,
+        selected_scene_ids: selectedSceneIds,
+        character_profiles: generatedScript?.character_profiles || [],
+        scene_profiles: generatedScript?.scene_profiles || [],
+        segments,
+        keyframes,
+      })
+      setRenderTaskId(response.data.task_id)
+      setCurrentStep(4)
+    } catch (requestError: unknown) {
+      const responseError = requestError as { response?: { data?: { detail?: string } } }
+      setError(responseError.response?.data?.detail || '渲染任务启动失败')
+      setCurrentStep(3)
+    } finally {
+      setRenderStarting(false)
+    }
+  }
+
+  const handleReset = async () => {
+    suppressProjectSaveRef.current = true
+    resetLocalState()
+    clearCurrentProjectId()
+    try {
+      const response = await scriptPipelineApi.createProject({
+        project_title: '未命名项目',
+        current_step: 0,
+        state: {},
+        status: 'draft',
+      })
+      setCurrentProjectId(response.data.item.id)
+      setProjectTitle(response.data.item.project_title || '未命名项目')
+      message.success('已创建新项目')
+    } catch {
+      message.error('新项目创建失败')
+    } finally {
+      suppressProjectSaveRef.current = false
+    }
+  }
+
+  const goToStep = (stepIndex: number) => {
+    if (isStepAvailable(stepIndex)) {
+      setTransitionDirection(stepIndex >= currentStep ? 'forward' : 'backward')
+      setCurrentStep(stepIndex)
+    }
+  }
+
+  const isStepAvailable = (stepIndex: number) => {
+    const availability = [
+      true,
+      !!generatedScript || scriptLoading,
+      segments.length > 0 || splitLoading,
+      keyframes.length > 0 || keyframeLoading,
+      !!renderTaskId || renderStarting || !!renderStatus,
+      !!renderStatus?.clips?.length || renderStatus?.status === 'completed',
+    ]
+    return availability[stepIndex]
+  }
+
+  const selectedCharacters = characterProfiles.filter((profile) => selectedCharacterIds.includes(profile.id))
+  const selectedScenes = sceneProfiles.filter((profile) => selectedSceneIds.includes(profile.id))
+  const temporaryCharacters = generatedScript?.temporary_character_profiles || []
+  const characterResolution = generatedScript?.character_resolution
+  const finalPreviewUrl = renderStatus?.final_output?.asset_url
+  const finalPreviewType = renderStatus?.final_output?.asset_type
+  const previousStepIndex = Math.max(currentStep - 1, 0)
+  const nextStepIndex = Math.min(currentStep + 1, stepItems.length - 1)
+
+  const renderStepContent = () => {
+    if (currentStep === 0) {
+      return (
+        <Space direction="vertical" size={20} style={{ width: '100%' }}>
+          <Card
+            title="创意输入"
+            extra={
+              <Button icon={<TeamOutlined />} onClick={() => navigate('/characters/library')}>
+                管理角色档案
+              </Button>
+            }
+          >
+            <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <TextArea
+                rows={7}
+                value={userInput}
+                onChange={(event) => setUserInput(event.target.value)}
+                placeholder="输入一句话创意、场景描述或完整故事想法。"
+              />
+              <Row gutter={[16, 16]}>
+                <Col xs={24} md={12}>
+                  <Text>视觉风格</Text>
+                  <Input
+                    style={{ marginTop: 8 }}
+                    value={stylePreference}
+                    onChange={(event) => setStylePreference(event.target.value)}
+                    placeholder="例如：写实战术电影感、低照度、胶片颗粒"
+                  />
+                </Col>
+                <Col xs={24} md={12}>
+                  <Text>项目名称</Text>
+                  <Input
+                    style={{ marginTop: 8 }}
+                    value={projectTitle}
+                    onChange={(event) => setProjectTitle(event.target.value)}
+                    placeholder="用于最终成片命名"
+                  />
+                </Col>
+                <Col xs={24} md={12}>
+                  <Text>单片段最大时长</Text>
+                  <InputNumber
+                    min={3}
+                    max={15}
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={maxSegmentDuration}
+                    onChange={(value) => setMaxSegmentDuration(Number(value) || 10)}
+                  />
+                </Col>
+                <Col xs={24} md={12}>
+                  <Text>目标总时长（可选）</Text>
+                  <InputNumber
+                    min={10}
+                    max={300}
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={targetTotalDuration}
+                    onChange={(value) => setTargetTotalDuration(value === null ? null : Number(value))}
+                  />
+                </Col>
+              </Row>
+            </Space>
+          </Card>
+
+          <Card style={{ borderRadius: 20 }}>
+            <Collapse
+              ghost
+              items={[
+                {
+                  key: 'advanced-constraints',
+                  label: (
+                    <Space direction="vertical" size={2}>
+                      <Text strong>高级约束（可选）</Text>
+                      <Text type="secondary">
+                        默认不填也可以，系统会先分析你的输入；如果你想强制指定角色、场景或参考图，再展开这里。
+                      </Text>
+                    </Space>
+                  ),
+                  children: (
+                    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                      <Alert
+                        type="info"
+                        showIcon
+                        message="这里是手动约束入口，不是必填项"
+                        description="角色和场景都支持多选。你可以提前指定正式档案，让后续剧本、图片和视频生成更稳定。"
+                      />
+
+                      <div>
+                        <Text>选择角色档案</Text>
+                        <Select
+                          mode="multiple"
+                          allowClear
+                          loading={charactersLoading}
+                          style={{ width: '100%', marginTop: 8 }}
+                          value={selectedCharacterIds}
+                          onChange={setSelectedCharacterIds}
+                          placeholder="可多选。留空则由系统先分析用户输入，再匹配角色。"
+                          options={characterProfiles.map((profile) => ({
+                            value: profile.id,
+                            label: `${profile.name}${profile.role ? ` · ${profile.role}` : ''}`,
+                          }))}
+                        />
+                      </div>
+
+                      {selectedCharacters.length ? (
+                        <Card type="inner" size="small" title="已选角色">
+                          <Space wrap>
+                            {selectedCharacters.map((profile) => (
+                              <Tag key={profile.id} color="processing">
+                                {profile.name}
+                              </Tag>
+                            ))}
+                          </Space>
+                        </Card>
+                      ) : null}
+
+                      <div>
+                        <Text>选择场景档案</Text>
+                        <Select
+                          mode="multiple"
+                          allowClear
+                          loading={scenesLoading}
+                          style={{ width: '100%', marginTop: 8 }}
+                          value={selectedSceneIds}
+                          onChange={setSelectedSceneIds}
+                          placeholder="可多选。留空则由系统根据剧情自动分析和匹配场景。"
+                          options={sceneProfiles.map((profile) => ({
+                            value: profile.id,
+                            label: `${profile.name}${profile.location ? ` · ${profile.location}` : ''}`,
+                          }))}
+                        />
+                      </div>
+
+                      {selectedScenes.length ? (
+                        <Card type="inner" size="small" title="已选场景">
+                          <Space wrap>
+                            {selectedScenes.map((profile) => (
+                              <Tag key={profile.id} color="green">
+                                {profile.name}
+                              </Tag>
+                            ))}
+                          </Space>
+                        </Card>
+                      ) : null}
+
+                      <div>
+                        <Text>参考图上传</Text>
+                        <Upload
+                          listType="picture-card"
+                          multiple
+                          customRequest={handleReferenceUpload}
+                          onRemove={handleReferenceRemove}
+                          fileList={uploadFileList}
+                        >
+                          {uploadFileList.length >= 6 ? null : (
+                            <div>
+                              <FileImageOutlined />
+                              <div style={{ marginTop: 8 }}>上传参考图</div>
+                            </div>
+                          )}
+                        </Upload>
+                      </div>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+          </Card>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <Button
+              type="primary"
+              size="large"
+              icon={<PlayCircleOutlined />}
+              loading={preparingCharacters || scriptLoading}
+              disabled={!userInput.trim()}
+              onClick={handleGenerateScript}
+            >
+              开始角色确认并生成剧本
+            </Button>
+          </div>
+        </Space>
+      )
+    }
+
+    if (currentStep === 1) {
+      return (
+        <Space direction="vertical" size={20} style={{ width: '100%' }}>
+          <Card title="完整剧本审核">
+            {scriptLoading ? (
+              <div style={{ padding: '72px 0', textAlign: 'center' }}>
+                <Spin size="large" />
+                <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>正在生成完整剧本</Paragraph>
+              </div>
+            ) : (
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                {scriptSummary ? (
+                  <Descriptions bordered size="small" column={{ xs: 1, lg: 2 }}>
+                    <Descriptions.Item label="标题">{scriptSummary.title || '未命名剧本'}</Descriptions.Item>
+                    <Descriptions.Item label="基调">{scriptSummary.tone || '未设置'}</Descriptions.Item>
+                    <Descriptions.Item label="总时长">{scriptSummary.total_duration || 0} 秒</Descriptions.Item>
+                    <Descriptions.Item label="角色数">{scriptSummary.character_count}</Descriptions.Item>
+                    <Descriptions.Item label="场景数">{scriptSummary.scene_count}</Descriptions.Item>
+                    <Descriptions.Item label="主题">
+                      <Space wrap>
+                        {(scriptSummary.themes || []).map((theme) => (
+                          <Tag key={theme}>{theme}</Tag>
+                        ))}
+                      </Space>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="简介" span={2}>
+                      {scriptSummary.synopsis}
+                    </Descriptions.Item>
+                  </Descriptions>
+                ) : null}
+
+                {characterResolution?.message ? (
+                  <Alert
+                    type={characterResolution.needs_user_action ? 'warning' : temporaryCharacters.length ? 'info' : 'success'}
+                    showIcon
+                    message="角色来源分析"
+                    description={
+                      <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                        <Text>{characterResolution.message}</Text>
+                        {characterResolution.needs_user_action ? (
+                          <Space wrap>
+                            <Button size="small" onClick={() => navigate('/characters')}>
+                              去创建角色档案
+                            </Button>
+                            <Text type="secondary">如果继续生成，当前流程会缺少稳定角色模板，后续图像和视频一致性会更弱。</Text>
+                          </Space>
+                        ) : null}
+                      </Space>
+                    }
+                  />
+                ) : null}
+
+                {temporaryCharacters.length ? (
+                  <Card
+                    size="small"
+                    title="AI 临时角色草稿"
+                    extra={<Text type="secondary">当前项目可直接使用，也可以保存为正式角色档案</Text>}
+                  >
+                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                      {temporaryCharacters.map((profile) => (
+                        <Card
+                          key={profile.id}
+                          type="inner"
+                          size="small"
+                          title={
+                            <Space wrap>
+                              <Tag color="gold">{profile.name}</Tag>
+                              <Tag>临时角色</Tag>
+                              {profile.role ? <Tag color="processing">{profile.role}</Tag> : null}
+                            </Space>
+                          }
+                          extra={
+                            <Button
+                              size="small"
+                              loading={savingTemporaryCharacterIds.includes(profile.id)}
+                              onClick={() => handleSaveTemporaryCharacter(profile)}
+                            >
+                              保存到角色档案库
+                            </Button>
+                          }
+                        >
+                          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                            {profile.llm_summary ? <Text>{profile.llm_summary}</Text> : null}
+                            {profile.must_keep.length ? (
+                              <Text type="secondary">必须保持：{profile.must_keep.join('、')}</Text>
+                            ) : null}
+                            {profile.image_prompt_base ? (
+                              <Text type="secondary">图像基底：{profile.image_prompt_base}</Text>
+                            ) : null}
+                            {profile.video_prompt_base ? (
+                              <Text type="secondary">视频基底：{profile.video_prompt_base}</Text>
+                            ) : null}
+                          </Space>
+                        </Card>
+                      ))}
+                    </Space>
+                  </Card>
+                ) : null}
+
+                <TextArea
+                  rows={24}
+                  value={scriptDraft}
+                  onChange={(event) => setScriptDraft(event.target.value)}
+                  placeholder="生成后的完整剧本会展示在这里，您可以修改后再进入下一步。"
+                />
+              </Space>
+            )}
+          </Card>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <Button onClick={() => setCurrentStep(0)}>返回输入</Button>
+            <Space wrap>
+              <Button loading={scriptLoading} disabled={!userInput.trim()} onClick={handleGenerateScript}>
+                重新生成剧本
+              </Button>
+              <Button type="primary" loading={splitLoading} disabled={!scriptDraft.trim()} onClick={handleSplitScript}>
+                通过剧本并拆分片段
+              </Button>
+            </Space>
+          </div>
+        </Space>
+      )
+    }
+
+    if (currentStep === 2) {
+      return (
+        <Space direction="vertical" size={20} style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message={`当前已拆分为 ${segments.length} 个片段。片段不做时间重叠，只保留画面连续性。`}
+          />
+          <Card title="视频片段审核">
+            {splitLoading ? (
+              <div style={{ padding: '72px 0', textAlign: 'center' }}>
+                <Spin size="large" />
+                <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>正在拆分视频片段</Paragraph>
+              </div>
+            ) : segments.length ? (
+              <Collapse
+                accordion
+                items={segments.map((segment, index) => ({
+                  key: String(segment.segment_number),
+                  label: (
+                    <Space wrap>
+                      <Tag color="processing">片段 {segment.segment_number}</Tag>
+                      <Text>{segment.title}</Text>
+                      <Tag>{segment.duration} 秒</Tag>
+                    </Space>
+                  ),
+                  children: (
+                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                      <Input
+                        value={segment.title}
+                        onChange={(event) => handleSegmentChange(index, { title: event.target.value })}
+                        placeholder="片段标题"
+                      />
+                      <Row gutter={[12, 12]}>
+                        <Col xs={24} md={8}>
+                          <Text>片段时长</Text>
+                          <InputNumber
+                            min={1}
+                            max={30}
+                            style={{ width: '100%', marginTop: 8 }}
+                            value={segment.duration}
+                            onChange={(value) => handleSegmentChange(index, { duration: Number(value) || segment.duration })}
+                          />
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Text>开始时间</Text>
+                          <InputNumber
+                            min={0}
+                            style={{ width: '100%', marginTop: 8 }}
+                            value={segment.start_time}
+                            onChange={(value) => handleSegmentChange(index, { start_time: Number(value) || 0 })}
+                          />
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Text>结束时间</Text>
+                          <InputNumber
+                            min={0}
+                            style={{ width: '100%', marginTop: 8 }}
+                            value={segment.end_time}
+                            onChange={(value) => handleSegmentChange(index, { end_time: Number(value) || 0 })}
+                          />
+                        </Col>
+                      </Row>
+                      <TextArea
+                        rows={5}
+                        value={segment.description}
+                        onChange={(event) => handleSegmentChange(index, { description: event.target.value })}
+                        placeholder="片段描述"
+                      />
+                      <TextArea
+                        rows={6}
+                        value={segment.video_prompt}
+                        onChange={(event) => handleSegmentChange(index, { video_prompt: event.target.value })}
+                        placeholder="视频 Prompt"
+                      />
+                      <Row gutter={[12, 12]}>
+                        <Col xs={24} md={12}>
+                          <TextArea
+                            rows={3}
+                            value={segment.continuity_from_prev}
+                            onChange={(event) => handleSegmentChange(index, { continuity_from_prev: event.target.value })}
+                            placeholder="承接上一片段"
+                          />
+                        </Col>
+                        <Col xs={24} md={12}>
+                          <TextArea
+                            rows={3}
+                            value={segment.continuity_to_next}
+                            onChange={(event) => handleSegmentChange(index, { continuity_to_next: event.target.value })}
+                            placeholder="过渡到下一片段"
+                          />
+                        </Col>
+                      </Row>
+                    </Space>
+                  ),
+                }))}
+              />
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先生成片段" />
+            )}
+          </Card>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <Button onClick={() => setCurrentStep(1)}>返回剧本</Button>
+            <Space wrap>
+              <Button loading={splitLoading} disabled={!scriptDraft.trim()} onClick={handleSplitScript}>
+                重新生成片段
+              </Button>
+              <Button type="primary" icon={<FileImageOutlined />} loading={keyframeLoading} onClick={handleGenerateKeyframes}>
+                通过片段并生成首尾帧
+              </Button>
+            </Space>
+          </div>
+        </Space>
+      )
+    }
+
+    if (currentStep === 3) {
+      const firstKeyframe = keyframes[0]
+      const chainedKeyframes = keyframes.slice(1)
+
+      return (
+        <Space direction="vertical" size={20} style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="当前只预生成第一段首帧；后续片段首帧会在渲染时自动复用上一段返回的尾帧。"
+          />
+          <Card title="首帧与串联方式确认">
+            {keyframeLoading ? (
+              <div style={{ padding: '72px 0', textAlign: 'center' }}>
+                <Spin size="large" />
+                <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>正在生成首段首帧</Paragraph>
+              </div>
+            ) : keyframes.length ? (
+              <Space direction="vertical" size={20} style={{ width: '100%' }}>
+                {firstKeyframe ? (
+                  <Card
+                    type="inner"
+                    title={
+                      <Space wrap>
+                        <Tag color="processing">片段 1</Tag>
+                        <Text>{firstKeyframe.title}</Text>
+                        <Tag color="success">唯一预生成首帧</Tag>
+                      </Space>
+                    }
+                  >
+                    <Row gutter={[20, 20]}>
+                      <Col xs={24} lg={13}>
+                        <Text strong>第一段首帧</Text>
+                        <div style={{ marginTop: 12 }}>
+                          <PreviewAsset
+                            assetUrl={firstKeyframe.start_frame.asset_url}
+                            assetType={firstKeyframe.start_frame.asset_type}
+                            title={`${firstKeyframe.title} 首帧`}
+                          />
+                        </div>
+                      </Col>
+                      <Col xs={24} lg={11}>
+                        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                          <Alert
+                            type="success"
+                            showIcon
+                            message="这一张图将作为整条长视频的起始画面"
+                            description={firstKeyframe.continuity_notes}
+                          />
+                          <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                            {firstKeyframe.start_frame.prompt || '未提供提示词'}
+                          </Paragraph>
+                          <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                            来源: {firstKeyframe.start_frame.source || 'unknown'}
+                            {firstKeyframe.start_frame.notes ? ` | ${firstKeyframe.start_frame.notes}` : ''}
+                          </Paragraph>
+                          <Paragraph style={{ marginBottom: 0 }}>
+                            之后的每一段都不会再单独预生成首帧，而是在视频生成完成后，自动取上一段返回的尾帧作为下一段首帧。
+                          </Paragraph>
+                        </Space>
+                      </Col>
+                    </Row>
+                  </Card>
+                ) : null}
+
+                {chainedKeyframes.length ? (
+                  <Card type="inner" title="后续片段串联方式">
+                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                      {chainedKeyframes.map((bundle) => (
+                        <Card
+                          key={`chain-${bundle.segment_number}`}
+                          size="small"
+                          className="pipeline-chain-card"
+                        >
+                          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                            <Space wrap>
+                              <Tag color="processing">片段 {bundle.segment_number}</Tag>
+                              <Text strong>{bundle.title}</Text>
+                            </Space>
+                            <Paragraph style={{ marginBottom: 0 }}>
+                              该片段首帧不单独生成，将直接复用上一片段返回的尾帧。
+                            </Paragraph>
+                            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                              {bundle.start_frame.notes || bundle.continuity_notes}
+                            </Paragraph>
+                          </Space>
+                        </Card>
+                      ))}
+                    </Space>
+                  </Card>
+                ) : null}
+              </Space>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先生成首段首帧" />
+            )}
+          </Card>
+
+          <Card title="渲染参数">
+            <Row gutter={[16, 16]}>
+              <Col xs={24} md={8}>
+                <Text>视频 provider</Text>
+                <Select
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={provider}
+                  onChange={setProvider}
+                  options={[
+                    { value: 'auto', label: '自动选择' },
+                    { value: 'doubao', label: '豆包 Seedance' },
+                    { value: 'local', label: '本地占位预览' },
+                  ]}
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text>输出分辨率</Text>
+                <Select
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={resolution}
+                  onChange={setResolution}
+                  options={[
+                    { value: '480p', label: '480p' },
+                    { value: '720p', label: '720p' },
+                    { value: '1080p', label: '1080p' },
+                  ]}
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text>画幅比例</Text>
+                <Select
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={aspectRatio}
+                  onChange={setAspectRatio}
+                  options={[
+                    { value: '16:9', label: '16:9' },
+                    { value: '9:16', label: '9:16' },
+                    { value: '1:1', label: '1:1' },
+                    { value: '4:3', label: '4:3' },
+                  ]}
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text>豆包模型</Text>
+                <Select
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={providerModel}
+                  onChange={setProviderModel}
+                  options={[
+                    { value: 'doubao-seedance-1-5-pro-251215', label: 'Seedance 1.5 Pro' },
+                    { value: 'doubao-seedance-1-5-lite-241115', label: 'Seedance 1.5 Lite' },
+                    { value: 'doubao-seedance-1-0-lite-i2v-250428', label: 'Seedance 1.0 Lite I2V' },
+                  ]}
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text>服务等级</Text>
+                <Select
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={serviceTier}
+                  onChange={setServiceTier}
+                  options={[
+                    { value: 'default', label: 'default' },
+                    { value: 'flex', label: 'flex' },
+                  ]}
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text>随机种子</Text>
+                <InputNumber
+                  style={{ width: '100%', marginTop: 8 }}
+                  value={seedInput}
+                  onChange={(value) => setSeedInput(value === null ? null : Number(value))}
+                  placeholder="留空则随机"
+                />
+              </Col>
+              <Col xs={24}>
+                <Space wrap size="large">
+                  <Space>
+                    <Switch checked={watermark} onChange={setWatermark} />
+                    <Text>水印</Text>
+                  </Space>
+                  <Space>
+                    <Switch checked={cameraFixed} onChange={setCameraFixed} />
+                    <Text>固定镜头</Text>
+                  </Space>
+                  <Space>
+                    <Switch checked={generateAudio} onChange={setGenerateAudio} />
+                    <Text>生成音频</Text>
+                  </Space>
+                  <Space>
+                    <Switch checked value disabled />
+                    <Text>返回尾帧（串联模式固定开启）</Text>
+                  </Space>
+                </Space>
+              </Col>
+            </Row>
+          </Card>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <Button onClick={() => setCurrentStep(2)}>返回片段</Button>
+            <Space wrap>
+              <Button loading={keyframeLoading} disabled={!segments.length} onClick={handleGenerateKeyframes}>
+                重新生成首帧
+              </Button>
+              <Button type="primary" icon={<VideoCameraOutlined />} loading={renderStarting} onClick={handleStartRender}>
+                开始生成视频
+              </Button>
+            </Space>
+          </div>
+        </Space>
+      )
+    }
+
+    if (currentStep === 4) {
+      return (
+        <Space direction="vertical" size={20} style={{ width: '100%' }}>
+          <Card title="渲染进度">
+            {renderStatus ? (
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Space wrap>
+                  <Tag color={statusColorMap[renderStatus.status] || 'default'}>{renderStatus.status}</Tag>
+                  <Tag>{renderStatus.current_step}</Tag>
+                  <Tag>渲染器: {renderStatus.renderer || 'pending'}</Tag>
+                  <Tag>任务 ID: {renderStatus.task_id}</Tag>
+                </Space>
+                <Progress percent={renderStatus.progress} status={renderStatus.status === 'failed' ? 'exception' : undefined} />
+                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  当前已启用严格模式。`auto` 或 `doubao` 只接受真实视频结果；只有显式选择 `local` 时才会生成本地预览。
+                </Paragraph>
+                {renderStatus.fallback_used ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="本次任务发生了生成降级。"
+                    description={(renderStatus.warnings || []).join('；') || '请检查 provider 配置、账号权限和关键帧输入。'}
+                  />
+                ) : null}
+              </Space>
+            ) : (
+              <div style={{ padding: '72px 0', textAlign: 'center' }}>
+                <Spin size="large" />
+                <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>渲染任务启动中</Paragraph>
+              </div>
+            )}
+          </Card>
+
+          {renderStatus?.clips?.length ? (
+            <Card title="片段生成结果">
+              <Collapse
+                accordion
+                items={renderStatus.clips.map((clip: RenderClipResult) => ({
+                  key: String(clip.clip_number),
+                  label: (
+                    <Space wrap>
+                      <Tag color="processing">片段 {clip.clip_number}</Tag>
+                      <Text>{clip.title}</Text>
+                      <Tag>{clip.duration} 秒</Tag>
+                      <Tag color={statusColorMap[clip.status] || 'default'}>{clip.status}</Tag>
+                      {clip.provider ? <Tag>{clip.provider}</Tag> : null}
+                    </Space>
+                  ),
+                  children: (
+                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                      <Paragraph style={{ marginBottom: 0 }}>{clip.description}</Paragraph>
+                      <PreviewAsset assetUrl={clip.asset_url} assetType={clip.asset_type} title={clip.title} />
+                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                        <Button
+                          icon={<DownloadOutlined />}
+                          onClick={() => downloadAsset(clip.asset_url, clip.asset_filename || `${clip.title}.mp4`)}
+                        >
+                          下载该片段
+                        </Button>
+                      </div>
+                      <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                        {clip.video_prompt}
+                      </Paragraph>
+                    </Space>
+                  ),
+                }))}
+              />
+            </Card>
+          ) : null}
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <Button onClick={() => setCurrentStep(3)}>返回参数</Button>
+            <Space wrap>
+              <Button loading={renderStarting} disabled={!segments.length} onClick={handleStartRender}>
+                重新生成视频
+              </Button>
+              <Button type="primary" disabled={renderStatus?.status !== 'completed'} onClick={() => setCurrentStep(5)}>
+                查看最终结果
+              </Button>
+            </Space>
+          </div>
+        </Space>
+      )
+    }
+
+    return (
+      <Space direction="vertical" size={20} style={{ width: '100%' }}>
+        <Card title="最终成片">
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <PreviewAsset assetUrl={finalPreviewUrl} assetType={finalPreviewType} title={`${projectTitle} 最终合成`} />
+            <Text type="secondary">合成文件：{renderStatus?.final_output?.asset_filename || '尚未生成'}</Text>
+            <Text type="secondary">
+              输出模式：{renderStatus?.final_output?.output_mode === 'video' ? '真实视频合成' : '本地预览合成（仅 local 模式）'}
+              {renderStatus?.final_output?.provider ? ` | Provider: ${renderStatus.final_output.provider}` : ''}
+            </Text>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Button
+                type="primary"
+                icon={<DownloadOutlined />}
+                disabled={!finalPreviewUrl}
+                onClick={() =>
+                  downloadAsset(
+                    finalPreviewUrl,
+                    renderStatus?.final_output?.asset_filename || `${projectTitle || 'final_output'}.mp4`,
+                  )
+                }
+              >
+                下载最终成片
+              </Button>
+            </div>
+          </Space>
+        </Card>
+
+        {renderStatus?.clips?.length ? (
+          <Card title="片段明细">
+            <Collapse
+              accordion
+              items={renderStatus.clips.map((clip: RenderClipResult) => ({
+                key: String(clip.clip_number),
+                label: (
+                  <Space wrap>
+                    <Tag color="processing">片段 {clip.clip_number}</Tag>
+                    <Text>{clip.title}</Text>
+                    {clip.provider ? <Tag>{clip.provider}</Tag> : null}
+                  </Space>
+                ),
+                children: (
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <PreviewAsset assetUrl={clip.asset_url} assetType={clip.asset_type} title={clip.title} />
+                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <Button
+                        icon={<DownloadOutlined />}
+                        onClick={() => downloadAsset(clip.asset_url, clip.asset_filename || `${clip.title}.mp4`)}
+                      >
+                        下载该片段
+                      </Button>
+                    </div>
+                  </Space>
+                ),
+              }))}
+            />
+          </Card>
+        ) : null}
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+          <Button onClick={() => setCurrentStep(4)}>返回渲染进度</Button>
+          <Space wrap>
+            <Button loading={renderStarting} disabled={!segments.length} onClick={handleStartRender}>
+              重新生成视频
+            </Button>
+            <Button type="primary" icon={<RightOutlined />} onClick={handleReset}>
+              开始新的项目
+            </Button>
+          </Space>
+        </div>
+      </Space>
+    )
+  }
+
+  if (projectHydrating) {
+    return (
+      <Card>
+        <div style={{ padding: '96px 0', textAlign: 'center' }}>
+          <Spin size="large" />
+          <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>正在恢复当前项目进度</Paragraph>
+        </div>
+      </Card>
+    )
+  }
+
+  const projectStats = [
+    { label: '已选角色', value: selectedCharacterIds.length },
+    { label: '已选场景', value: selectedSceneIds.length },
+    { label: '参考图', value: referenceImages.length },
+    { label: '片段数', value: segments.length },
+    { label: '关键帧组', value: keyframes.length },
+  ]
+
+  return (
+    <div className="pipeline-shell">
+      <Card
+        className="pipeline-hero-card"
+        style={{
+          background: 'linear-gradient(135deg, #10233f 0%, #1d4f91 55%, #d8b25a 100%)',
+          border: 'none',
+        }}
+        bodyStyle={{ padding: 28 }}
+      >
+        <Row justify="space-between" align="middle" gutter={[16, 16]}>
+          <Col xs={24} lg={16}>
+            <Title level={2} style={{ marginBottom: 8, color: '#fff' }}>
+              端到端视频生成主流程
+            </Title>
+            <Paragraph style={{ color: 'rgba(255,255,255,0.82)', fontSize: 15, marginBottom: 0 }}>
+              当前页面只保留单条可执行主链。每次只处理一个步骤，减少来回滚动和跨步骤干扰。
+            </Paragraph>
+            <Space wrap style={{ marginTop: 16 }}>
+              <Tag color="gold">项目：{projectTitle || '未命名项目'}</Tag>
+              <Tag color="blue">{selectedProjectId ? `ID: ${selectedProjectId}` : '尚未持久化，编辑后会自动创建草稿'}</Tag>
+            </Space>
+          </Col>
+          <Col>
+            <Space>
+              <Button icon={<FolderOpenOutlined />} onClick={() => navigate('/projects')}>
+                项目列表
+              </Button>
+              <Button onClick={() => navigate('/characters/library')}>角色档案库</Button>
+              <Button icon={<PlusOutlined />} onClick={() => void handleReset()}>
+                新建项目
+              </Button>
+            </Space>
+          </Col>
+        </Row>
+      </Card>
+
+      {error ? <Alert type="error" showIcon message={error} /> : null}
+
+      <Modal
+        title="角色确认"
+        open={characterConfirmOpen}
+        width={860}
+        onCancel={() => setCharacterConfirmOpen(false)}
+        footer={
+          <Space wrap>
+            <Button onClick={() => setCharacterConfirmOpen(false)}>取消</Button>
+            <Button onClick={() => navigate('/characters/library')}>去角色档案库</Button>
+            <Button type="primary" loading={scriptLoading} onClick={() => void handleConfirmCharactersAndGenerate()}>
+              确认角色并生成剧本
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          {characterPrepareResult?.character_resolution?.message ? (
+            <Alert
+              type={characterPrepareResult.character_resolution.needs_user_action ? 'warning' : 'info'}
+              showIcon
+              message="本次角色分析结果"
+              description={characterPrepareResult.character_resolution.message}
+            />
+          ) : null}
+
+          <Card
+            size="small"
+            title={`正式角色档案 (${characterPrepareResult?.library_character_profiles?.length || 0})`}
+            extra={<Text type="secondary">勾选后作为正式角色约束进入剧本生成</Text>}
+          >
+            {characterPrepareResult?.library_character_profiles?.length ? (
+              <Checkbox.Group
+                style={{ width: '100%' }}
+                value={confirmedLibraryCharacterIds}
+                onChange={(values) => setConfirmedLibraryCharacterIds(values as string[])}
+              >
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {characterPrepareResult.library_character_profiles.map((profile) => (
+                    <Card key={profile.id} type="inner" size="small">
+                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                        <Checkbox value={profile.id}>
+                          <Space wrap>
+                            <Text strong>{profile.name}</Text>
+                            {profile.role ? <Tag color="processing">{profile.role}</Tag> : null}
+                            <Tag color="success">正式档案</Tag>
+                          </Space>
+                        </Checkbox>
+                        {profile.llm_summary ? <Text type="secondary">{profile.llm_summary}</Text> : null}
+                        {profile.must_keep.length ? <Text type="secondary">必须保持：{profile.must_keep.join('、')}</Text> : null}
+                      </Space>
+                    </Card>
+                  ))}
+                </Space>
+              </Checkbox.Group>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未匹配到正式角色档案" />
+            )}
+          </Card>
+
+          <Card
+            size="small"
+            title={`AI 临时角色草稿 (${characterPrepareResult?.temporary_character_profiles?.length || 0})`}
+            extra={<Text type="secondary">可直接用于本次生成，也可转存为正式档案</Text>}
+          >
+            {characterPrepareResult?.temporary_character_profiles?.length ? (
+              <Checkbox.Group
+                style={{ width: '100%' }}
+                value={confirmedTemporaryCharacterIds}
+                onChange={(values) => setConfirmedTemporaryCharacterIds(values as string[])}
+              >
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {characterPrepareResult.temporary_character_profiles.map((profile) => (
+                    <Card
+                      key={profile.id}
+                      type="inner"
+                      size="small"
+                      extra={
+                        <Button
+                          size="small"
+                          loading={savingTemporaryCharacterIds.includes(profile.id)}
+                          onClick={() => void handleSaveTemporaryCharacter(profile)}
+                        >
+                          保存到角色档案库
+                        </Button>
+                      }
+                    >
+                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                        <Checkbox value={profile.id}>
+                          <Space wrap>
+                            <Text strong>{profile.name}</Text>
+                            {profile.role ? <Tag color="processing">{profile.role}</Tag> : null}
+                            <Tag color="gold">临时草稿</Tag>
+                          </Space>
+                        </Checkbox>
+                        {profile.llm_summary ? <Text type="secondary">{profile.llm_summary}</Text> : null}
+                        {profile.must_keep.length ? <Text type="secondary">必须保持：{profile.must_keep.join('、')}</Text> : null}
+                      </Space>
+                    </Card>
+                  ))}
+                </Space>
+              </Checkbox.Group>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未生成临时角色草稿" />
+            )}
+          </Card>
+
+          <Alert
+            type="info"
+            showIcon
+            message="确认说明"
+            description="你勾选的正式角色和临时角色会一起进入本次剧本生成。未勾选的角色不会参与生成。"
+          />
+        </Space>
+      </Modal>
+
+      <Card className="pipeline-flow-card" bodyStyle={{ padding: 20 }}>
+        <div className="pipeline-flow-header">
+          <div>
+            <Text type="secondary">流程导航</Text>
+            <div className="pipeline-flow-header__title">{stepItems[currentStep]?.title}</div>
+            <div className="pipeline-flow-header__subtitle">{stepItems[currentStep]?.subtitle}</div>
+          </div>
+          <Tag color="processing">STEP {currentStep + 1} / {stepItems.length}</Tag>
+        </div>
+
+        <div className="pipeline-flow-switcher">
+          <Button
+            shape="circle"
+            icon={<LeftOutlined />}
+            disabled={currentStep === 0}
+            onClick={() => {
+              setTransitionDirection('backward')
+              setCurrentStep(previousStepIndex)
+            }}
+          />
+
+          <div className="pipeline-flow-track" ref={flowTrackRef}>
+            {stepItems.map((item, index) => {
+              const active = index === currentStep
+              const finished = index < currentStep
+              const available = isStepAvailable(index)
+
+              return (
+                <button
+                  key={item.title}
+                  type="button"
+                  ref={(element) => {
+                    stepButtonRefs.current[index] = element
+                  }}
+                  className={[
+                    'pipeline-flow-step',
+                    active ? 'is-active' : '',
+                    finished ? 'is-finished' : '',
+                    !available ? 'is-disabled' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onClick={() => goToStep(index)}
+                  disabled={!available}
+                >
+                  <span className="pipeline-flow-step__number">{String(index + 1).padStart(2, '0')}</span>
+                  <span className="pipeline-flow-step__content">
+                    <span className="pipeline-flow-step__title">
+                      <span className="pipeline-flow-step__icon">{item.icon}</span>
+                      {item.title}
+                    </span>
+                    <span className="pipeline-flow-step__subtitle">{item.subtitle}</span>
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <Button
+            shape="circle"
+            icon={<RightOutlined />}
+            disabled={currentStep >= stepItems.length - 1 || !isStepAvailable(nextStepIndex)}
+            onClick={() => {
+              setTransitionDirection('forward')
+              goToStep(nextStepIndex)
+            }}
+          />
+        </div>
+
+        <div className="pipeline-flow-footer">
+          <div className="pipeline-flow-stats">
+            {projectStats.map((item) => (
+              <div className="pipeline-flow-stat" key={item.label}>
+                <span className="pipeline-flow-stat__label">{item.label}</span>
+                <span className="pipeline-flow-stat__value">{item.value}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="pipeline-flow-meta">
+            <div className="pipeline-flow-meta__item">
+              <span className="pipeline-flow-meta__label">项目</span>
+              <span className="pipeline-flow-meta__value">{projectTitle || '未命名项目'}</span>
+            </div>
+            <div className="pipeline-flow-meta__item">
+              <span className="pipeline-flow-meta__label">风格</span>
+              <span className="pipeline-flow-meta__value">{stylePreference || '未设置'}</span>
+            </div>
+            {renderStatus ? (
+              <div className="pipeline-flow-meta__item">
+                <span className="pipeline-flow-meta__label">任务</span>
+                <span className="pipeline-flow-meta__value">
+                  <Tag color={statusColorMap[renderStatus.status] || 'default'}>{renderStatus.status}</Tag>
+                  <Tag>{renderStatus.current_step}</Tag>
+                </span>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </Card>
+
+      <div className="pipeline-stage">
+        <div
+          key={`step-${currentStep}`}
+          className={[
+            'pipeline-stage__content',
+            transitionDirection === 'forward' ? 'is-forward' : 'is-backward',
+          ].join(' ')}
+        >
+          {renderStepContent()}
+        </div>
+      </div>
+    </div>
+  )
+}
