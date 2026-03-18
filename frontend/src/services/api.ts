@@ -120,10 +120,18 @@ export interface CharacterProfile {
   aliases: string[]
   profile_version: number
   source: string
+  display_image_url?: string
   reference_image_url: string
   reference_image_original_name: string
   three_view_image_url: string
   three_view_prompt: string
+  face_closeup_image_url?: string
+  identity_reference_images?: Array<{
+    type: string
+    label: string
+    url: string
+  }>
+  identity_anchor_pack?: Record<string, unknown>
   created_at: string
   updated_at: string
 }
@@ -241,6 +249,35 @@ export interface SegmentItem {
   status: string
 }
 
+export interface SegmentValidationCheck {
+  code: string
+  label: string
+  status: 'pass' | 'warning' | 'fail' | string
+  detail: string
+}
+
+export interface SegmentValidationReview {
+  segment_number: number
+  title: string
+  duration: number
+  status: 'pass' | 'warning' | 'fail' | string
+  summary: string
+  issues: string[]
+  suggestions: string[]
+}
+
+export interface SplitValidationReport {
+  status: 'pass' | 'warning' | 'fail' | string
+  summary: string
+  checks: SegmentValidationCheck[]
+  issues: string[]
+  suggestions: string[]
+  segment_reviews: SegmentValidationReview[]
+  source?: string
+  target_total_duration?: number | null
+  actual_total_duration?: number
+}
+
 export interface SplitScriptResponse {
   success: boolean
   message: string
@@ -250,6 +287,7 @@ export interface SplitScriptResponse {
   segment_count: number
   continuity_points: Array<Record<string, unknown>>
   segments: SegmentItem[]
+  validation_report?: SplitValidationReport | null
 }
 
 export interface KeyframeAsset {
@@ -376,6 +414,7 @@ export interface RenderClipResult {
 
 export interface RenderStatusResponse {
   task_id: string
+  project_id?: string
   project_title: string
   status: string
   progress: number
@@ -520,6 +559,7 @@ export const scriptPipelineApi = {
     reference_image_original_name?: string
     three_view_image_url?: string
     three_view_prompt?: string
+    face_closeup_image_url?: string
   }) => apiClient.post<CharacterMutationResponse>('/pipeline/characters', data),
 
   updateCharacter: (
@@ -561,6 +601,7 @@ export const scriptPipelineApi = {
       reference_image_original_name?: string
       three_view_image_url?: string
       three_view_prompt?: string
+      face_closeup_image_url?: string
     },
   ) => apiClient.put<CharacterMutationResponse>(`/pipeline/characters/${characterId}`, data),
 
@@ -728,6 +769,7 @@ export const scriptPipelineApi = {
   }) => apiClient.post<GenerateKeyframesResponse>('/pipeline/generate-keyframes', data),
 
   renderProject: (data: {
+    project_id?: string
     project_title: string
     provider?: string
     resolution?: string
@@ -748,6 +790,8 @@ export const scriptPipelineApi = {
   }) => apiClient.post<RenderStartResponse>('/pipeline/render', data),
 
   getRenderStatus: (taskId: string) => apiClient.get<RenderStatusResponse>(`/pipeline/render/${taskId}`),
+  cancelRenderTask: (taskId: string) => apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/cancel`),
+  retryRenderTask: (taskId: string) => apiClient.post<RenderStartResponse>(`/pipeline/render/${taskId}/retry`),
 
   healthCheck: () => apiClient.get('/pipeline/health'),
 }

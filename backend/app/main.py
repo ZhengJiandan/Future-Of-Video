@@ -13,6 +13,7 @@ import os
 from app.core.config import settings
 from app.db import init_db, close_db
 from app.api.api import api_router
+from app.services.pipeline_workflow import pipeline_workflow_service
 
 # 配置日志
 logging.basicConfig(
@@ -39,6 +40,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         raise
+
+    recovered = await pipeline_workflow_service.recover_interrupted_tasks()
+    for task_id in recovered.get("task_ids", []):
+        try:
+            await pipeline_workflow_service.start_render_task(task_id, mark_failed_on_enqueue_error=False)
+        except Exception as exc:
+            logger.error("Failed to re-enqueue recovered render task %s: %s", task_id, exc, exc_info=True)
+    if (
+        recovered.get("requeued")
+        or recovered.get("reset_processing")
+        or recovered.get("recovered_queued")
+        or recovered.get("recovered_dispatching")
+    ):
+        logger.warning(
+            "Render task recovery on startup: requeued=%s reset_processing=%s recovered_queued=%s recovered_dispatching=%s",
+            recovered.get("requeued", 0),
+            recovered.get("reset_processing", 0),
+            recovered.get("recovered_queued", 0),
+            recovered.get("recovered_dispatching", 0),
+        )
     
     # 创建上传目录
     upload_dir = settings.UPLOAD_DIR

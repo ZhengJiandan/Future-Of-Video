@@ -88,6 +88,8 @@ class DoubaoVideoGenerator:
         self.api_key = api_key or settings.DOUBAO_API_KEY or os.getenv("DOUBAO_API_KEY")
         self.model = model
         self.base_url = (base_url or settings.DOUBAO_BASE_URL or DEFAULT_DOUBAO_BASE_URL).rstrip("/")
+        self.debug_logging = bool(getattr(settings, "MODEL_DEBUG_LOGGING", True))
+        self.debug_max_chars = int(getattr(settings, "MODEL_DEBUG_MAX_CHARS", 20000))
 
         if not self.api_key:
             raise ValueError("DOUBAO_API_KEY 未配置，无法调用豆包视频生成接口")
@@ -99,6 +101,57 @@ class DoubaoVideoGenerator:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
+        )
+
+    def _truncate_for_log(self, value: str) -> str:
+        if len(value) <= self.debug_max_chars:
+            return value
+        return f"{value[:self.debug_max_chars]}\n...<truncated {len(value) - self.debug_max_chars} chars>"
+
+    def _sanitize_for_log(self, value: Any, *, parent_key: str = "") -> Any:
+        if isinstance(value, dict):
+            sanitized: Dict[str, Any] = {}
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if lowered == "authorization":
+                    sanitized[key] = "***"
+                    continue
+                if lowered in {"data", "binary"} and isinstance(item, str):
+                    sanitized[key] = f"<blob length={len(item)}>"
+                    continue
+                sanitized[key] = self._sanitize_for_log(item, parent_key=lowered)
+            return sanitized
+        if isinstance(value, list):
+            return [self._sanitize_for_log(item, parent_key=parent_key) for item in value]
+        if isinstance(value, str):
+            return self._truncate_for_log(value)
+        return value
+
+    def _json_for_log(self, payload: Any) -> str:
+        try:
+            raw = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, indent=2)
+        except Exception:
+            raw = str(payload)
+        return self._truncate_for_log(raw)
+
+    def _log_request(self, *, action: str, payload: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "Doubao video request | model=%s | action=%s\n%s",
+            self.model,
+            action,
+            self._json_for_log(payload),
+        )
+
+    def _log_response(self, *, action: str, payload: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "Doubao video response | model=%s | action=%s\n%s",
+            self.model,
+            action,
+            self._json_for_log(payload),
         )
     
     async def create_video_task(
@@ -166,6 +219,7 @@ class DoubaoVideoGenerator:
             
             logger.info(f"创建视频生成任务，模型: {self.model}")
             logger.info(f"内容: {json.dumps(content, ensure_ascii=False)[:200]}...")
+            self._log_request(action="create_video_task", payload=body)
             
             # 发送请求
             response = await self.client.post(
@@ -175,6 +229,7 @@ class DoubaoVideoGenerator:
             response.raise_for_status()
             
             data = response.json()
+            self._log_response(action="create_video_task", payload=data)
             logger.info(f"任务创建成功: {data.get('id')}")
             media = self._extract_media_fields(data)
             
@@ -216,12 +271,17 @@ class DoubaoVideoGenerator:
         - expired: 超时
         """
         try:
+            self._log_request(
+                action="get_task_status",
+                payload={"task_id": task_id, "url": f"{self.base_url}/contents/generations/tasks/{task_id}"},
+            )
             response = await self.client.get(
                 f"{self.base_url}/contents/generations/tasks/{task_id}"
             )
             response.raise_for_status()
             
             data = response.json()
+            self._log_response(action="get_task_status", payload=data)
             media = self._extract_media_fields(data)
             error_message = (
                 data.get("error_message")

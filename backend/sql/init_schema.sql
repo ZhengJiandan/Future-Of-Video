@@ -4,6 +4,7 @@
 -- 2. pipeline_projects
 -- 3. pipeline_character_profiles
 -- 4. pipeline_scene_profiles
+-- 5. pipeline_render_tasks
 
 CREATE DATABASE IF NOT EXISTS `delta_force_video`
   DEFAULT CHARACTER SET utf8mb4
@@ -81,6 +82,8 @@ CREATE TABLE IF NOT EXISTS `pipeline_character_profiles` (
   `three_view_image_url` VARCHAR(500) NULL,
   `three_view_image_path` VARCHAR(500) NULL,
   `three_view_prompt` TEXT NULL,
+  `face_closeup_image_url` VARCHAR(500) NULL,
+  `face_closeup_image_path` VARCHAR(500) NULL,
   `created_at` DATETIME NULL,
   `updated_at` DATETIME NULL,
   PRIMARY KEY (`id`),
@@ -125,4 +128,31 @@ CREATE TABLE IF NOT EXISTS `pipeline_scene_profiles` (
   PRIMARY KEY (`id`),
   KEY `ix_pipeline_scene_profiles_name` (`name`),
   KEY `ix_pipeline_scene_profiles_category` (`category`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `pipeline_render_tasks` (
+  `id` VARCHAR(50) NOT NULL,
+  `user_id` VARCHAR(50) NOT NULL,
+  `project_id` VARCHAR(50) NULL,
+  `project_title` VARCHAR(255) NOT NULL,
+  `segments` JSON NOT NULL,
+  `keyframes` JSON NOT NULL,
+  `character_profiles` JSON NOT NULL,
+  `scene_profiles` JSON NOT NULL,
+  `render_config` JSON NOT NULL,
+  `status` VARCHAR(50) NOT NULL DEFAULT 'queued',
+  `progress` DOUBLE NOT NULL DEFAULT 0,
+  `current_step` VARCHAR(255) NOT NULL DEFAULT '等待开始',
+  `renderer` VARCHAR(100) NOT NULL DEFAULT 'pending',
+  `clips` JSON NOT NULL,
+  `final_output` JSON NOT NULL,
+  `fallback_used` TINYINT(1) NOT NULL DEFAULT 0,
+  `warnings` JSON NOT NULL,
+  `error` TEXT NULL,
+  `created_at` DATETIME NULL,
+  `updated_at` DATETIME NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix_pipeline_render_tasks_user_id` (`user_id`),
+  KEY `ix_pipeline_render_tasks_project_id` (`project_id`),
+  KEY `ix_pipeline_render_tasks_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

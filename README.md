@@ -36,12 +36,13 @@
 SOURCE backend/sql/init_schema.sql;
 ```
 
-当前主链路现在需要四张表：
+当前主链路现在需要五张表：
 
 - `users`
 - `pipeline_projects`
 - `pipeline_character_profiles`
 - `pipeline_scene_profiles`
+- `pipeline_render_tasks`
 
 如果你之前已经执行过旧版 `init_schema.sql`，还需要额外执行一次：
 
@@ -63,21 +64,45 @@ SOURCE backend/sql/upgrade_user_auth_schema.sql;
 SOURCE backend/sql/upgrade_profile_category_schema.sql;
 ```
 
+如果你之前已经建过角色档案表，但还没有“面部特写锚点”字段，再执行一次：
+
+```sql
+SOURCE backend/sql/upgrade_character_anchor_pack_schema.sql;
+```
+
+如果你之前已经建过主链路表，但还没有渲染任务持久化表，再执行一次：
+
+```sql
+SOURCE backend/sql/upgrade_render_task_schema.sql;
+```
+
 ## 环境变量
 
 后端读取 `backend/.env`。
+仓库提供了可提交的模板文件：`backend/.env.example`。
 
 至少确认这些配置存在且正确：
 
 ```env
 DATABASE_URL=mysql+aiomysql://user:password@127.0.0.1:3306/delta_force_video
+CELERY_BROKER_URL=redis://127.0.0.1:6379/1
+CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/2
 DOUBAO_API_KEY=...
 DOUBAO_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 DOUBAO_MODEL=...
 DOUBAO_VIDEO_MODEL=...
+DOUBAO_READ_TIMEOUT=240
+DOUBAO_SCRIPT_READ_TIMEOUT=360
+DOUBAO_MAX_RETRIES=2
 NANOBANANA_API_KEY=...
 UPLOAD_DIR=uploads
 ```
+
+注意：
+
+- 不要把真实密钥提交到仓库。
+- 旧版本里如果已经提交过真实凭据，需要立即轮换。
+- `DEBUG` 现在接受 `true/false/debug/release` 这类值，`ENVIRONMENT` 也可作为 `ENV` 的别名。
 
 ## 启动方式
 
@@ -85,6 +110,7 @@ UPLOAD_DIR=uploads
 
 ```bash
 bash dev.sh backend
+bash dev.sh worker
 bash dev.sh frontend
 ```
 
@@ -99,6 +125,36 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 cd frontend
 npm run dev
 ```
+
+```bash
+cd backend
+celery -A app.celery_app:celery_app worker --loglevel=info --concurrency=2
+```
+
+现在渲染任务已经切到独立 Celery worker 执行：
+
+- API 进程只负责创建任务、入库和投递到队列
+- Celery worker 负责实际渲染和合成
+- 服务重启后，数据库中处于 `processing` 的任务会重置为 `queued`，并在启动时重新投递
+
+## 本地联调
+
+推荐按这个顺序做一次最小闭环联调：
+
+1. 启动基础依赖：MySQL、Redis，以及你配置的 Celery broker
+2. 执行数据库初始化或升级脚本，确认 `pipeline_render_tasks` 已存在
+3. 启动后端 API：`bash dev.sh backend`
+4. 启动 Celery worker：`bash dev.sh worker`
+5. 启动前端：`bash dev.sh frontend`
+6. 访问 `/api/v1/pipeline/health` 和 `/health`，确认 API 正常
+7. 在页面里走一遍“生成剧本 -> 拆片 -> 关键帧 -> 渲染”
+8. 观察后端日志和 worker 日志，确认任务经历 `queued -> processing -> completed`
+
+如果要验证异常链路，再补做这三项：
+
+1. 渲染过程中重启后端 API，确认任务会从数据库恢复并重新投递
+2. 在 `queued` 或 `processing` 状态点“取消任务”，确认任务变成 `cancelled`
+3. 对 `failed` 或 `cancelled` 的任务点“重试任务”，确认会生成新的 `task_id`
 
 ## 访问地址
 

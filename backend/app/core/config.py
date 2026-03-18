@@ -1,10 +1,12 @@
 """
 核心配置文件 - 开发测试版（使用SQLite）
 """
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
 from typing import List, Optional
 import os
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 
 ENV_FILE_PATH = Path(__file__).resolve().parents[2] / ".env"
@@ -16,8 +18,8 @@ class Settings(BaseSettings):
     # 应用基础配置
     APP_NAME: str = "三角洲视频生成系统"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = True  # 开发模式开启
-    ENV: str = "development"
+    DEBUG: bool = Field(default=True, validation_alias=AliasChoices("DEBUG"))
+    ENV: str = Field(default="development", validation_alias=AliasChoices("ENV", "ENVIRONMENT"))
     
     # 服务器配置
     HOST: str = "0.0.0.0"
@@ -27,7 +29,7 @@ class Settings(BaseSettings):
     # 数据库配置 - 使用 MySQL
     # URL 格式: mysql+aiomysql://用户名:密码@主机:端口/数据库名
     # 注意: 密码中的 @ 需要替换为 %40
-    DATABASE_URL: str = "mysql+aiomysql://delta_user:Delta123456@localhost:3306/delta_force_video"
+    DATABASE_URL: str = "mysql+aiomysql://user:password@127.0.0.1:3306/delta_force_video"
     # 开发测试可使用 SQLite：sqlite+aiosqlite:///./delta_force_video.db
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 10
@@ -37,7 +39,7 @@ class Settings(BaseSettings):
     REDIS_POOL_SIZE: int = 50
     
     # JWT认证配置
-    JWT_SECRET_KEY: str = "your-secret-key-change-in-production"
+    JWT_SECRET_KEY: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 1天
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -54,7 +56,7 @@ class Settings(BaseSettings):
     KELING_BASE_URL: str = "https://api.kelingai.com/v1"
 
     # NanoBanana 关键帧生成
-    NANOBANANA_API_KEY: Optional[str] = "sk-Pyi0dVMauiJVvmOW5aD80eD5B4E1477886Bc8a83A24eAbCa"
+    NANOBANANA_API_KEY: Optional[str] = None
     NANOBANANA_BASE_URL: str = "https://api.laozhang.ai/v1beta/models/gemini-3-pro-image-preview:generateContent"
     ALLOW_PLACEHOLDER_KEYFRAMES: bool = True
     
@@ -63,6 +65,13 @@ class Settings(BaseSettings):
     DOUBAO_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_MODEL: str = "doubao-seed-2-0-lite-260215"
     DOUBAO_VIDEO_MODEL: str = "doubao-seedance-1-5-pro-251215"
+    DOUBAO_CONNECT_TIMEOUT: float = 20.0
+    DOUBAO_READ_TIMEOUT: float = 240.0
+    DOUBAO_WRITE_TIMEOUT: float = 60.0
+    DOUBAO_POOL_TIMEOUT: float = 60.0
+    DOUBAO_SCRIPT_READ_TIMEOUT: float = 360.0
+    DOUBAO_MAX_RETRIES: int = 2
+    DOUBAO_RETRY_BACKOFF_SECONDS: float = 2.0
     KELING_MAX_DURATION: int = 10
     
     # 即梦AI
@@ -97,9 +106,11 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     LOG_FILE: Optional[str] = None
+    MODEL_DEBUG_LOGGING: bool = True
+    MODEL_DEBUG_MAX_CHARS: int = 20000
     
     # 安全配置
-    SECRET_KEY: str = "your-secret-key-change-in-production"
+    SECRET_KEY: str = "change-me-in-production"
     ALLOWED_HOSTS: List[str] = ["*"]
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:5173"]
     
@@ -112,6 +123,49 @@ class Settings(BaseSettings):
         env_file = str(ENV_FILE_PATH)
         case_sensitive = True
         extra = 'ignore'  # 忽略未定义的环境变量
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug_flag(cls, value):
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return True
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on", "debug", "development", "dev"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+            return False
+        raise ValueError("DEBUG must be a boolean-like value such as true/false/debug/release")
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value):
+        if value is None:
+            return value
+
+        raw = str(value).strip()
+        if not raw:
+            return raw
+
+        parsed = urlsplit(raw)
+        if not parsed.scheme.startswith("mysql"):
+            return raw
+
+        hostname = parsed.hostname or ""
+        if hostname != "localhost":
+            return raw
+
+        username = parsed.username or ""
+        password = parsed.password or ""
+        auth = username
+        if password:
+            auth = f"{auth}:{password}"
+        host = "127.0.0.1"
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        netloc = f"{auth}@{host}" if auth else host
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 # 全局配置实例

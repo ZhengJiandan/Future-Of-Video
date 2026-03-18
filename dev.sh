@@ -10,6 +10,10 @@ case "$COMMAND" in
     cd "$ROOT_DIR/backend"
     exec uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
     ;;
+  worker)
+    cd "$ROOT_DIR/backend"
+    exec celery -A app.celery_app:celery_app worker --loglevel=info --concurrency=2
+    ;;
   frontend)
     cd "$ROOT_DIR/frontend"
     exec npm run dev
@@ -22,9 +26,11 @@ case "$COMMAND" in
     cd "$ROOT_DIR"
     exec python3 -m py_compile \
       backend/app/main.py \
+      backend/app/celery_app.py \
       backend/app/api/api.py \
       backend/app/api/endpoints/script_pipeline.py \
       backend/app/services/pipeline_workflow.py \
+      backend/app/workers/render_tasks.py \
       backend/app/services/script_generator.py \
       backend/app/services/script_splitter.py \
       backend/app/services/video_merger.py \
@@ -39,6 +45,7 @@ case "$COMMAND" in
   *)
     echo "Usage:"
     echo "  bash dev.sh backend"
+    echo "  bash dev.sh worker"
     echo "  bash dev.sh frontend"
     echo "  bash dev.sh build-frontend"
     echo "  bash dev.sh check-backend"

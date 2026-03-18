@@ -33,13 +33,36 @@ from typing import Any, Dict, Iterable, List, Optional
 from xml.sax.saxutils import escape
 
 import httpx
+from sqlalchemy import select, update
 
 from app.core.config import settings
+from app.db.base import AsyncSessionLocal
+from app.models.pipeline_project import PipelineProject
+from app.models.pipeline_render_task import PipelineRenderTask
 from app.services.script_generator import FullScript, ScriptGenerator
 from app.services.script_splitter import ScriptSplitter, SplitConfig
 from app.services.video_merger import MergeOptions, VideoMergerService, VideoSegment as MergedVideoSegment
 
 logger = logging.getLogger(__name__)
+
+MAX_VIDEO_SEGMENT_DURATION = 10.0
+MAX_KEYFRAME_CHARACTER_ANCHOR_IMAGES = 6
+MAX_VIDEO_CHARACTER_ANCHOR_IMAGES = 4
+RECOVERABLE_QUEUED_STEPS = {
+    "",
+    "等待开始",
+    "等待重新投递",
+    "任务中断",
+    "任务入队失败",
+}
+CLAIMABLE_QUEUED_STEPS = set(RECOVERABLE_QUEUED_STEPS)
+DISPATCHING_STATUS = "dispatching"
+DISPATCHING_STEP = "正在提交到队列"
+SUBMITTED_TO_QUEUE_STEP = "已提交到队列，等待 worker 处理"
+
+
+class RenderTaskCancelledError(RuntimeError):
+    """渲染任务被用户取消。"""
 
 
 @dataclass
@@ -102,6 +125,8 @@ class RenderTaskState:
     """异步渲染任务状态。"""
 
     task_id: str
+    user_id: str
+    project_id: str
     project_title: str
     segments: List[Dict[str, Any]]
     keyframes: List[Dict[str, Any]]
@@ -126,6 +151,7 @@ class RenderTaskState:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "task_id": self.task_id,
+            "project_id": self.project_id,
             "project_title": self.project_title,
             "status": self.status,
             "progress": round(self.progress, 2),
@@ -152,8 +178,10 @@ class PipelineWorkflowService:
         self.tasks: Dict[str, RenderTaskState] = {}
         self.output_root = Path(settings.UPLOAD_DIR) / "generated" / "pipeline"
         self.reference_root = Path(settings.UPLOAD_DIR) / "generated" / "references"
+        self.identity_board_root = self.output_root / "identity_boards"
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.reference_root.mkdir(parents=True, exist_ok=True)
+        self.identity_board_root.mkdir(parents=True, exist_ok=True)
 
     async def save_reference_upload(
         self,
@@ -267,7 +295,7 @@ class PipelineWorkflowService:
         """将审核后的完整剧本拆分成片段。"""
         splitter = ScriptSplitter(
             SplitConfig(
-                max_segment_duration=max_segment_duration,
+                max_segment_duration=min(float(max_segment_duration), MAX_VIDEO_SEGMENT_DURATION),
                 min_segment_duration=3.0,
                 prefer_scene_boundary=True,
                 preserve_dialogue=True,
@@ -287,6 +315,7 @@ class PipelineWorkflowService:
             "segment_count": split_result.segment_count,
             "segments": segments,
             "continuity_points": split_result.continuity_points,
+            "validation_report": split_result.validation_report,
         }
 
     async def generate_keyframes(
@@ -375,9 +404,11 @@ class PipelineWorkflowService:
             "keyframes": [asdict(bundle) for bundle in keyframe_bundles],
         }
 
-    def create_render_task(
+    async def create_render_task(
         self,
         *,
+        user_id: str,
+        project_id: str = "",
         project_title: str,
         segments: List[Dict[str, Any]],
         keyframes: List[Dict[str, Any]],
@@ -394,6 +425,8 @@ class PipelineWorkflowService:
 
         state = RenderTaskState(
             task_id=task_id,
+            user_id=user_id,
+            project_id=project_id,
             project_title=project_title or "未命名项目",
             segments=normalized_segments,
             keyframes=normalized_keyframes,
@@ -421,15 +454,67 @@ class PipelineWorkflowService:
         )
 
         self.tasks[task_id] = state
+        await self._persist_render_task_state(user_id=user_id, state=state)
         return state
+
+    async def start_render_task(self, task_id: str, *, mark_failed_on_enqueue_error: bool = True) -> None:
+        state = self.tasks.get(task_id)
+        if state is None:
+            state = await self._load_render_task_state(task_id)
+        if state is None:
+            raise RuntimeError(f"渲染任务不存在: {task_id}")
+        if state.status == "completed":
+            return
+        if state.status in {"processing", DISPATCHING_STATUS}:
+            logger.info("Render task already processing in worker: %s", task_id)
+            return
+
+        claimed_state = await self._claim_render_task_for_dispatch(task_id)
+        if claimed_state is None:
+            latest_state = await self._load_render_task_state(task_id)
+            latest_status = latest_state.status if latest_state else "unknown"
+            logger.info("Render task already claimed or submitted elsewhere: %s (%s)", task_id, latest_status)
+            return
+        state = claimed_state
+
+        try:
+            from app.workers.render_tasks import enqueue_render_task
+            from app.workers.render_tasks import revoke_render_task
+
+            enqueue_render_task(task_id)
+            try:
+                await self._ensure_render_task_not_cancelled(task_id, state)
+            except RenderTaskCancelledError:
+                revoke_render_task(task_id, terminate=False)
+                return
+            state.status = "queued"
+            state.current_step = SUBMITTED_TO_QUEUE_STEP
+            state.error = ""
+            state.touch()
+            await self._persist_render_task_state(state=state)
+        except Exception as exc:
+            logger.error("Failed to enqueue render task %s: %s", task_id, exc, exc_info=True)
+            state.status = "failed" if mark_failed_on_enqueue_error else "queued"
+            state.current_step = "任务入队失败" if mark_failed_on_enqueue_error else "等待重新投递"
+            state.error = str(exc)
+            state.touch()
+            await self._persist_render_task_state(state=state)
+            raise
 
     async def run_render_task(self, task_id: str) -> None:
         """执行片段渲染与最终合成。"""
-        state = self.tasks[task_id]
+        state = self.tasks.get(task_id)
+        if state is None:
+            state = await self._load_render_task_state(task_id)
+        if state is None:
+            raise RuntimeError(f"渲染任务不存在: {task_id}")
+        await self._ensure_render_task_not_cancelled(task_id, state)
+
         state.status = "processing"
         state.current_step = "开始生成视频片段"
         state.progress = 5.0
         state.touch()
+        await self._persist_render_task_state(state=state)
 
         task_dir = self.output_root / task_id / "render"
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -443,10 +528,12 @@ class PipelineWorkflowService:
         try:
             total_segments = len(state.segments)
             for index, segment in enumerate(state.segments):
+                await self._ensure_render_task_not_cancelled(task_id, state)
                 clip_number = segment["segment_number"]
                 state.current_step = f"生成片段 {clip_number}/{total_segments}"
                 state.progress = 5.0 + (index / max(total_segments, 1)) * 75.0
                 state.touch()
+                await self._persist_render_task_state(state=state)
 
                 runtime_bundle = keyframe_map.get(clip_number)
                 if previous_last_frame:
@@ -470,6 +557,7 @@ class PipelineWorkflowService:
                     scene_profiles=state.scene_profiles,
                     render_config=state.render_config,
                 )
+                await self._ensure_render_task_not_cancelled(task_id, state)
 
                 state.clips[index].status = "completed"
                 state.clips[index].asset_url = clip_asset["asset_url"]
@@ -492,12 +580,13 @@ class PipelineWorkflowService:
                         end_frame=previous_last_frame,
                     )
                 state.touch()
+                await self._persist_render_task_state(state=state)
 
-                await asyncio.sleep(0.05)
-
+            await self._ensure_render_task_not_cancelled(task_id, state)
             state.current_step = "合并最终成片"
             state.progress = 85.0
             state.touch()
+            await self._persist_render_task_state(state=state)
 
             if self._can_merge_as_video(state.clips):
                 final_output = await self._merge_video_clips(
@@ -517,22 +606,202 @@ class PipelineWorkflowService:
                 else:
                     raise RuntimeError("存在未生成成功的视频片段，已停止最终合成")
 
+            await self._ensure_render_task_not_cancelled(task_id, state)
             state.final_output = final_output
             state.status = "completed"
             state.progress = 100.0
             state.current_step = "完成"
             state.touch()
+            await self._persist_render_task_state(state=state)
+        except RenderTaskCancelledError:
+            state.status = "cancelled"
+            state.current_step = "已取消"
+            state.error = ""
+            self._mark_unfinished_clips_cancelled(state)
+            state.touch()
+            await self._persist_render_task_state(state=state)
         except Exception as exc:
             logger.error("Render task failed: %s", exc, exc_info=True)
             state.status = "failed"
             state.error = str(exc)
             state.current_step = "失败"
             state.touch()
+            await self._persist_render_task_state(state=state)
 
-    def get_render_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+    async def cancel_render_task(self, task_id: str, *, user_id: str) -> Optional[RenderTaskState]:
+        state = self.tasks.get(task_id)
+        if state is None:
+            state = await self._load_render_task_state(task_id)
+        if state is None or state.user_id != user_id:
+            return None
+        if state.status in {"completed", "failed", "cancelled"}:
+            return state
+
+        state.status = "cancelled"
+        state.current_step = "已取消"
+        state.error = ""
+        self._mark_unfinished_clips_cancelled(state)
+        state.touch()
+        await self._persist_render_task_state(state=state)
+
+        try:
+            from app.workers.render_tasks import revoke_render_task
+
+            revoke_render_task(task_id, terminate=False)
+        except Exception as exc:
+            logger.warning("Failed to revoke render task %s: %s", task_id, exc)
+        return state
+
+    async def retry_render_task(self, task_id: str, *, user_id: str) -> Optional[RenderTaskState]:
+        state = self.tasks.get(task_id)
+        if state is None:
+            state = await self._load_render_task_state(task_id)
+        if state is None or state.user_id != user_id:
+            return None
+        if state.status not in {"failed", "cancelled"}:
+            raise RuntimeError("只有失败或已取消的任务才可以重试")
+
+        new_state = await self.create_render_task(
+            user_id=state.user_id,
+            project_id=state.project_id,
+            project_title=state.project_title,
+            segments=state.segments,
+            keyframes=state.keyframes,
+            character_profiles=state.character_profiles,
+            scene_profiles=state.scene_profiles,
+            render_config=state.render_config,
+        )
+        await self.start_render_task(new_state.task_id)
+        return new_state
+
+    async def get_render_task(self, task_id: str, *, user_id: str) -> Optional[Dict[str, Any]]:
         """获取任务状态。"""
         state = self.tasks.get(task_id)
-        return state.to_dict() if state else None
+        if state and state.user_id == user_id:
+            return state.to_dict()
+        if state and state.user_id != user_id:
+            return None
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PipelineRenderTask).where(
+                    PipelineRenderTask.id == task_id,
+                    PipelineRenderTask.user_id == user_id,
+                )
+            )
+            task = result.scalar_one_or_none()
+            return task.to_dict() if task else None
+
+    async def recover_interrupted_tasks(self) -> Dict[str, Any]:
+        async with AsyncSessionLocal() as db:
+            queued_result = await db.execute(
+                select(PipelineRenderTask).where(
+                    PipelineRenderTask.status == "queued"
+                )
+            )
+            queued_tasks = queued_result.scalars().all()
+            recoverable_queued_ids: List[str] = []
+            for task in queued_tasks:
+                current_step = str(task.current_step or "").strip()
+                if current_step in RECOVERABLE_QUEUED_STEPS:
+                    task.error = "服务启动时检测到任务尚未真正入队，已自动重新投递"
+                    task.updated_at = datetime.utcnow()
+                    recoverable_queued_ids.append(task.id)
+
+            dispatching_result = await db.execute(
+                select(PipelineRenderTask).where(
+                    PipelineRenderTask.status == DISPATCHING_STATUS
+                )
+            )
+            dispatching_tasks = dispatching_result.scalars().all()
+            recovered_dispatching_ids: List[str] = []
+            for task in dispatching_tasks:
+                task.status = "queued"
+                task.current_step = "等待重新投递"
+                task.error = "服务启动时检测到任务卡在入队阶段，已自动重新投递"
+                task.updated_at = datetime.utcnow()
+                recovered_dispatching_ids.append(task.id)
+
+            result = await db.execute(
+                select(PipelineRenderTask).where(
+                    PipelineRenderTask.status == "processing"
+                )
+            )
+            processing_tasks = result.scalars().all()
+            reset_processing_count = 0
+            for task in processing_tasks:
+                task.status = "queued"
+                task.current_step = "任务中断"
+                task.error = "服务重启后自动恢复执行"
+                task.updated_at = datetime.utcnow()
+                reset_processing_count += 1
+
+            if recoverable_queued_ids or recovered_dispatching_ids or reset_processing_count:
+                await db.commit()
+
+        task_ids: List[str] = []
+        for task_id in [*recoverable_queued_ids, *recovered_dispatching_ids, *[task.id for task in processing_tasks]]:
+            if task_id not in task_ids:
+                task_ids.append(task_id)
+        return {
+            "requeued": len(task_ids),
+            "reset_processing": reset_processing_count,
+            "recovered_queued": len(recoverable_queued_ids),
+            "recovered_dispatching": len(recovered_dispatching_ids),
+            "task_ids": task_ids,
+        }
+
+    async def _claim_render_task_for_dispatch(self, task_id: str) -> Optional[RenderTaskState]:
+        claimed_at = datetime.utcnow()
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                update(PipelineRenderTask)
+                .where(
+                    PipelineRenderTask.id == task_id,
+                    PipelineRenderTask.status == "queued",
+                    PipelineRenderTask.current_step.in_(list(CLAIMABLE_QUEUED_STEPS)),
+                )
+                .values(
+                    status=DISPATCHING_STATUS,
+                    current_step=DISPATCHING_STEP,
+                    updated_at=claimed_at,
+                )
+            )
+            if not result.rowcount:
+                await db.rollback()
+                return None
+            await db.commit()
+
+        claimed_state = await self._load_render_task_state(task_id)
+        if claimed_state is not None:
+            claimed_state.status = DISPATCHING_STATUS
+            claimed_state.current_step = DISPATCHING_STEP
+            claimed_state.updated_at = claimed_at.isoformat()
+            self.tasks[task_id] = claimed_state
+        return claimed_state
+
+    async def _ensure_render_task_not_cancelled(
+        self,
+        task_id: str,
+        state: Optional[RenderTaskState] = None,
+    ) -> None:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PipelineRenderTask.status, PipelineRenderTask.current_step).where(
+                    PipelineRenderTask.id == task_id
+                )
+            )
+            row = result.one_or_none()
+        if row and row[0] == "cancelled":
+            if state is not None:
+                state.status = "cancelled"
+                state.current_step = row[1] or "已取消"
+            raise RenderTaskCancelledError(f"渲染任务已取消: {task_id}")
+
+    def _mark_unfinished_clips_cancelled(self, state: RenderTaskState) -> None:
+        for clip in state.clips:
+            if clip.status not in {"completed", "failed", "cancelled"}:
+                clip.status = "cancelled"
 
     def format_full_script_text(self, script: FullScript) -> str:
         """将结构化剧本转换为可读、可编辑文本。"""
@@ -731,13 +1000,15 @@ class PipelineWorkflowService:
 
     def _normalize_segment(self, segment: Dict[str, Any], index: int) -> Dict[str, Any]:
         """归一化前端传回的片段结构。"""
+        duration = float(segment.get("duration") or 5.0)
+        normalized_duration = max(1.0, min(duration, MAX_VIDEO_SEGMENT_DURATION))
         return {
             "segment_number": int(segment.get("segment_number") or index + 1),
             "title": str(segment.get("title") or f"片段 {index + 1}"),
             "description": str(segment.get("description") or ""),
             "start_time": float(segment.get("start_time") or 0.0),
             "end_time": float(segment.get("end_time") or 0.0),
-            "duration": float(segment.get("duration") or 5.0),
+            "duration": normalized_duration,
             "shots_summary": str(segment.get("shots_summary") or ""),
             "key_actions": list(segment.get("key_actions") or []),
             "key_dialogues": list(segment.get("key_dialogues") or []),
@@ -756,6 +1027,140 @@ class PipelineWorkflowService:
             "video_url": str(segment.get("video_url") or ""),
             "status": str(segment.get("status") or "ready"),
         }
+
+    async def _persist_render_task_state(
+        self,
+        *,
+        state: RenderTaskState,
+        user_id: Optional[str] = None,
+    ) -> None:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PipelineRenderTask).where(PipelineRenderTask.id == state.task_id)
+            )
+            record = result.scalar_one_or_none()
+
+            if record is None:
+                if not user_id:
+                    raise ValueError(f"创建渲染任务记录时缺少 user_id: {state.task_id}")
+                record = PipelineRenderTask(
+                    id=state.task_id,
+                    user_id=user_id,
+                    project_id=state.project_id or None,
+                    project_title=state.project_title,
+                    segments=state.segments,
+                    keyframes=state.keyframes,
+                    character_profiles=state.character_profiles,
+                    scene_profiles=state.scene_profiles,
+                    render_config=state.render_config,
+                    clips=[asdict(clip) for clip in state.clips],
+                    final_output=state.final_output,
+                    fallback_used=state.fallback_used,
+                    warnings=state.warnings,
+                    status=state.status,
+                    progress=state.progress,
+                    current_step=state.current_step,
+                    renderer=state.renderer,
+                    error=state.error or None,
+                    created_at=datetime.fromisoformat(state.created_at) if state.created_at else datetime.utcnow(),
+                    updated_at=datetime.fromisoformat(state.updated_at) if state.updated_at else datetime.utcnow(),
+                )
+                db.add(record)
+            else:
+                record.project_id = state.project_id or None
+                record.project_title = state.project_title
+                record.segments = state.segments
+                record.keyframes = state.keyframes
+                record.character_profiles = state.character_profiles
+                record.scene_profiles = state.scene_profiles
+                record.render_config = state.render_config
+                record.status = state.status
+                record.progress = state.progress
+                record.current_step = state.current_step
+                record.renderer = state.renderer
+                record.clips = [asdict(clip) for clip in state.clips]
+                record.final_output = state.final_output
+                record.fallback_used = state.fallback_used
+                record.warnings = state.warnings
+                record.error = state.error or None
+                record.updated_at = datetime.fromisoformat(state.updated_at) if state.updated_at else datetime.utcnow()
+
+            if state.project_id:
+                await self._sync_project_render_status(
+                    db=db,
+                    user_id=user_id or record.user_id,
+                    project_id=state.project_id,
+                    task_id=state.task_id,
+                    status=state.status,
+                )
+            await db.commit()
+
+    async def _load_render_task_state(self, task_id: str) -> Optional[RenderTaskState]:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PipelineRenderTask).where(PipelineRenderTask.id == task_id)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            state = RenderTaskState(
+                task_id=record.id,
+                user_id=record.user_id,
+                project_id=record.project_id or "",
+                project_title=record.project_title or "未命名项目",
+                segments=list(record.segments or []),
+                keyframes=list(record.keyframes or []),
+                character_profiles=list(record.character_profiles or []),
+                scene_profiles=list(record.scene_profiles or []),
+                render_config=dict(record.render_config or {}),
+                status=record.status or "queued",
+                progress=float(record.progress or 0.0),
+                current_step=record.current_step or "等待开始",
+                renderer=record.renderer or "pending",
+                clips=[
+                    RenderedClip(**clip)
+                    for clip in (record.clips or [])
+                    if isinstance(clip, dict)
+                ],
+                final_output=dict(record.final_output or {}),
+                fallback_used=bool(record.fallback_used),
+                warnings=list(record.warnings or []),
+                error=record.error or "",
+                created_at=record.created_at.isoformat() if record.created_at else datetime.now().isoformat(),
+                updated_at=record.updated_at.isoformat() if record.updated_at else datetime.now().isoformat(),
+            )
+        self.tasks[task_id] = state
+        return state
+
+    async def _sync_project_render_status(
+        self,
+        *,
+        db: Any,
+        user_id: str,
+        project_id: str,
+        task_id: str,
+        status: str,
+    ) -> None:
+        result = await db.execute(
+            select(PipelineProject).where(
+                PipelineProject.id == project_id,
+                PipelineProject.user_id == user_id,
+            )
+        )
+        project = result.scalar_one_or_none()
+        if project is None:
+            return
+
+        project.last_render_task_id = task_id or None
+        if status in {"queued", "processing", DISPATCHING_STATUS}:
+            project.status = "in_progress"
+        elif status == "completed":
+            project.status = "completed"
+        elif status == "failed":
+            project.status = "failed"
+        elif status == "cancelled":
+            project.status = "cancelled"
+        project.updated_at = datetime.utcnow()
 
     def _normalize_reference_image(self, reference: Dict[str, Any], index: int) -> Dict[str, Any]:
         return {
@@ -790,24 +1195,58 @@ class PipelineWorkflowService:
         reference_images: List[Dict[str, Any]],
         base_asset: Optional[KeyframeAsset],
     ) -> KeyframeAsset:
+        keyframe_reference_images = self._build_keyframe_reference_images(
+            task_dir=task_dir,
+            segment=segment,
+            character_profiles=character_profiles,
+            scene_profiles=scene_profiles,
+            reference_images=reference_images,
+        )
+        if keyframe_reference_images:
+            logger.info(
+                "Keyframe reference images for segment %s frame=%s: %s",
+                segment.get("segment_number"),
+                frame_kind,
+                ", ".join(
+                    str(item.get("label") or item.get("anchor_type") or item.get("filename") or "").strip()
+                    for item in keyframe_reference_images
+                    if str(item.get("url") or "").strip()
+                ) or "none",
+            )
         prompt = self._build_keyframe_prompt(
             segment=segment,
             frame_kind=frame_kind,
             style=style,
             character_profiles=character_profiles,
             scene_profiles=scene_profiles,
-            reference_images=reference_images,
+            reference_images=keyframe_reference_images,
         )
 
         nanobanana_api_key = getattr(settings, "NANOBANANA_API_KEY", None) or os.getenv("NANOBANANA_API_KEY")
         if nanobanana_api_key:
+            segment_characters, _ = self._get_segment_profile_context(
+                segment=segment,
+                character_profiles=character_profiles,
+                scene_profiles=scene_profiles,
+            )
+            logger.info(
+                "NanoBanana keyframe prompt for segment %s frame=%s characters=%s:\n%s",
+                segment.get("segment_number"),
+                frame_kind,
+                ", ".join(
+                    str(item.get("name") or item.get("id") or "").strip()
+                    for item in segment_characters
+                    if str(item.get("name") or item.get("id") or "").strip()
+                ) or "none",
+                prompt,
+            )
             generated = await asyncio.to_thread(
                 self._generate_keyframe_with_nanobanana,
                 task_dir,
                 segment,
                 frame_kind,
                 prompt,
-                reference_images,
+                keyframe_reference_images,
                 base_asset,
             )
             if generated:
@@ -853,15 +1292,39 @@ class PipelineWorkflowService:
             base_path = self._asset_url_to_path(base_asset.asset_url) if base_asset else None
 
             if base_path and base_path.exists():
+                logger.info(
+                    "NanoBanana keyframe mode=image_to_image segment=%s frame=%s base=%s references=%s",
+                    segment.get("segment_number"),
+                    frame_kind,
+                    base_path.name,
+                    len(reference_paths),
+                )
                 result = client.generate_image_to_image(str(base_path), prompt, aspect_ratio="16:9", image_size="2k")
                 source = "nanobanana-image-to-image"
             elif len(reference_paths) > 1:
+                logger.info(
+                    "NanoBanana keyframe mode=multi_image_mix segment=%s frame=%s references=%s",
+                    segment.get("segment_number"),
+                    frame_kind,
+                    ", ".join(path.name for path in reference_paths),
+                )
                 result = client.generate_multi_image_mix([str(path) for path in reference_paths], prompt, aspect_ratio="16:9", image_size="2k")
                 source = "nanobanana-multi-image-mix"
             elif len(reference_paths) == 1:
+                logger.info(
+                    "NanoBanana keyframe mode=image_to_image segment=%s frame=%s reference=%s",
+                    segment.get("segment_number"),
+                    frame_kind,
+                    reference_paths[0].name,
+                )
                 result = client.generate_image_to_image(str(reference_paths[0]), prompt, aspect_ratio="16:9", image_size="2k")
                 source = "nanobanana-image-to-image"
             else:
+                logger.info(
+                    "NanoBanana keyframe mode=text_to_image segment=%s frame=%s",
+                    segment.get("segment_number"),
+                    frame_kind,
+                )
                 result = client.generate_text_to_image(prompt, aspect_ratio="16:9", image_size="2k")
                 source = "nanobanana-text-to-image"
 
@@ -997,15 +1460,16 @@ class PipelineWorkflowService:
         )
         character_text = ""
         if segment_characters:
-            character_text = "Character base: " + " | ".join(
-                self._build_character_image_base(profile) for profile in segment_characters[:4]
+            character_text = "Character identity anchors: " + " | ".join(
+                self._build_character_image_base(profile) for profile in segment_characters
             ) + ". "
         scene_text = ""
         if segment_scene:
             scene_text = f"Scene base: {self._build_scene_image_base(segment_scene)}. "
         style_text = f"Visual style: {style}. " if style else ""
         reference_text = (
-            "Keep subject appearance, costume, environment layout, lighting mood, and spatial atmosphere consistent with the provided reference images. "
+            f"Reference anchors provided: {self._describe_reference_images(reference_images)}. "
+            "Keep subject appearance, face identity, costume structure, environment layout, lighting mood, and spatial atmosphere consistent with these anchor images. "
             if reference_images
             else ""
         )
@@ -1013,8 +1477,10 @@ class PipelineWorkflowService:
         prompt_focus = str(segment.get("prompt_focus") or "")
         continuity_text = str(segment.get("continuity_to_next") if frame_kind == "end" else segment.get("continuity_from_prev") or "")
         hard_constraints = self._build_segment_hard_constraints(segment_characters, segment_scene)
+        stable_visual_base = self._build_segment_image_prompt_base(segment_characters, segment_scene)
         return (
             f"{character_text}{scene_text}{style_text}{reference_text}"
+            f"{f'Stable visual base: {stable_visual_base}. ' if stable_visual_base else ''}"
             f"{segment['video_prompt'] or segment['description']}. "
             f"{f'Key focus: {prompt_focus}. ' if prompt_focus else ''}"
             f"{f'Continuity note: {continuity_text}. ' if continuity_text else ''}"
@@ -1067,7 +1533,7 @@ class PipelineWorkflowService:
         else:
             tags = [str(item).strip() for item in raw_tags if str(item).strip()]
 
-        return {
+        normalized = {
             "id": str(profile.get("id") or ""),
             "name": str(profile.get("name") or f"角色{index + 1}").strip(),
             "category": str(profile.get("category") or "").strip(),
@@ -1105,9 +1571,14 @@ class PipelineWorkflowService:
             "reference_image_original_name": str(profile.get("reference_image_original_name") or "").strip(),
             "three_view_image_url": str(profile.get("three_view_image_url") or "").strip(),
             "three_view_prompt": str(profile.get("three_view_prompt") or "").strip(),
+            "face_closeup_image_url": str(profile.get("face_closeup_image_url") or "").strip(),
             "created_at": str(profile.get("created_at") or now),
             "updated_at": str(profile.get("updated_at") or profile.get("created_at") or now),
         }
+        normalized["display_image_url"] = normalized["reference_image_url"]
+        normalized["identity_reference_images"] = self._build_character_identity_reference_images(normalized)
+        normalized["identity_anchor_pack"] = self._build_character_identity_anchor_pack(normalized)
+        return normalized
 
     def _normalize_scene_profile(self, profile: Dict[str, Any], index: int) -> Dict[str, Any]:
         now = datetime.now().isoformat()
@@ -1183,6 +1654,7 @@ class PipelineWorkflowService:
         provider = self._choose_render_provider(render_config)
         if provider == "doubao-official":
             rendered = await self._try_render_doubao_video(
+                task_dir=task_dir,
                 segment=segment,
                 keyframe_bundle=keyframe_bundle,
                 character_profiles=character_profiles,
@@ -1216,6 +1688,7 @@ class PipelineWorkflowService:
     async def _try_render_doubao_video(
         self,
         *,
+        task_dir: Path,
         segment: Dict[str, Any],
         keyframe_bundle: Optional[Dict[str, Any]],
         character_profiles: List[Dict[str, Any]],
@@ -1250,6 +1723,7 @@ class PipelineWorkflowService:
                     "service_tier": str(render_config.get("service_tier") or "default"),
                 }
                 primary_content = self._build_doubao_content(
+                    task_dir=task_dir,
                     segment=segment,
                     keyframe_bundle=keyframe_bundle,
                     character_profiles=character_profiles,
@@ -1274,6 +1748,7 @@ class PipelineWorkflowService:
                             segment.get("segment_number"),
                         )
                         text_only_content = self._build_doubao_content(
+                            task_dir=task_dir,
                             segment=segment,
                             keyframe_bundle=None,
                             character_profiles=character_profiles,
@@ -1450,8 +1925,6 @@ class PipelineWorkflowService:
         render_config: Dict[str, Any],
     ) -> Dict[str, Any]:
         merger = VideoMergerService(output_dir=str(task_dir))
-        if not merger.ffmpeg_available:
-            raise RuntimeError("FFmpeg unavailable")
 
         segments = [
             MergedVideoSegment(
@@ -1611,12 +2084,18 @@ class PipelineWorkflowService:
     def _build_doubao_content(
         self,
         *,
+        task_dir: Optional[Path],
         segment: Dict[str, Any],
         keyframe_bundle: Optional[Dict[str, Any]],
         character_profiles: List[Dict[str, Any]],
         scene_profiles: List[Dict[str, Any]],
         render_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        segment_characters, _ = self._get_segment_profile_context(
+            segment=segment,
+            character_profiles=character_profiles,
+            scene_profiles=scene_profiles,
+        )
         prompt = self._build_segment_video_prompt(
             segment=segment,
             character_profiles=character_profiles,
@@ -1631,13 +2110,22 @@ class PipelineWorkflowService:
             prompt = f"{prompt}\nAvoid: {negative_prompt}"
 
         start_frame = ""
+        character_anchor_images: List[Dict[str, Any]] = []
         if keyframe_bundle:
             start_frame = (keyframe_bundle.get("start_frame") or {}).get("asset_url") or ""
+            character_anchor_images = self._build_video_character_reference_images(
+                task_dir=task_dir,
+                segment=segment,
+                character_profiles=segment_characters,
+            )
 
         if start_frame:
+            anchor_labels = [str(item.get("label") or item.get("anchor_type") or "").strip() for item in character_anchor_images]
             logger.info(
-                "Using single start frame for segment %s; next clip start will come from provider returned last frame",
+                "Using start frame plus %s character anchor images for segment %s: %s; next clip start will come from provider returned last frame",
+                len(character_anchor_images),
                 segment.get("segment_number"),
+                ", ".join(label for label in anchor_labels if label) or "none",
             )
             final_moment_hint = (
                 segment.get("continuity_to_next")
@@ -1647,18 +2135,65 @@ class PipelineWorkflowService:
             )
             prompt = (
                 f"{prompt}\n"
-                f"Keep the motion and character identity consistent with the provided first-frame image. "
+                "Treat the provided first-frame image as the highest-priority motion and continuity anchor; do not reinvent shot composition from narrative text. "
+                "Treat the provided character anchor images as identity locks for face, hairstyle, outfit, silhouette, and color palette. "
+                "Keep the motion consistent with the first-frame image while keeping the subject identity consistent with both the first-frame image and the character anchor images. "
                 f"The final moment should land on this target ending state: {final_moment_hint}."
+            )
+        elif character_anchor_images:
+            prompt = (
+                f"{prompt}\n"
+                "Treat the provided character anchor images as identity locks for face, hairstyle, outfit, silhouette, and color palette. "
+                "Do not let the character drift away from these anchors during motion."
             )
 
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         if not keyframe_bundle:
             return content
 
-        for image_url in [start_frame]:
-            provider_image_url = self._build_provider_image_reference(str(image_url))
+        image_candidates: List[Dict[str, str]] = []
+        if start_frame:
+            image_candidates.append(
+                {
+                    "url": start_frame,
+                    "label": "start_frame",
+                }
+            )
+        for item in character_anchor_images:
+            anchor_url = str(item.get("url") or "").strip()
+            if not anchor_url:
+                continue
+            image_candidates.append(
+                {
+                    "url": anchor_url,
+                    "label": str(item.get("label") or item.get("anchor_type") or "character_anchor").strip(),
+                }
+            )
+
+        provider_images: List[Dict[str, str]] = []
+        for candidate in image_candidates:
+            provider_image_url = self._build_provider_image_reference(candidate["url"])
             if provider_image_url:
-                content.append({"type": "image_url", "image_url": {"url": provider_image_url}})
+                provider_images.append(
+                    {
+                        "url": provider_image_url,
+                        "label": candidate["label"],
+                    }
+                )
+
+        if len(provider_images) > 1:
+            kept = provider_images[0]
+            dropped_labels = [item["label"] for item in provider_images[1:] if item.get("label")]
+            logger.warning(
+                "Doubao video API accepts at most one image input; keeping %s for segment %s and folding %s extra anchors into text prompt: %s",
+                kept.get("label") or "start_frame",
+                segment.get("segment_number"),
+                len(provider_images) - 1,
+                ", ".join(dropped_labels) or "unnamed anchors",
+            )
+
+        if provider_images:
+            content.append({"type": "image_url", "image_url": {"url": provider_images[0]["url"]}})
 
         return content
 
@@ -1679,7 +2214,381 @@ class PipelineWorkflowService:
             (profile for profile in scene_profiles if str(profile.get("id") or "").strip() == scene_profile_id),
             scene_profiles[0] if scene_profiles else None,
         )
-        return filtered_characters or character_profiles[:4], filtered_scene
+        return filtered_characters or character_profiles, filtered_scene
+
+    def _build_keyframe_reference_images(
+        self,
+        *,
+        task_dir: Path,
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+        scene_profiles: List[Dict[str, Any]],
+        reference_images: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        segment_characters, segment_scene = self._get_segment_profile_context(
+            segment=segment,
+            character_profiles=character_profiles,
+            scene_profiles=scene_profiles,
+        )
+        merged: List[Dict[str, Any]] = []
+        seen_urls: set[str] = set()
+
+        character_reference_images = self._build_balanced_character_reference_images(
+            task_dir=task_dir,
+            segment=segment,
+            character_profiles=segment_characters,
+            max_images=MAX_KEYFRAME_CHARACTER_ANCHOR_IMAGES,
+            stage="keyframe",
+        )
+        for item in character_reference_images:
+            self._append_reference_image(merged, seen_urls, item)
+
+        scene_reference = str((segment_scene or {}).get("reference_image_url") or "").strip()
+        if scene_reference and scene_reference not in seen_urls:
+            merged.append(
+                {
+                    "id": f"{segment_scene.get('id') or 'scene'}-reference",
+                    "url": scene_reference,
+                    "filename": scene_reference.split("/")[-1] or "scene_reference.png",
+                    "original_filename": scene_reference.split("/")[-1] or "scene_reference.png",
+                    "content_type": "image/png",
+                    "size": 0,
+                    "source": "scene-reference",
+                    "anchor_type": "scene_reference",
+                    "label": f"{segment_scene.get('name') or '场景'}参考图",
+                }
+            )
+            seen_urls.add(scene_reference)
+
+        for item in reference_images:
+            url = str(item.get("url") or "").strip()
+            if url and url not in seen_urls:
+                merged.append(item)
+                seen_urls.add(url)
+
+        return merged
+
+    def _build_character_identity_reference_images(self, profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+        def build_item(anchor_type: str, label: str, url: str) -> Optional[Dict[str, Any]]:
+            normalized_url = str(url or "").strip()
+            if not normalized_url:
+                return None
+            filename = normalized_url.split("/")[-1] or f"{anchor_type}.png"
+            return {
+                "id": f"{profile.get('id') or profile.get('name') or 'character'}-{anchor_type}",
+                "url": normalized_url,
+                "filename": filename,
+                "original_filename": filename,
+                "content_type": "image/png",
+                "size": 0,
+                "source": "character-identity-anchor",
+                "anchor_type": anchor_type,
+                "label": f"{profile.get('name') or '角色'}{label}",
+            }
+
+        items = [
+            build_item("main_reference", "主参考图", profile.get("reference_image_url") or ""),
+            build_item("three_view", "三视图", profile.get("three_view_image_url") or ""),
+            build_item("face_closeup", "面部特写", profile.get("face_closeup_image_url") or ""),
+        ]
+        return [item for item in items if item]
+
+    def _append_reference_image(
+        self,
+        merged: List[Dict[str, Any]],
+        seen_urls: set[str],
+        item: Optional[Dict[str, Any]],
+        max_images: Optional[int] = None,
+    ) -> bool:
+        if not item:
+            return False
+        url = str(item.get("url") or "").strip()
+        if not url or url in seen_urls:
+            return False
+        if max_images is not None and len(merged) >= max_images:
+            return False
+        merged.append(item)
+        seen_urls.add(url)
+        return True
+
+    def _build_character_anchor_candidates(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        anchor_lookup: Dict[str, Dict[str, Any]] = {}
+        for item in self._build_character_identity_reference_images(profile):
+            anchor_type = str(item.get("anchor_type") or "").strip()
+            if anchor_type and anchor_type not in anchor_lookup:
+                anchor_lookup[anchor_type] = item
+
+        primary = (
+            anchor_lookup.get("main_reference")
+            or anchor_lookup.get("face_closeup")
+            or anchor_lookup.get("three_view")
+        )
+        supplements: List[Dict[str, Any]] = []
+        primary_url = str((primary or {}).get("url") or "").strip()
+        for anchor_type in ["face_closeup", "three_view", "main_reference"]:
+            item = anchor_lookup.get(anchor_type)
+            url = str((item or {}).get("url") or "").strip()
+            if item and url and url != primary_url:
+                supplements.append(item)
+
+        return {
+            "profile": profile,
+            "primary": primary,
+            "supplements": supplements,
+            "lookup": anchor_lookup,
+        }
+
+    def _build_multi_character_identity_board(
+        self,
+        *,
+        task_dir: Optional[Path],
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+        stage: str,
+    ) -> Optional[Dict[str, Any]]:
+        from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+        cards: List[Dict[str, Any]] = []
+        for profile in character_profiles:
+            anchor_lookup = self._build_character_anchor_candidates(profile).get("lookup") or {}
+            image_paths: Dict[str, Path] = {}
+            for anchor_type in ["main_reference", "face_closeup", "three_view"]:
+                item = anchor_lookup.get(anchor_type)
+                path = self._asset_url_to_path(str((item or {}).get("url") or "").strip())
+                if path and path.exists():
+                    image_paths[anchor_type] = path
+            if image_paths:
+                cards.append({"profile": profile, "image_paths": image_paths})
+
+        if len(cards) < 2:
+            return None
+
+        board_dir = (task_dir / "identity_boards") if task_dir else self.identity_board_root
+        board_dir.mkdir(parents=True, exist_ok=True)
+
+        board_width = 2048
+        padding = 48
+        header_height = 120
+        gap = 28
+        columns = 2 if len(cards) > 1 else 1
+        rows = max(1, (len(cards) + columns - 1) // columns)
+        card_width = int((board_width - padding * 2 - gap * (columns - 1)) / columns)
+        card_height = max(420, int((2048 - padding * 2 - header_height - gap * max(rows - 1, 0)) / rows))
+        board_height = padding + header_height + rows * card_height + gap * max(rows - 1, 0) + padding
+
+        board = Image.new("RGB", (board_width, board_height), "#0f1726")
+        draw = ImageDraw.Draw(board)
+        font_title = ImageFont.load_default()
+        font_text = ImageFont.load_default()
+
+        title = f"Segment {int(segment.get('segment_number') or 0):02d} Character Identity Board"
+        subtitle = "All on-screen characters must stay consistent with these anchors."
+        draw.text((padding, padding), title, fill="#f8d37a", font=font_title)
+        draw.text((padding, padding + 34), subtitle, fill="#d7e3ff", font=font_text)
+
+        for index, card in enumerate(cards):
+            col = index % columns
+            row = index // columns
+            left = padding + col * (card_width + gap)
+            top = padding + header_height + row * (card_height + gap)
+            right = left + card_width
+            bottom = top + card_height
+
+            draw.rounded_rectangle((left, top, right, bottom), radius=24, fill="#18263d", outline="#36507b", width=3)
+
+            inner_left = left + 20
+            inner_top = top + 20
+            inner_right = right - 20
+            inner_bottom = bottom - 20
+            inner_width = inner_right - inner_left
+            inner_height = inner_bottom - inner_top
+
+            main_box = (
+                inner_left,
+                inner_top + 52,
+                inner_left + int(inner_width * 0.62),
+                inner_bottom,
+            )
+            detail_left = main_box[2] + 16
+            detail_box_top = inner_top + 52
+            detail_box_width = inner_right - detail_left
+            detail_box_height = int((inner_bottom - detail_box_top - 14) / 2)
+            face_box = (
+                detail_left,
+                detail_box_top,
+                inner_right,
+                detail_box_top + detail_box_height,
+            )
+            view_box = (
+                detail_left,
+                detail_box_top + detail_box_height + 14,
+                inner_right,
+                inner_bottom,
+            )
+
+            profile = card["profile"]
+            must_keep = ", ".join((profile.get("must_keep") or [])[:3])
+            title_text = str(profile.get("name") or "角色")
+            meta_text = must_keep or str(profile.get("core_appearance") or "").strip()[:44]
+            draw.text((inner_left, inner_top), title_text[:28], fill="#ffffff", font=font_title)
+            if meta_text:
+                draw.text((inner_left, inner_top + 22), meta_text[:56], fill="#b9c7de", font=font_text)
+
+            def paste_box(box: tuple[int, int, int, int], path: Optional[Path], fallback_label: str) -> None:
+                draw.rounded_rectangle(box, radius=16, fill="#101827", outline="#2f466b", width=2)
+                if not path:
+                    draw.text((box[0] + 12, box[1] + 12), fallback_label, fill="#91a4c7", font=font_text)
+                    return
+                with Image.open(path) as opened:
+                    prepared = ImageOps.fit(opened.convert("RGB"), (box[2] - box[0], box[3] - box[1]))
+                board.paste(prepared, (box[0], box[1]))
+
+            image_paths = card["image_paths"]
+            paste_box(
+                main_box,
+                image_paths.get("main_reference") or image_paths.get("face_closeup") or image_paths.get("three_view"),
+                "Main anchor",
+            )
+            paste_box(face_box, image_paths.get("face_closeup"), "Face closeup")
+            paste_box(view_box, image_paths.get("three_view"), "Three-view")
+
+        asset_id = uuid.uuid4().hex[:12]
+        safe_name = f"segment_{int(segment.get('segment_number') or 0):02d}_{stage}_{asset_id}_identity_board.png"
+        output_path = board_dir / safe_name
+        board.save(output_path, format="PNG")
+
+        return {
+            "id": f"segment-{segment.get('segment_number') or 'x'}-identity-board",
+            "url": self._build_asset_url(output_path),
+            "filename": safe_name,
+            "original_filename": safe_name,
+            "content_type": "image/png",
+            "size": output_path.stat().st_size,
+            "source": "character-identity-board",
+            "anchor_type": "character_identity_board",
+            "label": f"片段{segment.get('segment_number') or ''}多角色身份板",
+        }
+
+    def _build_balanced_character_reference_images(
+        self,
+        *,
+        task_dir: Optional[Path],
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+        max_images: int,
+        stage: str,
+    ) -> List[Dict[str, Any]]:
+        selected_items: List[Dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        candidates = [self._build_character_anchor_candidates(profile) for profile in character_profiles]
+        candidates = [item for item in candidates if item.get("primary") or item.get("supplements")]
+
+        if len(candidates) > 1:
+            board_item = self._build_multi_character_identity_board(
+                task_dir=task_dir,
+                segment=segment,
+                character_profiles=[item["profile"] for item in candidates],
+                stage=stage,
+            )
+            self._append_reference_image(selected_items, seen_urls, board_item, max_images)
+
+        for candidate in candidates:
+            self._append_reference_image(selected_items, seen_urls, candidate.get("primary"), max_images)
+
+        while len(selected_items) < max_images:
+            progressed = False
+            for candidate in candidates:
+                supplements = candidate.get("supplements") or []
+                if not supplements:
+                    continue
+                next_item = supplements.pop(0)
+                if self._append_reference_image(selected_items, seen_urls, next_item, max_images):
+                    progressed = True
+                if len(selected_items) >= max_images:
+                    break
+            if not progressed:
+                break
+
+        return selected_items
+
+    def _build_video_character_reference_images(
+        self,
+        *,
+        task_dir: Optional[Path],
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+        max_images: int = MAX_VIDEO_CHARACTER_ANCHOR_IMAGES,
+    ) -> List[Dict[str, Any]]:
+        return self._build_balanced_character_reference_images(
+            task_dir=task_dir,
+            segment=segment,
+            character_profiles=character_profiles,
+            max_images=max_images,
+            stage="video",
+        )
+
+    def _build_character_identity_anchor_pack(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "character_id": str(profile.get("id") or "").strip(),
+            "profile_version": int(profile.get("profile_version") or 1),
+            "display_image_url": str(profile.get("reference_image_url") or "").strip(),
+            "three_view_image_url": str(profile.get("three_view_image_url") or "").strip(),
+            "face_closeup_image_url": str(profile.get("face_closeup_image_url") or "").strip(),
+            "must_keep": list(profile.get("must_keep") or []),
+            "forbidden_traits": list(profile.get("forbidden_traits") or []),
+            "core_appearance": str(profile.get("core_appearance") or "").strip(),
+            "outfit": str(profile.get("outfit") or "").strip(),
+            "color_palette": str(profile.get("color_palette") or "").strip(),
+            "speaking_style": str(profile.get("speaking_style") or "").strip(),
+            "common_actions": str(profile.get("common_actions") or "").strip(),
+            "llm_summary": str(profile.get("llm_summary") or "").strip(),
+            "image_prompt_base": str(profile.get("image_prompt_base") or "").strip(),
+            "video_prompt_base": str(profile.get("video_prompt_base") or "").strip(),
+        }
+
+    def _describe_reference_images(self, reference_images: List[Dict[str, Any]]) -> str:
+        labels = [
+            str(item.get("label") or item.get("anchor_type") or item.get("filename") or "").strip()
+            for item in reference_images
+            if str(item.get("url") or "").strip()
+        ]
+        unique_labels: List[str] = []
+        for label in labels:
+            if label and label not in unique_labels:
+                unique_labels.append(label)
+        return ", ".join(unique_labels[:8]) or f"{len(reference_images)} reference images"
+
+    def _build_segment_image_prompt_base(
+        self,
+        character_profiles: List[Dict[str, Any]],
+        scene_profile: Optional[Dict[str, Any]],
+    ) -> str:
+        parts: List[str] = []
+        for profile in character_profiles:
+            base = str(profile.get("image_prompt_base") or "").strip()
+            if base:
+                parts.append(f"{profile.get('name')}: {base}")
+        if scene_profile:
+            scene_base = str(scene_profile.get("image_prompt_base") or "").strip()
+            if scene_base:
+                parts.append(f"{scene_profile.get('name')}: {scene_base}")
+        return " | ".join(parts)
+
+    def _build_segment_video_prompt_base(
+        self,
+        character_profiles: List[Dict[str, Any]],
+        scene_profile: Optional[Dict[str, Any]],
+    ) -> str:
+        parts: List[str] = []
+        for profile in character_profiles:
+            base = str(profile.get("video_prompt_base") or "").strip()
+            if base:
+                parts.append(f"{profile.get('name')}: {base}")
+        if scene_profile:
+            scene_base = str(scene_profile.get("video_prompt_base") or "").strip()
+            if scene_base:
+                parts.append(f"{scene_profile.get('name')}: {scene_base}")
+        return " | ".join(parts)
 
     def _build_character_image_base(self, profile: Dict[str, Any]) -> str:
         return "；".join(
@@ -1688,8 +2597,11 @@ class PipelineWorkflowService:
                 str(profile.get("name") or "").strip(),
                 str(profile.get("image_prompt_base") or "").strip(),
                 str(profile.get("core_appearance") or "").strip(),
+                str(profile.get("face_features") or "").strip(),
                 str(profile.get("outfit") or "").strip(),
                 str(profile.get("gear") or "").strip(),
+                str(profile.get("color_palette") or "").strip(),
+                f"must keep: {', '.join(profile.get('must_keep') or [])}" if profile.get("must_keep") else "",
             ]
             if part
         )
@@ -1713,8 +2625,10 @@ class PipelineWorkflowService:
             for part in [
                 str(profile.get("name") or "").strip(),
                 str(profile.get("video_prompt_base") or "").strip(),
+                str(profile.get("core_appearance") or "").strip(),
                 str(profile.get("speaking_style") or "").strip(),
                 str(profile.get("common_actions") or "").strip(),
+                f"must keep: {', '.join(profile.get('must_keep') or [])}" if profile.get("must_keep") else "",
             ]
             if part
         )
@@ -1737,14 +2651,20 @@ class PipelineWorkflowService:
         scene_profile: Optional[Dict[str, Any]],
     ) -> str:
         constraints: List[str] = []
-        for profile in character_profiles[:3]:
+        for profile in character_profiles:
             must_keep = profile.get("must_keep") or []
             if must_keep:
                 constraints.append(f"Keep {profile.get('name')}: {', '.join(must_keep)}")
+            forbidden_traits = profile.get("forbidden_traits") or []
+            if forbidden_traits:
+                constraints.append(f"Do not change {profile.get('name')} into: {', '.join(forbidden_traits)}")
         if scene_profile:
             must_have = scene_profile.get("must_have_elements") or scene_profile.get("props_must_have") or []
             if must_have:
                 constraints.append(f"Scene must include: {', '.join(must_have)}")
+            forbidden_elements = scene_profile.get("forbidden_elements") or scene_profile.get("props_forbidden") or []
+            if forbidden_elements:
+                constraints.append(f"Scene must avoid: {', '.join(forbidden_elements)}")
         if not constraints:
             return ""
         return "Hard constraints: " + " | ".join(constraints) + ". "
@@ -1763,9 +2683,12 @@ class PipelineWorkflowService:
         )
         parts: List[str] = []
         if segment_characters:
-            parts.append("Character continuity: " + " | ".join(self._build_character_video_base(item) for item in segment_characters[:4]))
+            parts.append("Character continuity anchors: " + " | ".join(self._build_character_video_base(item) for item in segment_characters))
         if segment_scene:
             parts.append("Scene continuity: " + self._build_scene_video_base(segment_scene))
+        stable_video_base = self._build_segment_video_prompt_base(segment_characters, segment_scene)
+        if stable_video_base:
+            parts.append(f"Stable video base: {stable_video_base}")
         if segment.get("prompt_focus"):
             parts.append(f"Current clip focus: {segment['prompt_focus']}")
         if segment.get("shots_summary"):
@@ -1775,9 +2698,9 @@ class PipelineWorkflowService:
         elif segment.get("description"):
             parts.append(f"Clip action prompt: {segment['description']}")
         if segment.get("continuity_from_prev"):
-            parts.append(f"Continuity from previous: {segment['continuity_from_prev']}")
+            parts.append(f"Previous tail-frame continuity to preserve: {segment['continuity_from_prev']}")
         if segment.get("continuity_to_next"):
-            parts.append(f"Landing for next clip: {segment['continuity_to_next']}")
+            parts.append(f"Target ending state for next clip handoff: {segment['continuity_to_next']}")
         parts.append("Preserve character face, hairstyle, outfit, color palette, and environment logic consistently across the whole clip")
         return ". ".join(part for part in parts if part).strip()
 
@@ -1799,8 +2722,14 @@ class PipelineWorkflowService:
         for profile in segment_characters:
             if profile.get("negative_prompt"):
                 negatives.append(str(profile.get("negative_prompt")).strip())
+            forbidden_traits = profile.get("forbidden_traits") or []
+            if forbidden_traits:
+                negatives.extend(str(item).strip() for item in forbidden_traits if str(item).strip())
         if segment_scene and segment_scene.get("negative_prompt"):
             negatives.append(str(segment_scene.get("negative_prompt")).strip())
+        if segment_scene:
+            forbidden_elements = segment_scene.get("forbidden_elements") or segment_scene.get("props_forbidden") or []
+            negatives.extend(str(item).strip() for item in forbidden_elements if str(item).strip())
         return ", ".join(item for item in negatives if item)
 
     def _build_provider_image_reference(self, asset_url: str) -> Optional[str]:
@@ -1840,7 +2769,7 @@ class PipelineWorkflowService:
         model_name: str = "",
         content: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
-        rounded = int(round(float(duration or 5)))
+        rounded = int(round(max(2.0, min(float(duration or 5), MAX_VIDEO_SEGMENT_DURATION))))
         has_image_input = any((item or {}).get("type") == "image_url" for item in (content or []))
 
         if has_image_input:
@@ -1854,7 +2783,7 @@ class PipelineWorkflowService:
                 )
             return snapped
 
-        return max(2, min(12, rounded))
+        return max(2, min(int(MAX_VIDEO_SEGMENT_DURATION), rounded))
 
     def _normalize_service_tier(self, value: str) -> str:
         return value if value in {"default", "flex"} else "default"
@@ -1890,9 +2819,7 @@ class PipelineWorkflowService:
             return getattr(enum_cls, "DUR_5S")
         if duration <= 10:
             return getattr(enum_cls, "DUR_10S")
-        if duration <= 15:
-            return getattr(enum_cls, "DUR_15S")
-        return getattr(enum_cls, "DUR_20S")
+        return getattr(enum_cls, "DUR_10S")
 
     def _load_local_image(self, asset_url: str) -> Optional[Any]:
         try:

@@ -51,11 +51,39 @@ class PipelineCharacterProfile(BaseModel):
     three_view_image_url = Column(String(500), nullable=True)
     three_view_image_path = Column(String(500), nullable=True)
     three_view_prompt = Column(Text, nullable=True)
+    face_closeup_image_url = Column(String(500), nullable=True)
+    face_closeup_image_path = Column(String(500), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def to_dict(self):
+        identity_reference_images = []
+        if self.reference_image_url:
+            identity_reference_images.append(
+                {
+                    "type": "main_reference",
+                    "label": "主参考图",
+                    "url": self.reference_image_url,
+                }
+            )
+        if self.three_view_image_url:
+            identity_reference_images.append(
+                {
+                    "type": "three_view",
+                    "label": "三视图",
+                    "url": self.three_view_image_url,
+                }
+            )
+        if self.face_closeup_image_url:
+            identity_reference_images.append(
+                {
+                    "type": "face_closeup",
+                    "label": "面部特写",
+                    "url": self.face_closeup_image_url,
+                }
+            )
+
         return {
             "id": self.id,
             "name": self.name,
@@ -90,10 +118,30 @@ class PipelineCharacterProfile(BaseModel):
             "aliases": self.aliases or [],
             "profile_version": self.profile_version or 1,
             "source": self.source or "library",
+            "display_image_url": self.reference_image_url or "",
             "reference_image_url": self.reference_image_url or "",
             "reference_image_original_name": self.reference_image_original_name or "",
             "three_view_image_url": self.three_view_image_url or "",
             "three_view_prompt": self.three_view_prompt or "",
+            "face_closeup_image_url": self.face_closeup_image_url or "",
+            "identity_reference_images": identity_reference_images,
+            "identity_anchor_pack": {
+                "character_id": self.id,
+                "profile_version": self.profile_version or 1,
+                "display_image_url": self.reference_image_url or "",
+                "three_view_image_url": self.three_view_image_url or "",
+                "face_closeup_image_url": self.face_closeup_image_url or "",
+                "must_keep": self.must_keep or [],
+                "forbidden_traits": self.forbidden_traits or [],
+                "core_appearance": self.core_appearance or "",
+                "outfit": self.outfit or "",
+                "color_palette": self.color_palette or "",
+                "speaking_style": self.speaking_style or "",
+                "common_actions": self.common_actions or "",
+                "llm_summary": self.llm_summary or "",
+                "image_prompt_base": self.image_prompt_base or "",
+                "video_prompt_base": self.video_prompt_base or "",
+            },
             "created_at": self.created_at.isoformat() if self.created_at else "",
             "updated_at": self.updated_at.isoformat() if self.updated_at else "",
         }

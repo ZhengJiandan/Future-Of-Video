@@ -76,6 +76,7 @@ export const CharacterLibraryPage: React.FC = () => {
   const [characterImage, setCharacterImage] = useState<ReferenceImageAsset | null>(null)
   const [characterImagePrompt, setCharacterImagePrompt] = useState('')
   const [refinePrompt, setRefinePrompt] = useState('')
+  const [loadedProfile, setLoadedProfile] = useState<CharacterProfile | null>(null)
 
   const profileToDraft = (profile: CharacterProfile) => ({
     name: profile.name || '',
@@ -138,6 +139,7 @@ export const CharacterLibraryPage: React.FC = () => {
     setCharacterImage(null)
     setCharacterImagePrompt('')
     setRefinePrompt('')
+    setLoadedProfile(null)
   }
 
   const exitEditMode = () => {
@@ -155,6 +157,7 @@ export const CharacterLibraryPage: React.FC = () => {
       try {
         const response = await scriptPipelineApi.getCharacter(editingCharacterId)
         const profile = response.data.item
+        setLoadedProfile(profile)
         setCharacterDraft(profileToDraft(profile))
 
         const imageAsset = assetFromProfileImage(
@@ -390,7 +393,7 @@ export const CharacterLibraryPage: React.FC = () => {
             type="info"
             showIcon
             message="推荐流程"
-            description="先写角色设定。可以上传图片直接作为角色图，也可以先生成角色原型图，再不断微调，满意后保存。"
+            description="先写角色设定。可以上传图片直接作为角色图，也可以先生成角色原型图，再不断微调，满意后保存。保存后系统会为角色自动补齐主参考图、三视图和面部特写这套身份锚点。"
           />
 
           {initializing ? (
@@ -548,6 +551,66 @@ export const CharacterLibraryPage: React.FC = () => {
               )}
             </Space>
           </Card>
+
+          {loadedProfile?.identity_reference_images?.length ? (
+            <Card
+              size="small"
+              title="3. 当前身份锚点包"
+              style={{ borderRadius: 16, background: '#f7fbff' }}
+              extra={<Tag color="blue">{loadedProfile.identity_reference_images.length} 个锚点</Tag>}
+            >
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="这里展示的是内部角色视觉包"
+                  description="不是只有三视图。当前档案如果已生成，会同时包含主参考图、三视图、面部特写，以及结构化身份卡。"
+                />
+                <Space wrap size={[16, 16]} style={{ width: '100%' }}>
+                  {loadedProfile.identity_reference_images.map((item) => (
+                    <Card
+                      key={`${loadedProfile.id}-${item.type}`}
+                      size="small"
+                      title={item.label}
+                      style={{ width: 220, borderRadius: 12 }}
+                    >
+                      <Image
+                        src={resolveAssetUrl(item.url)}
+                        alt={item.label}
+                        style={{ width: '100%', borderRadius: 10, objectFit: 'cover' }}
+                      />
+                    </Card>
+                  ))}
+                </Space>
+                <Space wrap>
+                  {loadedProfile.must_keep?.map((item) => (
+                    <Tag key={`keep-${item}`} color="blue">
+                      必须保持: {item}
+                    </Tag>
+                  ))}
+                  {loadedProfile.forbidden_traits?.map((item) => (
+                    <Tag key={`forbid-${item}`} color="red">
+                      禁止: {item}
+                    </Tag>
+                  ))}
+                </Space>
+                {loadedProfile.identity_anchor_pack ? (
+                  <Alert
+                    type="success"
+                    showIcon
+                    message="稳定 Prompt 基底"
+                    description={
+                      <Space direction="vertical" size={4}>
+                        <Text>llm_summary: {loadedProfile.llm_summary || '未设置'}</Text>
+                        <Text>image_prompt_base: {loadedProfile.image_prompt_base || '未设置'}</Text>
+                        <Text>video_prompt_base: {loadedProfile.video_prompt_base || '未设置'}</Text>
+                      </Space>
+                    }
+                  />
+                ) : null}
+              </Space>
+            </Card>
+          ) : null}
 
           <Space wrap>
             <Button

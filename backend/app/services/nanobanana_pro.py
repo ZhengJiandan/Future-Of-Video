@@ -1,6 +1,7 @@
 import requests
 import base64
 import os
+import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from loguru import logger
@@ -27,10 +28,61 @@ class NanoBananaProClient:
     ):
         self.api_key = api_key or getattr(settings, "NANOBANANA_API_KEY", None) or os.getenv("NANOBANANA_API_KEY")
         self.api_url = api_url or getattr(settings, "NANOBANANA_BASE_URL", None) or "https://api.laozhang.ai/v1beta/models/gemini-3-pro-image-preview:generateContent"
+        self.debug_logging = bool(getattr(settings, "MODEL_DEBUG_LOGGING", True))
+        self.debug_max_chars = int(getattr(settings, "MODEL_DEBUG_MAX_CHARS", 20000))
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    def _truncate_for_log(self, value: str) -> str:
+        if len(value) <= self.debug_max_chars:
+            return value
+        return f"{value[:self.debug_max_chars]}\n...<truncated {len(value) - self.debug_max_chars} chars>"
+
+    def _sanitize_for_log(self, value: Any, *, parent_key: str = "") -> Any:
+        if isinstance(value, dict):
+            sanitized: Dict[str, Any] = {}
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if lowered == "authorization":
+                    sanitized[key] = "***"
+                    continue
+                if lowered == "data" and isinstance(item, str):
+                    sanitized[key] = f"<base64 length={len(item)}>"
+                    continue
+                sanitized[key] = self._sanitize_for_log(item, parent_key=lowered)
+            return sanitized
+        if isinstance(value, list):
+            return [self._sanitize_for_log(item, parent_key=parent_key) for item in value]
+        if isinstance(value, str):
+            return self._truncate_for_log(value)
+        return value
+
+    def _json_for_log(self, payload: Any) -> str:
+        try:
+            raw = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, indent=2)
+        except Exception:
+            raw = str(payload)
+        return self._truncate_for_log(raw)
+
+    def _log_request(self, *, payload: Dict[str, Any], timeout: int) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "NanoBanana request | url={} | timeout={}s\n{}",
+            self.api_url,
+            timeout,
+            self._json_for_log(payload),
+        )
+
+    def _log_response(self, *, response_body: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "NanoBanana response\n{}",
+            self._json_for_log(response_body),
+        )
 
     def _call_api(
         self,
@@ -54,6 +106,7 @@ class NanoBananaProClient:
             }
 
         try:
+            self._log_request(payload=payload, timeout=timeout)
             response = requests.post(
                 self.api_url,
                 headers=self.headers,
@@ -70,6 +123,7 @@ class NanoBananaProClient:
                 }
 
             result = response.json()
+            self._log_response(response_body=result)
 
             # 提取图片数据
             try:

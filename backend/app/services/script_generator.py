@@ -11,6 +11,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+import httpx
+
+from app.core.config import settings
 from app.services.doubao_llm import DoubaoLLM, DoubaoMessage
 
 logger = logging.getLogger(__name__)
@@ -613,6 +616,7 @@ class ScriptGenerator:
 2. 只能在 selected_characters 和 selected_scenes 的约束范围内创作
 3. 新增细节不得违背 must_keep / must_have / forbidden
 4. 每个角色、每个场景都必须尽量绑定档案 ID 和版本
+5. 剧本阶段没有角色图片可用，角色恒定身份只能依赖 selected_characters 里的 llm_summary / must_keep / forbidden / speaking_style / common_actions
 
 【输出要求】
 1. 输出必须是合法 JSON
@@ -622,6 +626,7 @@ class ScriptGenerator:
 5. characters 中每个角色必须输出 character_profile_id 和 profile_version
 6. 镜头数量必须按内容自适应，不许模板化凑镜头
 7. 如果给定目标总时长，所有 shots.duration 总和必须尽量贴近目标，总误差不能超过目标时长 10% 和 3 秒中的更小值
+8. 只要角色绑定了 selected_characters 中的 character_profile_id，就必须严格使用该档案原始 name，不允许改名、起别称、写错同音名
 
 【JSON 结构】
 {
@@ -728,6 +733,14 @@ class ScriptGenerator:
             ],
             temperature=0.35,
             max_tokens=4200,
+            timeout=httpx.Timeout(
+                connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
+                read=float(getattr(settings, "DOUBAO_SCRIPT_READ_TIMEOUT", 360.0)),
+                write=float(getattr(settings, "DOUBAO_WRITE_TIMEOUT", 60.0)),
+                pool=float(getattr(settings, "DOUBAO_POOL_TIMEOUT", 60.0)),
+            ),
+            max_retries=max(1, int(getattr(settings, "DOUBAO_MAX_RETRIES", 2))),
+            request_label="generate_full_script",
         )
         content = response.get_content().strip()
         if not content:
@@ -808,6 +821,8 @@ class ScriptGenerator:
         }
 
         characters: List[CharacterInfo] = []
+        output_name_to_profile_id: Dict[str, str] = {}
+        profile_id_to_canonical_name: Dict[str, str] = {}
         for char_data in data.get("characters", []):
             matched_profile = self._match_character_from_output(char_data, character_lookup, character_name_lookup)
             profile_id = str(char_data.get("character_profile_id") or matched_profile.get("id") or "").strip()
@@ -815,9 +830,17 @@ class ScriptGenerator:
                 char_data.get("profile_version", matched_profile.get("profile_version", 1)),
                 default=matched_profile.get("profile_version", 1) or 1,
             )
+            canonical_name = str(matched_profile.get("name") or char_data.get("name") or "").strip()
+            raw_output_name = str(char_data.get("name") or "").strip()
+            if profile_id:
+                if canonical_name:
+                    profile_id_to_canonical_name[profile_id] = canonical_name
+                    output_name_to_profile_id[self._normalize_name(canonical_name)] = profile_id
+                if raw_output_name:
+                    output_name_to_profile_id[self._normalize_name(raw_output_name)] = profile_id
             characters.append(
                 CharacterInfo(
-                    name=str(char_data.get("name") or matched_profile.get("name") or ""),
+                    name=canonical_name,
                     profile_id=profile_id,
                     profile_version=profile_version,
                     category=str(char_data.get("category") or matched_profile.get("category") or ""),
@@ -900,11 +923,27 @@ class ScriptGenerator:
                         actions=actions,
                         dialogues=dialogues,
                         characters=characters,
+                        output_name_to_profile_id=output_name_to_profile_id,
                     )
                 character_profile_versions = self._normalize_profile_version_map(
                     shot_data.get("character_profile_versions") or {},
                     characters=characters,
                     character_profile_ids=character_profile_ids,
+                )
+                normalized_characters_in_shot = self._canonicalize_name_list(
+                    self._normalize_list(shot_data.get("characters_in_shot") or []),
+                    output_name_to_profile_id=output_name_to_profile_id,
+                    profile_id_to_canonical_name=profile_id_to_canonical_name,
+                )
+                actions = self._canonicalize_actions(
+                    actions,
+                    output_name_to_profile_id=output_name_to_profile_id,
+                    profile_id_to_canonical_name=profile_id_to_canonical_name,
+                )
+                dialogues = self._canonicalize_dialogues(
+                    dialogues,
+                    output_name_to_profile_id=output_name_to_profile_id,
+                    profile_id_to_canonical_name=profile_id_to_canonical_name,
                 )
                 shot = ShotInfo(
                     shot_number=self._safe_int(shot_data.get("shot_number"), default=shot_index),
@@ -923,7 +962,7 @@ class ScriptGenerator:
                     description=str(shot_data.get("description") or ""),
                     environment=str(shot_data.get("environment") or ""),
                     lighting=str(shot_data.get("lighting") or scene.lighting or ""),
-                    characters_in_shot=self._normalize_list(shot_data.get("characters_in_shot") or []),
+                    characters_in_shot=normalized_characters_in_shot,
                     actions=actions,
                     dialogues=dialogues,
                     sound_effects=self._normalize_list(shot_data.get("sound_effects") or []),
@@ -973,6 +1012,11 @@ class ScriptGenerator:
                 ),
                 240,
             ),
+            "core_appearance": str(profile.get("core_appearance") or "").strip(),
+            "outfit": str(profile.get("outfit") or "").strip(),
+            "color_palette": str(profile.get("color_palette") or "").strip(),
+            "speaking_style": str(profile.get("speaking_style") or "").strip(),
+            "common_actions": str(profile.get("common_actions") or "").strip(),
             "must_keep": self._normalize_list(
                 profile.get("must_keep")
                 or [
@@ -983,6 +1027,7 @@ class ScriptGenerator:
                 ]
             ),
             "forbidden": self._normalize_list(profile.get("forbidden_traits") or profile.get("forbidden_behaviors") or []),
+            "script_stage_rule": "Use llm_summary + must_keep + forbidden as the source of truth. Do not infer conflicting visual changes from free-form story text.",
         }
 
     def _build_scene_constraint_card(self, profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -1115,8 +1160,13 @@ class ScriptGenerator:
         actions: List[ActionDetail],
         dialogues: List[DialogueLine],
         characters: List[CharacterInfo],
+        output_name_to_profile_id: Optional[Dict[str, str]] = None,
     ) -> List[str]:
         name_to_id = {self._normalize_name(character.name): character.profile_id for character in characters if character.profile_id}
+        if output_name_to_profile_id:
+            for normalized_name, profile_id in output_name_to_profile_id.items():
+                if normalized_name and profile_id:
+                    name_to_id.setdefault(normalized_name, profile_id)
         candidates = self._normalize_list(shot_data.get("characters_in_shot") or [])
         candidates.extend(action.character for action in actions if action.character)
         candidates.extend(dialogue.speaker for dialogue in dialogues if dialogue.speaker)
@@ -1126,6 +1176,68 @@ class ScriptGenerator:
             if profile_id and profile_id not in resolved:
                 resolved.append(profile_id)
         return resolved
+
+    def _canonicalize_character_name(
+        self,
+        value: str,
+        *,
+        output_name_to_profile_id: Dict[str, str],
+        profile_id_to_canonical_name: Dict[str, str],
+    ) -> str:
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            return ""
+        profile_id = output_name_to_profile_id.get(self._normalize_name(raw_value))
+        canonical_name = profile_id_to_canonical_name.get(profile_id or "")
+        return canonical_name or raw_value
+
+    def _canonicalize_name_list(
+        self,
+        values: List[str],
+        *,
+        output_name_to_profile_id: Dict[str, str],
+        profile_id_to_canonical_name: Dict[str, str],
+    ) -> List[str]:
+        normalized: List[str] = []
+        for value in values:
+            canonical = self._canonicalize_character_name(
+                value,
+                output_name_to_profile_id=output_name_to_profile_id,
+                profile_id_to_canonical_name=profile_id_to_canonical_name,
+            )
+            if canonical and canonical not in normalized:
+                normalized.append(canonical)
+        return normalized
+
+    def _canonicalize_actions(
+        self,
+        actions: List[ActionDetail],
+        *,
+        output_name_to_profile_id: Dict[str, str],
+        profile_id_to_canonical_name: Dict[str, str],
+    ) -> List[ActionDetail]:
+        for action in actions:
+            action.character = self._canonicalize_character_name(
+                action.character,
+                output_name_to_profile_id=output_name_to_profile_id,
+                profile_id_to_canonical_name=profile_id_to_canonical_name,
+            )
+        return actions
+
+    def _canonicalize_dialogues(
+        self,
+        dialogues: List[DialogueLine],
+        *,
+        output_name_to_profile_id: Dict[str, str],
+        profile_id_to_canonical_name: Dict[str, str],
+    ) -> List[DialogueLine]:
+        for dialogue in dialogues:
+            dialogue.speaker = self._canonicalize_character_name(
+                dialogue.speaker,
+                output_name_to_profile_id=output_name_to_profile_id,
+                profile_id_to_canonical_name=profile_id_to_canonical_name,
+            )
+        return dialogues
 
     def _normalize_profile_version_map(
         self,

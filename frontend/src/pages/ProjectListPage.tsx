@@ -138,7 +138,19 @@ export const ProjectListPage: React.FC = () => {
                   <Title level={4} style={{ margin: 0 }}>
                     {item.project_title || '未命名项目'}
                   </Title>
-                  <Tag color={item.status === 'completed' ? 'success' : item.status === 'in_progress' ? 'processing' : 'default'}>
+                  <Tag
+                    color={
+                      item.status === 'completed'
+                        ? 'success'
+                        : item.status === 'in_progress' || item.status === 'dispatching'
+                          ? 'processing'
+                          : item.status === 'failed'
+                            ? 'error'
+                            : item.status === 'cancelled'
+                              ? 'orange'
+                              : 'default'
+                    }
+                  >
                     {item.status || 'draft'}
                   </Tag>
                 </div>

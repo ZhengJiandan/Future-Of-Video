@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import asyncio
 import json
+import shutil
 from typing import List, Optional, Dict, Any, Literal
 from dataclasses import dataclass
 from datetime import datetime
@@ -71,28 +72,37 @@ class VideoMergerService:
         self.temp_dir = temp_dir or tempfile.gettempdir()
         self.output_dir = output_dir or os.path.join(self.temp_dir, "video_output")
         os.makedirs(self.output_dir, exist_ok=True)
-        
+        self.ffmpeg_path = shutil.which("ffmpeg")
+        self.ffprobe_path = shutil.which("ffprobe")
+
         # 检查 FFmpeg 是否可用
         self.ffmpeg_available = self._check_ffmpeg()
     
     def _check_ffmpeg(self):
         """检查 FFmpeg 是否已安装"""
+        if not self.ffmpeg_path:
+            logger.error("FFmpeg 未安装！请安装 FFmpeg: sudo apt install ffmpeg")
+            return False
+
         try:
             result = subprocess.run(
-                ["ffmpeg", "-version"],
+                [self.ffmpeg_path, "-version"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=15
             )
             if result.returncode == 0:
                 version_line = result.stdout.split('\n')[0]
                 logger.info(f"FFmpeg 已安装: {version_line}")
                 return True
-        except FileNotFoundError:
-            logger.error("FFmpeg 未安装！请安装 FFmpeg: sudo apt install ffmpeg")
+            logger.warning("FFmpeg 版本探测返回非零退出码: %s", result.returncode)
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning("FFmpeg 版本探测超时，但已检测到可执行文件: %s", self.ffmpeg_path)
+            return True
         except Exception as e:
             logger.error(f"检查 FFmpeg 时出错: {e}")
-        return False
+            return True
     
     async def merge_videos(
         self,
@@ -177,7 +187,7 @@ class VideoMergerService:
             
             # 构建 FFmpeg 命令
             cmd = [
-                "ffmpeg",
+                self.ffmpeg_path or "ffmpeg",
                 "-y",  # 覆盖输出文件
                 "-f", "concat",
                 "-safe", "0",
@@ -278,7 +288,7 @@ class VideoMergerService:
         """
         try:
             cmd = [
-                "ffprobe",
+                self.ffprobe_path or "ffprobe",
                 "-v", "error",
                 "-show_entries", "format=duration,size,bit_rate",
                 "-show_entries", "stream=width,height,codec_name,avg_frame_rate",

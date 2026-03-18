@@ -52,6 +52,7 @@ import {
   ScriptSummary,
   SegmentItem,
   SegmentKeyframes,
+  SplitValidationReport,
   resolveAssetUrl,
   scriptPipelineApi,
 } from '../services/api'
@@ -71,9 +72,11 @@ const stepItems = [
 
 const statusColorMap: Record<string, string> = {
   queued: 'default',
+  dispatching: 'processing',
   processing: 'processing',
   completed: 'success',
   failed: 'error',
+  cancelled: 'orange',
 }
 
 const buildSummary = (generated?: GeneratedScriptResponse | null) => generated?.summary || null
@@ -85,6 +88,113 @@ const buildUploadFileList = (assets: ReferenceImageAsset[]): UploadFile[] =>
     status: 'done',
     url: resolveAssetUrl(asset.url),
   }))
+
+const formatApiErrorDetail = (detail: unknown): string => {
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail
+  }
+
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === 'string') {
+          return item
+        }
+        if (item && typeof item === 'object') {
+          const entry = item as { msg?: unknown; loc?: unknown }
+          const loc = Array.isArray(entry.loc) ? entry.loc.join('.') : ''
+          const msg = typeof entry.msg === 'string' ? entry.msg : ''
+          return [loc, msg].filter(Boolean).join(': ')
+        }
+        return ''
+      })
+      .filter(Boolean)
+    if (messages.length) {
+      return messages.join(' | ')
+    }
+  }
+
+  if (detail && typeof detail === 'object') {
+    const entry = detail as { detail?: unknown; message?: unknown; msg?: unknown }
+    if (typeof entry.message === 'string' && entry.message.trim()) {
+      return entry.message
+    }
+    if (typeof entry.msg === 'string' && entry.msg.trim()) {
+      return entry.msg
+    }
+    if (entry.detail !== undefined && entry.detail !== detail) {
+      return formatApiErrorDetail(entry.detail)
+    }
+    try {
+      return JSON.stringify(detail)
+    } catch {
+      return '请求失败'
+    }
+  }
+
+  return ''
+}
+
+const extractApiErrorMessage = (error: unknown, fallback: string): string => {
+  const responseError = error as { response?: { data?: { detail?: unknown; message?: unknown } } }
+  const detailMessage = formatApiErrorDetail(responseError.response?.data?.detail)
+  if (detailMessage) {
+    return detailMessage
+  }
+  const messageText = responseError.response?.data?.message
+  if (typeof messageText === 'string' && messageText.trim()) {
+    return messageText
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return error.message
+  }
+  return fallback
+}
+
+const MAX_SEGMENT_DURATION = 10
+
+const clampSegmentDuration = (value: number): number => {
+  if (!Number.isFinite(value)) {
+    return 5
+  }
+  return Math.max(1, Math.min(MAX_SEGMENT_DURATION, value))
+}
+
+const normalizeSegmentItem = (segment: SegmentItem): SegmentItem => ({
+  ...segment,
+  duration: clampSegmentDuration(Number(segment.duration)),
+})
+
+const normalizeSegmentItems = (items: SegmentItem[]): SegmentItem[] => items.map(normalizeSegmentItem)
+
+const normalizeMaxSegmentDuration = (value: number): number => {
+  if (!Number.isFinite(value)) {
+    return MAX_SEGMENT_DURATION
+  }
+  return Math.max(3, Math.min(MAX_SEGMENT_DURATION, value))
+}
+
+const validationStatusToAlertType = (
+  status?: string,
+): 'success' | 'info' | 'warning' | 'error' => {
+  if (status === 'fail') {
+    return 'error'
+  }
+  if (status === 'warning') {
+    return 'warning'
+  }
+  return 'success'
+}
+
+const validationStatusToTagColor = (status?: string): string => {
+  if (status === 'fail') {
+    return 'error'
+  }
+  if (status === 'warning') {
+    return 'warning'
+  }
+  return 'success'
+}
 
 const hasMeaningfulProjectState = (state: {
   userInput: string
@@ -195,6 +305,7 @@ export const ScriptPipelinePage: React.FC = () => {
   const [splitLoading, setSplitLoading] = useState(false)
   const [keyframeLoading, setKeyframeLoading] = useState(false)
   const [renderStarting, setRenderStarting] = useState(false)
+  const [renderActionLoading, setRenderActionLoading] = useState(false)
   const [charactersLoading, setCharactersLoading] = useState(false)
   const [scenesLoading, setScenesLoading] = useState(false)
 
@@ -209,6 +320,7 @@ export const ScriptPipelinePage: React.FC = () => {
   const [scriptDraft, setScriptDraft] = useState('')
   const [scriptSummary, setScriptSummary] = useState<ScriptSummary | null>(null)
   const [segments, setSegments] = useState<SegmentItem[]>([])
+  const [splitValidationReport, setSplitValidationReport] = useState<SplitValidationReport | null>(null)
   const [keyframes, setKeyframes] = useState<SegmentKeyframes[]>([])
   const [renderTaskId, setRenderTaskId] = useState<string | null>(null)
   const [renderStatus, setRenderStatus] = useState<RenderStatusResponse | null>(null)
@@ -246,9 +358,11 @@ export const ScriptPipelinePage: React.FC = () => {
     setScriptDraft('')
     setScriptSummary(null)
     setSegments([])
+    setSplitValidationReport(null)
     setKeyframes([])
     setRenderTaskId(null)
     setRenderStatus(null)
+    setRenderActionLoading(false)
     setSavingTemporaryCharacterIds([])
     setError(null)
   }
@@ -305,7 +419,13 @@ export const ScriptPipelinePage: React.FC = () => {
         state.scriptSummary && typeof state.scriptSummary === 'object'
           ? (state.scriptSummary as ScriptSummary)
           : null
-      const restoredSegments = Array.isArray(state.segments) ? (state.segments as SegmentItem[]) : []
+      const restoredSegments = Array.isArray(state.segments)
+        ? normalizeSegmentItems(state.segments as SegmentItem[])
+        : []
+      const restoredSplitValidationReport =
+        state.splitValidationReport && typeof state.splitValidationReport === 'object'
+          ? (state.splitValidationReport as SplitValidationReport)
+          : null
       const restoredKeyframes = Array.isArray(state.keyframes) ? (state.keyframes as SegmentKeyframes[]) : []
       const restoredRenderStatus =
         state.renderStatus && typeof state.renderStatus === 'object'
@@ -317,7 +437,7 @@ export const ScriptPipelinePage: React.FC = () => {
       setUserInput(String(state.userInput || ''))
       setStylePreference(String(state.stylePreference || '写实战术电影感'))
       setProjectTitle(String(state.projectTitle || item.project_title || '未命名项目'))
-      setMaxSegmentDuration(Number(state.maxSegmentDuration || 10))
+      setMaxSegmentDuration(normalizeMaxSegmentDuration(Number(state.maxSegmentDuration || MAX_SEGMENT_DURATION)))
       setTargetTotalDuration(
         state.targetTotalDuration === null || state.targetTotalDuration === undefined
           ? null
@@ -347,6 +467,7 @@ export const ScriptPipelinePage: React.FC = () => {
       setScriptDraft(String(state.scriptDraft || ''))
       setScriptSummary(restoredScriptSummary)
       setSegments(restoredSegments)
+      setSplitValidationReport(restoredSplitValidationReport)
       setKeyframes(restoredKeyframes)
       setRenderTaskId(
         typeof state.renderTaskId === 'string' && state.renderTaskId
@@ -429,14 +550,17 @@ export const ScriptPipelinePage: React.FC = () => {
           return
         }
 
-        timer = window.setTimeout(fetchStatus, 1500)
-      } catch (pollError: unknown) {
-        if (!active) {
+        if (response.data.status === 'cancelled') {
           return
         }
-        const responseError = pollError as { response?: { data?: { detail?: string } } }
-        setError(responseError.response?.data?.detail || '查询渲染状态失败')
+
+        timer = window.setTimeout(fetchStatus, 1500)
+    } catch (pollError: unknown) {
+      if (!active) {
+        return
       }
+      setError(extractApiErrorMessage(pollError, '查询渲染状态失败'))
+    }
     }
 
     fetchStatus()
@@ -495,6 +619,7 @@ export const ScriptPipelinePage: React.FC = () => {
       scriptDraft,
       scriptSummary,
       segments,
+      splitValidationReport,
       keyframes,
       renderTaskId,
     }
@@ -521,7 +646,20 @@ export const ScriptPipelinePage: React.FC = () => {
         project_title: projectTitle.trim() || '未命名项目',
         current_step: currentStep,
         state: stateForSave,
-        status: renderTaskId ? 'in_progress' : currentStep >= 5 ? 'completed' : 'draft',
+        status:
+          renderStatus?.status === 'queued' || renderStatus?.status === 'dispatching' || renderStatus?.status === 'processing'
+            ? 'in_progress'
+            : renderStatus?.status === 'completed'
+              ? 'completed'
+              : renderStatus?.status === 'failed'
+                ? 'failed'
+                : renderStatus?.status === 'cancelled'
+                  ? 'cancelled'
+                  : renderTaskId
+                    ? 'in_progress'
+                    : currentStep >= 5
+                      ? 'completed'
+                      : 'draft',
         last_render_task_id: renderTaskId || undefined,
         summary: scriptSummary?.synopsis || '',
       }
@@ -570,6 +708,7 @@ export const ScriptPipelinePage: React.FC = () => {
     returnLastFrame,
     scriptDraft,
     scriptSummary,
+    splitValidationReport,
     seedInput,
     segments,
     selectedCharacterIds,
@@ -580,6 +719,7 @@ export const ScriptPipelinePage: React.FC = () => {
     transitionDirection,
     userInput,
     watermark,
+    renderStatus,
     selectedProjectId,
     setCurrentProjectId,
   ])
@@ -601,8 +741,7 @@ export const ScriptPipelinePage: React.FC = () => {
       message.success(`${file.name} 上传成功`)
       options.onSuccess?.(asset)
     } catch (uploadError) {
-      const responseError = uploadError as { response?: { data?: { detail?: string } } }
-      const detail = responseError.response?.data?.detail || '参考图上传失败'
+      const detail = extractApiErrorMessage(uploadError, '参考图上传失败')
       message.error(detail)
       options.onError?.(new Error(detail))
     }
@@ -630,6 +769,7 @@ export const ScriptPipelinePage: React.FC = () => {
     setError(null)
     setGeneratedScript(null)
     setSegments([])
+    setSplitValidationReport(null)
     setKeyframes([])
     setRenderTaskId(null)
     setRenderStatus(null)
@@ -654,8 +794,7 @@ export const ScriptPipelinePage: React.FC = () => {
       setProjectTitle(response.data.summary.title || '未命名项目')
       setCurrentStep(1)
     } catch (requestError: unknown) {
-      const responseError = requestError as { response?: { data?: { detail?: string } } }
-      setError(responseError.response?.data?.detail || '完整剧本生成失败')
+      setError(extractApiErrorMessage(requestError, '完整剧本生成失败'))
       setCurrentStep(0)
     } finally {
       setScriptLoading(false)
@@ -682,8 +821,7 @@ export const ScriptPipelinePage: React.FC = () => {
       setConfirmedTemporaryCharacterIds((response.data.temporary_character_profiles || []).map((item) => item.id))
       setCharacterConfirmOpen(true)
     } catch (requestError: unknown) {
-      const responseError = requestError as { response?: { data?: { detail?: string } } }
-      setError(responseError.response?.data?.detail || '角色确认分析失败')
+      setError(extractApiErrorMessage(requestError, '角色确认分析失败'))
     } finally {
       setPreparingCharacters(false)
     }
@@ -744,13 +882,13 @@ export const ScriptPipelinePage: React.FC = () => {
         reference_image_original_name: profile.reference_image_original_name,
         three_view_image_url: profile.three_view_image_url,
         three_view_prompt: profile.three_view_prompt,
+        face_closeup_image_url: profile.face_closeup_image_url,
       })
       const createdProfile = response.data
       setCharacterProfiles((previous) => [createdProfile, ...previous.filter((item) => item.id !== createdProfile.id)])
       message.success(`已将临时角色「${profile.name}」保存到角色档案库`)
     } catch (requestError: unknown) {
-      const responseError = requestError as { response?: { data?: { detail?: string } } }
-      message.error(responseError.response?.data?.detail || '保存临时角色失败')
+      message.error(extractApiErrorMessage(requestError, '保存临时角色失败'))
     } finally {
       setSavingTemporaryCharacterIds((previous) => previous.filter((item) => item !== profileId))
     }
@@ -761,26 +899,30 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
+    const normalizedMaxSegmentDuration = normalizeMaxSegmentDuration(maxSegmentDuration)
+
     setCurrentStep(2)
     setSplitLoading(true)
     setError(null)
     setSegments([])
+    setSplitValidationReport(null)
     setKeyframes([])
     setRenderTaskId(null)
     setRenderStatus(null)
+    setMaxSegmentDuration(normalizedMaxSegmentDuration)
 
     try {
       const response = await scriptPipelineApi.splitScript({
         script_text: scriptDraft,
-        max_segment_duration: maxSegmentDuration,
+        max_segment_duration: normalizedMaxSegmentDuration,
         target_total_duration: targetTotalDuration || undefined,
       })
-      setSegments(response.data.segments)
+      setSegments(normalizeSegmentItems(response.data.segments))
+      setSplitValidationReport(response.data.validation_report || null)
       setKeyframes([])
       setCurrentStep(2)
     } catch (requestError: unknown) {
-      const responseError = requestError as { response?: { data?: { detail?: string } } }
-      setError(responseError.response?.data?.detail || '视频片段拆分失败')
+      setError(extractApiErrorMessage(requestError, '视频片段拆分失败'))
       setCurrentStep(1)
     } finally {
       setSplitLoading(false)
@@ -788,8 +930,11 @@ export const ScriptPipelinePage: React.FC = () => {
   }
 
   const handleSegmentChange = (index: number, patch: Partial<SegmentItem>) => {
+    setSplitValidationReport(null)
     setSegments((previous) =>
-      previous.map((segment, segmentIndex) => (segmentIndex === index ? { ...segment, ...patch } : segment)),
+      previous.map((segment, segmentIndex) =>
+        segmentIndex === index ? normalizeSegmentItem({ ...segment, ...patch }) : segment,
+      ),
     )
   }
 
@@ -798,12 +943,15 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
+    const normalizedSegments = normalizeSegmentItems(segments)
+
     setCurrentStep(3)
     setKeyframeLoading(true)
     setError(null)
     setKeyframes([])
     setRenderTaskId(null)
     setRenderStatus(null)
+    setSegments(normalizedSegments)
 
     try {
       const response = await scriptPipelineApi.generateKeyframes({
@@ -812,13 +960,12 @@ export const ScriptPipelinePage: React.FC = () => {
         selected_character_ids: selectedCharacterIds,
         selected_scene_ids: selectedSceneIds,
         reference_images: referenceImages,
-        segments,
+        segments: normalizedSegments,
       })
       setKeyframes(response.data.keyframes)
       setCurrentStep(3)
     } catch (requestError: unknown) {
-      const responseError = requestError as { response?: { data?: { detail?: string } } }
-      setError(responseError.response?.data?.detail || '首尾帧生成失败')
+      setError(extractApiErrorMessage(requestError, '首尾帧生成失败'))
       setCurrentStep(2)
     } finally {
       setKeyframeLoading(false)
@@ -830,14 +977,18 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
+    const normalizedSegments = normalizeSegmentItems(segments)
+
     setCurrentStep(4)
     setRenderStarting(true)
     setError(null)
     setRenderTaskId(null)
     setRenderStatus(null)
+    setSegments(normalizedSegments)
 
     try {
       const response = await scriptPipelineApi.renderProject({
+        project_id: selectedProjectId || undefined,
         project_title: projectTitle.trim() || '未命名项目',
         provider,
         resolution,
@@ -853,16 +1004,55 @@ export const ScriptPipelinePage: React.FC = () => {
         selected_scene_ids: selectedSceneIds,
         character_profiles: generatedScript?.character_profiles || [],
         scene_profiles: generatedScript?.scene_profiles || [],
-        segments,
+        segments: normalizedSegments,
         keyframes,
       })
       setRenderTaskId(response.data.task_id)
       setCurrentStep(4)
     } catch (requestError: unknown) {
-      const responseError = requestError as { response?: { data?: { detail?: string } } }
-      setError(responseError.response?.data?.detail || '渲染任务启动失败')
+      setError(extractApiErrorMessage(requestError, '渲染任务启动失败'))
       setCurrentStep(3)
     } finally {
+      setRenderStarting(false)
+    }
+  }
+
+  const handleCancelRender = async () => {
+    if (!renderTaskId) {
+      return
+    }
+
+    setRenderActionLoading(true)
+    setError(null)
+    try {
+      const response = await scriptPipelineApi.cancelRenderTask(renderTaskId)
+      setRenderStatus(response.data)
+      message.success('渲染任务已取消')
+    } catch (requestError: unknown) {
+      message.error(extractApiErrorMessage(requestError, '取消渲染任务失败'))
+    } finally {
+      setRenderActionLoading(false)
+    }
+  }
+
+  const handleRetryRender = async () => {
+    if (!renderTaskId) {
+      return
+    }
+
+    setRenderActionLoading(true)
+    setRenderStarting(true)
+    setError(null)
+    try {
+      const response = await scriptPipelineApi.retryRenderTask(renderTaskId)
+      setRenderTaskId(response.data.task_id)
+      setRenderStatus(null)
+      setCurrentStep(4)
+      message.success('渲染任务已重新提交到队列')
+    } catch (requestError: unknown) {
+      message.error(extractApiErrorMessage(requestError, '重试渲染任务失败'))
+    } finally {
+      setRenderActionLoading(false)
       setRenderStarting(false)
     }
   }
@@ -915,6 +1105,8 @@ export const ScriptPipelinePage: React.FC = () => {
   const finalPreviewType = renderStatus?.final_output?.asset_type
   const previousStepIndex = Math.max(currentStep - 1, 0)
   const nextStepIndex = Math.min(currentStep + 1, stepItems.length - 1)
+  const canCancelRender = renderStatus ? ['queued', 'dispatching', 'processing'].includes(renderStatus.status) : false
+  const canRetryRender = renderStatus ? ['failed', 'cancelled'].includes(renderStatus.status) : false
 
   const renderStepContent = () => {
     if (currentStep === 0) {
@@ -958,10 +1150,12 @@ export const ScriptPipelinePage: React.FC = () => {
                   <Text>单片段最大时长</Text>
                   <InputNumber
                     min={3}
-                    max={15}
+                    max={MAX_SEGMENT_DURATION}
                     style={{ width: '100%', marginTop: 8 }}
                     value={maxSegmentDuration}
-                    onChange={(value) => setMaxSegmentDuration(Number(value) || 10)}
+                    onChange={(value) =>
+                      setMaxSegmentDuration(normalizeMaxSegmentDuration(Number(value) || MAX_SEGMENT_DURATION))
+                    }
                   />
                 </Col>
                 <Col xs={24} md={12}>
@@ -1231,6 +1425,80 @@ export const ScriptPipelinePage: React.FC = () => {
             showIcon
             message={`当前已拆分为 ${segments.length} 个片段。片段不做时间重叠，只保留画面连续性。`}
           />
+          {splitValidationReport ? (
+            <Card title="片段二次校验">
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Alert
+                  showIcon
+                  type={validationStatusToAlertType(splitValidationReport.status)}
+                  message={splitValidationReport.summary || '拆分结果已完成二次校验'}
+                  description={
+                    <Space wrap>
+                      <Tag color={validationStatusToTagColor(splitValidationReport.status)}>
+                        {splitValidationReport.status === 'fail'
+                          ? '未通过'
+                          : splitValidationReport.status === 'warning'
+                            ? '需关注'
+                            : '通过'}
+                      </Tag>
+                      <Text>实际总时长：{splitValidationReport.actual_total_duration || 0} 秒</Text>
+                      {splitValidationReport.target_total_duration ? (
+                        <Text>目标总时长：{splitValidationReport.target_total_duration} 秒</Text>
+                      ) : null}
+                      {splitValidationReport.source ? <Text>校验来源：{splitValidationReport.source}</Text> : null}
+                    </Space>
+                  }
+                />
+                {splitValidationReport.checks?.length ? (
+                  <Descriptions bordered size="small" column={1} title="校验项">
+                    {splitValidationReport.checks.map((item) => (
+                      <Descriptions.Item
+                        key={item.code}
+                        label={
+                          <Space size={8}>
+                            <span>{item.label}</span>
+                            <Tag color={validationStatusToTagColor(item.status)}>
+                              {item.status === 'fail' ? '未通过' : item.status === 'warning' ? '需关注' : '通过'}
+                            </Tag>
+                          </Space>
+                        }
+                      >
+                        {item.detail}
+                      </Descriptions.Item>
+                    ))}
+                  </Descriptions>
+                ) : null}
+                {splitValidationReport.issues?.length ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="全局问题"
+                    description={
+                      <Space direction="vertical" size={4}>
+                        {splitValidationReport.issues.map((item, index) => (
+                          <Text key={`${item}-${index}`}>{index + 1}. {item}</Text>
+                        ))}
+                      </Space>
+                    }
+                  />
+                ) : null}
+                {splitValidationReport.suggestions?.length ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="调整建议"
+                    description={
+                      <Space direction="vertical" size={4}>
+                        {splitValidationReport.suggestions.map((item, index) => (
+                          <Text key={`${item}-${index}`}>{index + 1}. {item}</Text>
+                        ))}
+                      </Space>
+                    }
+                  />
+                ) : null}
+              </Space>
+            </Card>
+          ) : null}
           <Card title="视频片段审核">
             {splitLoading ? (
               <div style={{ padding: '72px 0', textAlign: 'center' }}>
@@ -1261,7 +1529,7 @@ export const ScriptPipelinePage: React.FC = () => {
                           <Text>片段时长</Text>
                           <InputNumber
                             min={1}
-                            max={30}
+                            max={MAX_SEGMENT_DURATION}
                             style={{ width: '100%', marginTop: 8 }}
                             value={segment.duration}
                             onChange={(value) => handleSegmentChange(index, { duration: Number(value) || segment.duration })}
@@ -1316,6 +1584,61 @@ export const ScriptPipelinePage: React.FC = () => {
                           />
                         </Col>
                       </Row>
+                      {splitValidationReport?.segment_reviews?.find((item) => item.segment_number === segment.segment_number) ? (
+                        (() => {
+                          const review = splitValidationReport.segment_reviews.find(
+                            (item) => item.segment_number === segment.segment_number,
+                          )
+                          if (!review) {
+                            return null
+                          }
+                          return (
+                            <Card
+                              size="small"
+                              title={
+                                <Space size={8}>
+                                  <span>片段审核结论</span>
+                                  <Tag color={validationStatusToTagColor(review.status)}>
+                                    {review.status === 'fail' ? '未通过' : review.status === 'warning' ? '需关注' : '通过'}
+                                  </Tag>
+                                </Space>
+                              }
+                            >
+                              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                                <Text>{review.summary}</Text>
+                                {review.issues?.length ? (
+                                  <Alert
+                                    type="warning"
+                                    showIcon
+                                    message="本段问题"
+                                    description={
+                                      <Space direction="vertical" size={4}>
+                                        {review.issues.map((item, reviewIndex) => (
+                                          <Text key={`${item}-${reviewIndex}`}>{reviewIndex + 1}. {item}</Text>
+                                        ))}
+                                      </Space>
+                                    }
+                                  />
+                                ) : null}
+                                {review.suggestions?.length ? (
+                                  <Alert
+                                    type="info"
+                                    showIcon
+                                    message="本段建议"
+                                    description={
+                                      <Space direction="vertical" size={4}>
+                                        {review.suggestions.map((item, reviewIndex) => (
+                                          <Text key={`${item}-${reviewIndex}`}>{reviewIndex + 1}. {item}</Text>
+                                        ))}
+                                      </Space>
+                                    }
+                                  />
+                                ) : null}
+                              </Space>
+                            </Card>
+                          )
+                        })()
+                      ) : null}
                     </Space>
                   ),
                 }))}
@@ -1575,6 +1898,24 @@ export const ScriptPipelinePage: React.FC = () => {
                     description={(renderStatus.warnings || []).join('；') || '请检查 provider 配置、账号权限和关键帧输入。'}
                   />
                 ) : null}
+                {renderStatus.status === 'failed' && renderStatus.error ? (
+                  <Alert type="error" showIcon message="渲染失败" description={renderStatus.error} />
+                ) : null}
+                {renderStatus.status === 'cancelled' ? (
+                  <Alert type="info" showIcon message="渲染任务已取消" description="可以直接重试，系统会创建新的任务继续渲染。" />
+                ) : null}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+                  {canCancelRender ? (
+                    <Button danger loading={renderActionLoading} onClick={handleCancelRender}>
+                      取消任务
+                    </Button>
+                  ) : null}
+                  {canRetryRender ? (
+                    <Button loading={renderActionLoading || renderStarting} onClick={handleRetryRender}>
+                      重试任务
+                    </Button>
+                  ) : null}
+                </div>
               </Space>
             ) : (
               <div style={{ padding: '72px 0', textAlign: 'center' }}>
@@ -1627,6 +1968,11 @@ export const ScriptPipelinePage: React.FC = () => {
               <Button loading={renderStarting} disabled={!segments.length} onClick={handleStartRender}>
                 重新生成视频
               </Button>
+              {canRetryRender ? (
+                <Button loading={renderActionLoading || renderStarting} onClick={handleRetryRender}>
+                  重试任务
+                </Button>
+              ) : null}
               <Button type="primary" disabled={renderStatus?.status !== 'completed'} onClick={() => setCurrentStep(5)}>
                 查看最终结果
               </Button>
@@ -1701,6 +2047,11 @@ export const ScriptPipelinePage: React.FC = () => {
             <Button loading={renderStarting} disabled={!segments.length} onClick={handleStartRender}>
               重新生成视频
             </Button>
+            {canRetryRender ? (
+              <Button loading={renderActionLoading || renderStarting} onClick={handleRetryRender}>
+                重试任务
+              </Button>
+            ) : null}
             <Button type="primary" icon={<RightOutlined />} onClick={handleReset}>
               开始新的项目
             </Button>

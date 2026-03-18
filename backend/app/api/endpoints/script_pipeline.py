@@ -17,7 +17,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +80,7 @@ class CharacterProfilePayload(BaseModel):
     reference_image_original_name: str = ""
     three_view_image_url: str = ""
     three_view_prompt: str = ""
+    face_closeup_image_url: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -121,6 +122,7 @@ class CreateCharacterRequest(BaseModel):
     reference_image_original_name: str = Field(default="", description="参考图原始文件名")
     three_view_image_url: str = Field(default="", description="三视图图片 URL")
     three_view_prompt: str = Field(default="", description="三视图生成提示词")
+    face_closeup_image_url: str = Field(default="", description="面部特写图片 URL")
 
 
 class SceneProfilePayload(BaseModel):
@@ -258,7 +260,7 @@ class SplitScriptRequest(BaseModel):
     """剧本拆分请求。"""
 
     script_text: str = Field(..., min_length=1, description="用户审核后的完整剧本文本")
-    max_segment_duration: float = Field(default=10.0, ge=3.0, le=15.0)
+    max_segment_duration: float = Field(default=10.0, ge=3.0, le=10.0)
     target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0)
 
 
@@ -270,7 +272,7 @@ class SegmentPayload(BaseModel):
     description: str = ""
     start_time: float = 0.0
     end_time: float = 0.0
-    duration: float = 5.0
+    duration: float = Field(default=5.0, ge=1.0, le=10.0)
     shots_summary: str = ""
     key_actions: List[str] = Field(default_factory=list)
     key_dialogues: List[str] = Field(default_factory=list)
@@ -595,6 +597,7 @@ async def delete_character(character_id: str, db: AsyncSession = Depends(get_db)
 class RenderProjectRequest(BaseModel):
     """渲染与合成请求。"""
 
+    project_id: str = Field(default="", description="项目 ID")
     project_title: str = Field(default="未命名项目")
     provider: str = Field(default="auto", description="视频生成 provider")
     resolution: str = Field(default="720p", description="输出分辨率")
@@ -770,8 +773,8 @@ async def generate_keyframes(request: GenerateKeyframesRequest, db: AsyncSession
 @router.post("/render")
 async def render_project(
     request: RenderProjectRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
     """发起片段渲染和最终合成。"""
     try:
@@ -785,7 +788,9 @@ async def render_project(
             selected_scene_ids=request.selected_scene_ids,
             direct_scene_profiles=[profile.model_dump() for profile in request.scene_profiles],
         )
-        task_state = pipeline_workflow_service.create_render_task(
+        task_state = await pipeline_workflow_service.create_render_task(
+            user_id=current_user.id,
+            project_id=request.project_id,
             project_title=request.project_title,
             segments=[segment.model_dump() for segment in request.segments],
             keyframes=[bundle.model_dump() for bundle in request.keyframes],
@@ -804,10 +809,10 @@ async def render_project(
                 "seed": request.seed,
             },
         )
-        background_tasks.add_task(pipeline_workflow_service.run_render_task, task_state.task_id)
+        await pipeline_workflow_service.start_render_task(task_state.task_id)
         return {
             "success": True,
-            "message": "渲染任务已启动",
+            "message": "渲染任务已提交到队列",
             "task_id": task_state.task_id,
             "status": task_state.status,
             "current_step": task_state.current_step,
@@ -819,12 +824,60 @@ async def render_project(
 
 
 @router.get("/render/{task_id}")
-async def get_render_status(task_id: str):
+async def get_render_status(
+    task_id: str,
+    current_user=Depends(get_current_user),
+):
     """查询渲染任务状态。"""
-    result = pipeline_workflow_service.get_render_task(task_id)
+    result = await pipeline_workflow_service.get_render_task(task_id, user_id=current_user.id)
     if not result:
         raise HTTPException(status_code=404, detail="任务不存在")
     return result
+
+
+@router.post("/render/{task_id}/cancel")
+async def cancel_render_task(
+    task_id: str,
+    current_user=Depends(get_current_user),
+):
+    """取消渲染任务。"""
+    try:
+        state = await pipeline_workflow_service.cancel_render_task(task_id, user_id=current_user.id)
+        if not state:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return state.to_dict()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Cancel render task failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"取消渲染任务失败: {exc}") from exc
+
+
+@router.post("/render/{task_id}/retry")
+async def retry_render_task(
+    task_id: str,
+    current_user=Depends(get_current_user),
+):
+    """重试失败或已取消的渲染任务。"""
+    try:
+        task_state = await pipeline_workflow_service.retry_render_task(task_id, user_id=current_user.id)
+        if not task_state:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {
+            "success": True,
+            "message": "渲染任务已重新提交到队列",
+            "task_id": task_state.task_id,
+            "status": task_state.status,
+            "current_step": task_state.current_step,
+            "renderer": task_state.renderer,
+        }
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Retry render task failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"重试渲染任务失败: {exc}") from exc
 
 
 @router.get("/health")

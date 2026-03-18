@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from PIL import Image
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +20,8 @@ from app.core.config import settings
 from app.models.pipeline_character_profile import PipelineCharacterProfile
 from app.services.nanobanana_pro import NanoBananaProClient
 
+logger = logging.getLogger(__name__)
+
 
 class PipelineCharacterLibraryService:
     def __init__(self) -> None:
@@ -24,9 +29,11 @@ class PipelineCharacterLibraryService:
         self.reference_root = self.library_root / "references"
         self.prototype_root = self.library_root / "prototypes"
         self.three_view_root = self.library_root / "three_views"
+        self.face_closeup_root = self.library_root / "face_closeups"
         self.reference_root.mkdir(parents=True, exist_ok=True)
         self.prototype_root.mkdir(parents=True, exist_ok=True)
         self.three_view_root.mkdir(parents=True, exist_ok=True)
+        self.face_closeup_root.mkdir(parents=True, exist_ok=True)
         self.nanobanana = NanoBananaProClient()
 
     async def list_profiles(self, db: AsyncSession) -> List[Dict[str, Any]]:
@@ -36,7 +43,9 @@ class PipelineCharacterLibraryService:
                 PipelineCharacterProfile.created_at.desc(),
             )
         )
-        return [item.to_dict() for item in result.scalars().all()]
+        profiles = result.scalars().all()
+        await self._backfill_missing_face_closeups(db, profiles)
+        return [item.to_dict() for item in profiles]
 
     async def get_profile_by_id(self, db: AsyncSession, profile_id: str) -> Optional[Dict[str, Any]]:
         normalized_id = str(profile_id or "").strip()
@@ -47,6 +56,8 @@ class PipelineCharacterLibraryService:
             select(PipelineCharacterProfile).where(PipelineCharacterProfile.id == normalized_id)
         )
         profile = result.scalar_one_or_none()
+        if profile:
+            await self._backfill_missing_face_closeups(db, [profile])
         return profile.to_dict() if profile else None
 
     async def get_profiles_by_ids(self, db: AsyncSession, profile_ids: List[str]) -> List[Dict[str, Any]]:
@@ -57,7 +68,9 @@ class PipelineCharacterLibraryService:
         result = await db.execute(
             select(PipelineCharacterProfile).where(PipelineCharacterProfile.id.in_(normalized_ids))
         )
-        lookup = {item.id: item.to_dict() for item in result.scalars().all()}
+        profiles = result.scalars().all()
+        await self._backfill_missing_face_closeups(db, profiles)
+        lookup = {item.id: item.to_dict() for item in profiles}
         return [lookup[profile_id] for profile_id in normalized_ids if profile_id in lookup]
 
     async def create_profile(self, db: AsyncSession, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -68,6 +81,7 @@ class PipelineCharacterLibraryService:
         final_reference_image_url = str(payload.get("reference_image_url") or "").strip()
         generated_three_view_url = str(payload.get("three_view_image_url") or "").strip()
         generated_three_view_prompt = str(payload.get("three_view_prompt") or "").strip()
+        generated_face_closeup_url = str(payload.get("face_closeup_image_url") or "").strip()
         if final_reference_image_url and not generated_three_view_url:
             try:
                 generated_three_view = await self.generate_three_view_asset(
@@ -84,6 +98,21 @@ class PipelineCharacterLibraryService:
             except Exception:
                 generated_three_view_url = ""
                 generated_three_view_prompt = ""
+
+        if final_reference_image_url and not generated_face_closeup_url:
+            try:
+                generated_face_closeup_url = await asyncio.to_thread(
+                    self._generate_face_closeup_asset,
+                    final_reference_image_url,
+                )
+            except Exception:
+                logger.warning(
+                    "Generate face closeup failed during character create: name=%s reference=%s",
+                    name,
+                    final_reference_image_url,
+                    exc_info=True,
+                )
+                generated_face_closeup_url = ""
 
         now = datetime.utcnow()
         profile = PipelineCharacterProfile(
@@ -126,6 +155,8 @@ class PipelineCharacterLibraryService:
             three_view_image_url=generated_three_view_url or None,
             three_view_image_path=self._asset_url_to_db_path(generated_three_view_url),
             three_view_prompt=generated_three_view_prompt or None,
+            face_closeup_image_url=generated_face_closeup_url or None,
+            face_closeup_image_path=self._asset_url_to_db_path(generated_face_closeup_url),
             created_at=now,
             updated_at=now,
         )
@@ -158,10 +189,12 @@ class PipelineCharacterLibraryService:
         original_reference_image_url = profile.reference_image_url or ""
         original_reference_image_path = profile.reference_image_path or ""
         original_three_view_image_path = profile.three_view_image_path or ""
+        original_face_closeup_image_path = profile.face_closeup_image_path or ""
 
         final_reference_image_url = str(payload.get("reference_image_url") or "").strip()
         generated_three_view_url = str(payload.get("three_view_image_url") or "").strip()
         generated_three_view_prompt = str(payload.get("three_view_prompt") or "").strip()
+        generated_face_closeup_url = str(payload.get("face_closeup_image_url") or "").strip()
 
         reference_image_changed = final_reference_image_url != original_reference_image_url
 
@@ -187,6 +220,28 @@ class PipelineCharacterLibraryService:
         else:
             generated_three_view_url = generated_three_view_url or (profile.three_view_image_url or "")
             generated_three_view_prompt = generated_three_view_prompt or (profile.three_view_prompt or "")
+
+        if final_reference_image_url and (
+            reference_image_changed or not (profile.face_closeup_image_url or "").strip()
+        ):
+            try:
+                generated_face_closeup_url = await asyncio.to_thread(
+                    self._generate_face_closeup_asset,
+                    final_reference_image_url,
+                )
+            except Exception:
+                logger.warning(
+                    "Generate face closeup failed during character update: profile_id=%s name=%s reference=%s",
+                    profile.id,
+                    name,
+                    final_reference_image_url,
+                    exc_info=True,
+                )
+                generated_face_closeup_url = profile.face_closeup_image_url or ""
+        elif not final_reference_image_url:
+            generated_face_closeup_url = ""
+        else:
+            generated_face_closeup_url = generated_face_closeup_url or (profile.face_closeup_image_url or "")
 
         profile.name = name
         profile.category = str(payload.get("category") or "").strip()
@@ -228,6 +283,8 @@ class PipelineCharacterLibraryService:
         profile.three_view_image_url = generated_three_view_url or None
         profile.three_view_image_path = self._asset_url_to_db_path(generated_three_view_url)
         profile.three_view_prompt = generated_three_view_prompt or None
+        profile.face_closeup_image_url = generated_face_closeup_url or None
+        profile.face_closeup_image_path = self._asset_url_to_db_path(generated_face_closeup_url)
         profile.updated_at = datetime.utcnow()
 
         await db.commit()
@@ -237,6 +294,8 @@ class PipelineCharacterLibraryService:
             self._delete_local_asset(original_reference_image_path)
         if original_three_view_image_path and original_three_view_image_path != profile.three_view_image_path:
             self._delete_local_asset(original_three_view_image_path)
+        if original_face_closeup_image_path and original_face_closeup_image_path != profile.face_closeup_image_path:
+            self._delete_local_asset(original_face_closeup_image_path)
 
         return profile.to_dict()
 
@@ -250,6 +309,7 @@ class PipelineCharacterLibraryService:
 
         self._delete_local_asset(profile.reference_image_path)
         self._delete_local_asset(profile.three_view_image_path)
+        self._delete_local_asset(profile.face_closeup_image_path)
 
         await db.execute(delete(PipelineCharacterProfile).where(PipelineCharacterProfile.id == profile_id))
         await db.commit()
@@ -456,8 +516,44 @@ class PipelineCharacterLibraryService:
             "reference_image_original_name": str(profile.get("reference_image_original_name") or "").strip(),
             "three_view_image_url": str(profile.get("three_view_image_url") or "").strip(),
             "three_view_prompt": str(profile.get("three_view_prompt") or "").strip(),
+            "face_closeup_image_url": str(profile.get("face_closeup_image_url") or "").strip(),
+            "display_image_url": str(profile.get("display_image_url") or profile.get("reference_image_url") or "").strip(),
+            "identity_reference_images": self._build_identity_reference_images(profile),
+            "identity_anchor_pack": self._build_identity_anchor_pack(profile),
             "created_at": str(profile.get("created_at") or now),
             "updated_at": str(profile.get("updated_at") or profile.get("created_at") or now),
+        }
+
+    def _build_identity_reference_images(self, profile: Dict[str, Any]) -> List[Dict[str, str]]:
+        items: List[Dict[str, str]] = []
+        main_reference = str(profile.get("reference_image_url") or "").strip()
+        three_view = str(profile.get("three_view_image_url") or "").strip()
+        face_closeup = str(profile.get("face_closeup_image_url") or "").strip()
+        if main_reference:
+            items.append({"type": "main_reference", "label": "主参考图", "url": main_reference})
+        if three_view:
+            items.append({"type": "three_view", "label": "三视图", "url": three_view})
+        if face_closeup:
+            items.append({"type": "face_closeup", "label": "面部特写", "url": face_closeup})
+        return items
+
+    def _build_identity_anchor_pack(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "character_id": str(profile.get("id") or "").strip(),
+            "profile_version": self._normalize_profile_version(profile.get("profile_version")),
+            "display_image_url": str(profile.get("reference_image_url") or "").strip(),
+            "three_view_image_url": str(profile.get("three_view_image_url") or "").strip(),
+            "face_closeup_image_url": str(profile.get("face_closeup_image_url") or "").strip(),
+            "must_keep": self._normalize_list_field(profile.get("must_keep") or []),
+            "forbidden_traits": self._normalize_list_field(profile.get("forbidden_traits") or []),
+            "core_appearance": str(profile.get("core_appearance") or "").strip(),
+            "outfit": str(profile.get("outfit") or "").strip(),
+            "color_palette": str(profile.get("color_palette") or "").strip(),
+            "speaking_style": str(profile.get("speaking_style") or "").strip(),
+            "common_actions": str(profile.get("common_actions") or "").strip(),
+            "llm_summary": str(profile.get("llm_summary") or "").strip(),
+            "image_prompt_base": str(profile.get("image_prompt_base") or "").strip(),
+            "video_prompt_base": str(profile.get("video_prompt_base") or "").strip(),
         }
 
     def _build_three_view_prompt(
@@ -573,6 +669,47 @@ class PipelineCharacterLibraryService:
             normalized = 1
         return normalized if normalized > 0 else 1
 
+    async def _backfill_missing_face_closeups(
+        self,
+        db: AsyncSession,
+        profiles: List[PipelineCharacterProfile],
+    ) -> None:
+        missing_profiles = [
+            profile
+            for profile in profiles
+            if (profile.reference_image_url or "").strip() and not (profile.face_closeup_image_url or "").strip()
+        ]
+        if not missing_profiles:
+            return
+
+        updated = False
+        for profile in missing_profiles:
+            try:
+                generated_face_closeup_url = await asyncio.to_thread(
+                    self._generate_face_closeup_asset,
+                    str(profile.reference_image_url or "").strip(),
+                )
+            except Exception:
+                logger.warning(
+                    "Backfill face closeup failed: profile_id=%s name=%s reference=%s",
+                    profile.id,
+                    profile.name,
+                    profile.reference_image_url,
+                    exc_info=True,
+                )
+                continue
+
+            if not generated_face_closeup_url:
+                continue
+
+            profile.face_closeup_image_url = generated_face_closeup_url
+            profile.face_closeup_image_path = self._asset_url_to_db_path(generated_face_closeup_url)
+            profile.updated_at = datetime.utcnow()
+            updated = True
+
+        if updated:
+            await db.commit()
+
     def _guess_suffix(self, filename: str, content_type: str) -> str:
         source = filename or ""
         ext = Path(source).suffix.lower()
@@ -583,6 +720,32 @@ class PipelineCharacterLibraryService:
         if content_type == "image/webp":
             return ".webp"
         return ".jpg"
+
+    def _generate_face_closeup_asset(self, reference_image_url: str) -> str:
+        reference_path = self._asset_url_to_path(reference_image_url)
+        if not reference_path or not reference_path.exists():
+            raise ValueError("参考图不存在，无法生成面部特写")
+
+        asset_id = uuid.uuid4().hex
+        output_path = self.face_closeup_root / f"{asset_id}_face_closeup.png"
+
+        with Image.open(reference_path) as image:
+            prepared = image.convert("RGB")
+            width, height = prepared.size
+            crop_size = max(64, int(min(width, height) * 0.56))
+            crop_size = min(crop_size, width, height)
+
+            center_x = width / 2
+            center_y = height * 0.3
+            left = int(max(0, min(width - crop_size, center_x - crop_size / 2)))
+            top = int(max(0, min(height - crop_size, center_y - crop_size / 2)))
+            right = left + crop_size
+            bottom = top + crop_size
+
+            closeup = prepared.crop((left, top, right, bottom)).resize((1024, 1024))
+            closeup.save(output_path, format="PNG")
+
+        return self._build_asset_url(output_path)
 
 
 pipeline_character_library_service = PipelineCharacterLibraryService()

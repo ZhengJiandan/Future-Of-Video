@@ -147,7 +147,7 @@ export const CharacterLibraryListPage: React.FC = () => {
             type="info"
             showIcon
             message="使用方式"
-            description="先在角色创建工作台打磨角色原型图和设定，保存后再回到这里筛选、查看和删除。这里展示的是面向用户确认的角色图，不展示内部三视图。"
+            description="先在角色创建工作台打磨角色原型图和设定，保存后再回到这里筛选、查看和删除。列表主图仍展示用户确认的角色图，但每个角色卡片下方会标明内部身份锚点是否齐全。"
           />
 
           <Row gutter={[12, 12]}>
@@ -249,6 +249,16 @@ export const CharacterLibraryListPage: React.FC = () => {
 
                   {character.personality ? (
                     <Text type="secondary">性格: {character.personality}</Text>
+                  ) : null}
+
+                  {character.identity_reference_images?.length ? (
+                    <Space wrap size={[6, 6]}>
+                      {character.identity_reference_images.map((item) => (
+                        <Tag key={`${character.id}-${item.type}`} color={item.type === 'face_closeup' ? 'magenta' : item.type === 'three_view' ? 'cyan' : 'default'}>
+                          {item.label}
+                        </Tag>
+                      ))}
+                    </Space>
                   ) : null}
 
                   {character.must_keep?.length ? (

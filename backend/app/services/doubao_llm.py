@@ -72,14 +72,57 @@ class DoubaoLLM:
 
         if not self.api_key:
             raise ValueError("DOUBAO_API_KEY 未配置，无法调用豆包大模型生成剧本")
-        
+
+        self.default_timeout = httpx.Timeout(
+            connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
+            read=float(getattr(settings, "DOUBAO_READ_TIMEOUT", 240.0)),
+            write=float(getattr(settings, "DOUBAO_WRITE_TIMEOUT", 60.0)),
+            pool=float(getattr(settings, "DOUBAO_POOL_TIMEOUT", 60.0)),
+        )
+        self.max_retries = max(0, int(getattr(settings, "DOUBAO_MAX_RETRIES", 2)))
+        self.retry_backoff_seconds = float(getattr(settings, "DOUBAO_RETRY_BACKOFF_SECONDS", 2.0))
+        self.debug_logging = bool(getattr(settings, "MODEL_DEBUG_LOGGING", True))
+        self.debug_max_chars = int(getattr(settings, "MODEL_DEBUG_MAX_CHARS", 20000))
+
         # 初始化 HTTP 客户端
         self.client = httpx.AsyncClient(
-            timeout=120.0,
+            timeout=self.default_timeout,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
             }
+        )
+
+    def _truncate_for_log(self, value: str) -> str:
+        if len(value) <= self.debug_max_chars:
+            return value
+        return f"{value[:self.debug_max_chars]}\n...<truncated {len(value) - self.debug_max_chars} chars>"
+
+    def _json_for_log(self, payload: Any) -> str:
+        try:
+            raw = json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception:
+            raw = str(payload)
+        return self._truncate_for_log(raw)
+
+    def _log_request(self, *, request_label: str, request_body: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "Doubao request | model=%s | label=%s\n%s",
+            self.model,
+            request_label,
+            self._json_for_log(request_body),
+        )
+
+    def _log_response(self, *, request_label: str, response_body: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "Doubao response | model=%s | label=%s\n%s",
+            self.model,
+            request_label,
+            self._json_for_log(response_body),
         )
     
     async def chat_completion(
@@ -87,7 +130,10 @@ class DoubaoLLM:
         messages: List[DoubaoMessage],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        top_p: float = 0.9
+        top_p: float = 0.9,
+        timeout: Optional[httpx.Timeout] = None,
+        max_retries: Optional[int] = None,
+        request_label: str = "chat_completion",
     ) -> DoubaoResponse:
         """
         调用豆包大模型进行对话
@@ -101,52 +147,85 @@ class DoubaoLLM:
         Returns:
             DoubaoResponse: 模型响应
         """
-        try:
-            # 构建请求体
-            request_body = {
-                "model": self.model,
-                "messages": [
-                    {"role": msg.role, "content": msg.content}
-                    for msg in messages
-                ],
-                "temperature": temperature,
-                "top_p": top_p
-            }
-            
-            if max_tokens:
-                request_body["max_tokens"] = max_tokens
-            
-            # 发送请求
-            response = await self.client.post(
-                f"{self.base_url}/chat/completions",
-                json=request_body
-            )
-            response.raise_for_status()
-            
-            # 解析响应
-            data = response.json()
-            return DoubaoResponse(**data)
-            
-        except httpx.HTTPStatusError as e:
-            response_text = ""
+        request_body = {
+            "model": self.model,
+            "messages": [
+                {"role": msg.role, "content": msg.content}
+                for msg in messages
+            ],
+            "temperature": temperature,
+            "top_p": top_p
+        }
+
+        if max_tokens:
+            request_body["max_tokens"] = max_tokens
+
+        effective_timeout = timeout or self.default_timeout
+        effective_retries = self.max_retries if max_retries is None else max(0, int(max_retries))
+        self._log_request(request_label=request_label, request_body=request_body)
+
+        for attempt in range(effective_retries + 1):
             try:
-                response_text = e.response.text
-            except Exception:
+                response = await self.client.post(
+                    f"{self.base_url}/chat/completions",
+                    json=request_body,
+                    timeout=effective_timeout,
+                )
+                response.raise_for_status()
+
+                data = response.json()
+                self._log_response(request_label=request_label, response_body=data)
+                return DoubaoResponse(**data)
+
+            except httpx.HTTPStatusError as e:
                 response_text = ""
-            logger.error(
-                "HTTP error calling Doubao API: %s | model=%s | url=%s | response=%s",
-                e,
-                self.model,
-                e.request.url,
-                response_text[:1000],
-            )
-            raise
-        except httpx.HTTPError as e:
-            logger.error("HTTP transport error calling Doubao API: %s | model=%s", e, self.model)
-            raise
-        except Exception as e:
-            logger.error("Error calling Doubao API: %s", e)
-            raise
+                try:
+                    response_text = e.response.text
+                except Exception:
+                    response_text = ""
+                logger.error(
+                    "HTTP error calling Doubao API: %s | model=%s | label=%s | url=%s | response=%s",
+                    e,
+                    self.model,
+                    request_label,
+                    e.request.url,
+                    response_text[:1000],
+                )
+                raise
+            except httpx.ReadTimeout as e:
+                if attempt < effective_retries:
+                    wait_seconds = self.retry_backoff_seconds * (attempt + 1)
+                    logger.warning(
+                        "Doubao API read timeout, retrying: model=%s label=%s attempt=%s/%s wait=%.1fs",
+                        self.model,
+                        request_label,
+                        attempt + 1,
+                        effective_retries + 1,
+                        wait_seconds,
+                    )
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                logger.error(
+                    "Doubao API read timeout after retries: model=%s label=%s retries=%s timeout=%s",
+                    self.model,
+                    request_label,
+                    effective_retries,
+                    effective_timeout,
+                )
+                raise RuntimeError("豆包剧本生成超时，请稍后重试；如持续发生，可增大 DOUBAO_SCRIPT_READ_TIMEOUT") from e
+            except httpx.HTTPError as e:
+                logger.error(
+                    "HTTP transport error calling Doubao API: %s | model=%s | label=%s",
+                    e,
+                    self.model,
+                    request_label,
+                )
+                raise
+            except Exception as e:
+                logger.error("Error calling Doubao API: %s | label=%s", e, request_label)
+                raise
+
+        raise RuntimeError("豆包请求失败，超过最大重试次数")
     
     def generate_script_prompt(self, user_input: str) -> str:
         """

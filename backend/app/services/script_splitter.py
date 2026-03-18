@@ -31,6 +31,8 @@ from app.services.doubao_llm import DoubaoLLM, DoubaoMessage
 
 logger = logging.getLogger(__name__)
 
+MAX_VIDEO_SEGMENT_DURATION = 10.0
+
 
 @dataclass
 class VideoSegment:
@@ -77,7 +79,7 @@ class VideoSegment:
 @dataclass
 class SplitConfig:
     """剧本拆分配置"""
-    max_segment_duration: float = 10.0     # 每个片段最大时长（秒）
+    max_segment_duration: float = MAX_VIDEO_SEGMENT_DURATION     # 每个片段最大时长（秒）
     min_segment_duration: float = 3.0      # 每个片段最小时长（秒）
     prefer_scene_boundary: bool = True    # 优先在场景边界处拆分
     preserve_dialogue: bool = True        # 保持对话完整性
@@ -95,6 +97,7 @@ class SplitResult:
     
     # 衔接点信息
     continuity_points: List[Dict[str, Any]] = field(default_factory=list)
+    validation_report: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -112,7 +115,8 @@ class SplitResult:
                 }
                 for seg in self.segments
             ],
-            "continuity_points": self.continuity_points
+            "continuity_points": self.continuity_points,
+            "validation_report": self.validation_report,
         }
 
 
@@ -156,6 +160,7 @@ class ScriptSplitter:
     
     def __init__(self, config: Optional[SplitConfig] = None):
         self.config = config or SplitConfig()
+        self.config.max_segment_duration = min(float(self.config.max_segment_duration), MAX_VIDEO_SEGMENT_DURATION)
         self.llm = DoubaoLLM()
     
     async def split_script(
@@ -203,10 +208,31 @@ class ScriptSplitter:
         # 步骤3: 生成分段
         logger.info("步骤3: 生成视频片段...")
         segments = await self._generate_segments(script, split_points)
-        
+
         # 步骤4: 生成衔接信息
         logger.info("步骤4: 生成衔接信息...")
         continuity_points = self._generate_continuity_points(segments)
+
+        # 步骤5: 对拆分结果做二次校验
+        logger.info("步骤5: 校验视频片段...")
+        validation_report = await self._review_segments(
+            script=script,
+            segments=segments,
+            target_duration=target_duration,
+        )
+
+        # 步骤6: 自动修复校验发现的问题，并返回修复后的更优结果
+        logger.info("步骤6: 修复视频片段问题...")
+        segments, continuity_points, validation_report = await self._auto_fix_segments_if_needed(
+            script=script,
+            analysis=analysis,
+            effective_target_duration=effective_target_duration,
+            current_split_points=split_points,
+            current_segments=segments,
+            current_continuity_points=continuity_points,
+            current_validation_report=validation_report,
+            requested_target_duration=target_duration,
+        )
         
         # 组装结果
         total_duration = sum(seg.duration for seg in segments)
@@ -216,7 +242,8 @@ class ScriptSplitter:
             segment_count=len(segments),
             segments=segments,
             config=self.config,
-            continuity_points=continuity_points
+            continuity_points=continuity_points,
+            validation_report=validation_report,
         )
         
         logger.info(f"剧本拆分完成，共 {len(segments)} 个片段，总时长 {total_duration:.1f}秒")
@@ -1004,7 +1031,7 @@ class ScriptSplitter:
                 continue
 
             duration = round(end_time - start_time, 2)
-            if duration < self.config.min_segment_duration - 0.01 or duration > self.config.max_segment_duration + 0.5:
+            if duration < self.config.min_segment_duration - 0.01 or duration > self.config.max_segment_duration + 0.01:
                 continue
 
             segment_shots = self._slice_shots_by_time(parsed_shots, start_time, end_time)
@@ -1164,6 +1191,658 @@ class ScriptSplitter:
             return round(value, 2)
         return min(valid_boundaries, key=lambda point: abs(point - round(value, 2)))
 
+    async def _review_segments(
+        self,
+        *,
+        script: str,
+        segments: List[VideoSegment],
+        target_duration: Optional[float],
+    ) -> Dict[str, Any]:
+        fallback_report = self._build_rule_based_validation_report(
+            segments=segments,
+            target_duration=target_duration,
+        )
+        if not segments:
+            return fallback_report
+
+        try:
+            llm_report = await self._review_segments_with_llm(
+                script=script,
+                segments=segments,
+                target_duration=target_duration,
+            )
+            if llm_report:
+                return llm_report
+        except Exception as exc:
+            logger.warning("LLM segment review failed, fallback to rule validation: %s", exc)
+
+        return fallback_report
+
+    async def _auto_fix_segments_if_needed(
+        self,
+        *,
+        script: str,
+        analysis: Dict[str, Any],
+        effective_target_duration: float,
+        current_split_points: List[Dict[str, Any]],
+        current_segments: List[VideoSegment],
+        current_continuity_points: List[Dict[str, Any]],
+        current_validation_report: Dict[str, Any],
+        requested_target_duration: Optional[float],
+    ) -> tuple[List[VideoSegment], List[Dict[str, Any]], Dict[str, Any]]:
+        current_status = self._normalize_review_status(current_validation_report.get("status"))
+        if current_status == "pass":
+            return current_segments, current_continuity_points, current_validation_report
+
+        parsed_shots: List[ParsedShot] = analysis.get("parsed_shots", []) or []
+        if not parsed_shots:
+            return current_segments, current_continuity_points, current_validation_report
+
+        candidate_variants: List[tuple[str, List[Dict[str, Any]]]] = []
+
+        llm_repaired_split_points = await self._repair_split_points_with_llm(
+            script=script,
+            parsed_shots=parsed_shots,
+            current_segments=current_segments,
+            current_validation_report=current_validation_report,
+            target_duration=effective_target_duration,
+        )
+        if llm_repaired_split_points:
+            candidate_variants.append(("llm_repair", llm_repaired_split_points))
+
+        rule_repaired_split_points = self._repair_split_points_rule_based(
+            analysis=analysis,
+            target_duration=effective_target_duration,
+        )
+        if rule_repaired_split_points:
+            if not self._split_points_equivalent(rule_repaired_split_points, current_split_points):
+                candidate_variants.append(("rule_repair", rule_repaired_split_points))
+
+        best_segments = current_segments
+        best_continuity_points = current_continuity_points
+        best_report = current_validation_report
+        best_source: Optional[str] = None
+
+        for source, split_points in candidate_variants:
+            if self._split_points_equivalent(split_points, current_split_points):
+                continue
+
+            candidate_segments = await self._generate_segments(script, split_points)
+            candidate_continuity_points = self._generate_continuity_points(candidate_segments)
+            candidate_report = await self._review_segments(
+                script=script,
+                segments=candidate_segments,
+                target_duration=requested_target_duration,
+            )
+
+            if self._is_validation_report_better(candidate_report, best_report):
+                best_segments = candidate_segments
+                best_continuity_points = candidate_continuity_points
+                best_report = candidate_report
+                best_source = source
+                if self._normalize_review_status(candidate_report.get("status")) == "pass":
+                    break
+
+        if best_source is None:
+            return current_segments, current_continuity_points, current_validation_report
+
+        enriched_report = dict(best_report)
+        enriched_report["auto_repair_applied"] = True
+        enriched_report["auto_repair_source"] = best_source
+        enriched_report["pre_repair_status"] = current_status
+        enriched_report["pre_repair_summary"] = str(current_validation_report.get("summary") or "")
+        repair_note = (
+            f"系统已自动执行分段修复（{best_source}），并返回更优的拆分结果。"
+        )
+        existing_suggestions = self._normalize_string_list(enriched_report.get("suggestions"))
+        enriched_report["suggestions"] = self._dedupe_text_items([repair_note, *existing_suggestions])
+
+        logger.info(
+            "Segment auto repair applied: source=%s before=%s after=%s",
+            best_source,
+            current_status,
+            self._normalize_review_status(enriched_report.get("status")),
+        )
+        return best_segments, best_continuity_points, enriched_report
+
+    async def _repair_split_points_with_llm(
+        self,
+        *,
+        script: str,
+        parsed_shots: List[ParsedShot],
+        current_segments: List[VideoSegment],
+        current_validation_report: Dict[str, Any],
+        target_duration: float,
+    ) -> List[Dict[str, Any]]:
+        if not parsed_shots or not current_segments:
+            return []
+
+        candidate_boundaries = self._build_candidate_boundaries(parsed_shots, target_duration)
+        timeline = self._build_shot_timeline_for_llm(parsed_shots, target_duration)
+        current_segments_payload = [
+            {
+                "segment_number": segment.segment_number,
+                "title": segment.title,
+                "start_time": round(float(segment.start_time), 2),
+                "end_time": round(float(segment.end_time), 2),
+                "duration": round(float(segment.duration), 2),
+                "description": segment.description,
+                "key_actions": segment.key_actions,
+                "key_dialogues": segment.key_dialogues,
+                "continuity_from_prev": segment.continuity_from_prev,
+                "continuity_to_next": segment.continuity_to_next,
+                "prompt_focus": segment.prompt_focus,
+            }
+            for segment in current_segments
+        ]
+
+        system_prompt = f"""你是一位视频分段修复导演。你不会重写剧情，只会在原剧本镜头时间线基础上修复已有片段拆分结果。
+
+修复目标：
+1. 每个片段时长必须在 {self.config.min_segment_duration:.0f}-{self.config.max_segment_duration:.0f} 秒之间
+2. 片段内容量要和时长匹配，避免在很短时长中塞入过多剧情
+3. 片段之间时间必须连续，承接必须自然
+4. 如果目标总时长存在，修复后总时长要尽量贴近目标
+5. 不要改写剧情，不要新增不存在的情节，只调整分段边界并重写简洁的片段说明
+6. 必须只使用候选边界时间点作为片段起止时间
+
+输出必须是合法 JSON：
+{{
+  "segments": [
+    {{
+      "segment_number": 1,
+      "start_time": 0.0,
+      "end_time": 8.0,
+      "title": "片段标题",
+      "description": "片段描述",
+      "key_actions": ["动作1"],
+      "key_dialogues": ["对话1"],
+      "continuity_from_prev": "",
+      "continuity_to_next": "与下一段的衔接",
+      "prompt_focus": "该段最重要的镜头重点",
+      "split_reason": "修复原因"
+    }}
+  ]
+}}
+
+不要输出解释文字，不要输出 markdown 代码块。"""
+
+        user_prompt = (
+            f"完整剧本：\n{script[:7000]}\n\n"
+            f"镜头时间线：\n{timeline}\n\n"
+            f"候选边界：{json.dumps(candidate_boundaries, ensure_ascii=False)}\n\n"
+            f"当前片段拆分：\n{json.dumps(current_segments_payload, ensure_ascii=False, indent=2)}\n\n"
+            f"当前审核报告：\n{json.dumps(current_validation_report, ensure_ascii=False, indent=2)}\n\n"
+            f"目标总时长：{target_duration:.1f} 秒。请直接输出修复后的 JSON。"
+        )
+
+        try:
+            response = await self.llm.chat_completion(
+                [
+                    DoubaoMessage(role="system", content=system_prompt),
+                    DoubaoMessage(role="user", content=user_prompt),
+                ],
+                temperature=0.2,
+                max_tokens=2600,
+                request_label="script_segment_repair",
+            )
+            payload = self._parse_llm_json(response.get_content().strip())
+            raw_segments = payload.get("segments") or []
+            return self._validate_llm_segments(
+                raw_segments=raw_segments,
+                parsed_shots=parsed_shots,
+                target_duration=target_duration,
+                candidate_boundaries=candidate_boundaries,
+            )
+        except Exception as exc:
+            logger.warning("LLM segment repair failed: %s", exc)
+            return []
+
+    def _repair_split_points_rule_based(
+        self,
+        *,
+        analysis: Dict[str, Any],
+        target_duration: float,
+    ) -> List[Dict[str, Any]]:
+        recalculated = self._calculate_split_points(analysis, target_duration)
+        parsed_shots: List[ParsedShot] = analysis.get("parsed_shots", []) or []
+        if not recalculated or not parsed_shots:
+            return recalculated
+        return self._rebalance_split_points(
+            split_points=recalculated,
+            parsed_shots=parsed_shots,
+            target_duration=target_duration,
+        )
+
+    def _split_points_equivalent(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+    ) -> bool:
+        if len(left) != len(right):
+            return False
+        for left_item, right_item in zip(left, right):
+            if abs(float(left_item.get("start_time", 0.0)) - float(right_item.get("start_time", 0.0))) > 0.01:
+                return False
+            if abs(float(left_item.get("end_time", 0.0)) - float(right_item.get("end_time", 0.0))) > 0.01:
+                return False
+        return True
+
+    def _is_validation_report_better(
+        self,
+        candidate: Dict[str, Any],
+        baseline: Dict[str, Any],
+    ) -> bool:
+        return self._validation_report_score(candidate) > self._validation_report_score(baseline)
+
+    def _validation_report_score(self, report: Dict[str, Any]) -> tuple[int, int, int]:
+        status_rank = {
+            "fail": 0,
+            "warning": 1,
+            "pass": 2,
+        }
+        status = self._normalize_review_status(report.get("status"))
+        issues_count = len(self._normalize_string_list(report.get("issues")))
+        segment_problem_count = sum(
+            1
+            for item in (report.get("segment_reviews") or [])
+            if isinstance(item, dict) and self._normalize_review_status(item.get("status")) != "pass"
+        )
+        return (
+            status_rank.get(status, 0),
+            -issues_count,
+            -segment_problem_count,
+        )
+
+    async def _review_segments_with_llm(
+        self,
+        *,
+        script: str,
+        segments: List[VideoSegment],
+        target_duration: Optional[float],
+    ) -> Optional[Dict[str, Any]]:
+        segment_payload = [
+            {
+                "segment_number": segment.segment_number,
+                "title": segment.title,
+                "start_time": round(float(segment.start_time), 2),
+                "end_time": round(float(segment.end_time), 2),
+                "duration": round(float(segment.duration), 2),
+                "description": segment.description,
+                "shots_summary": segment.shots_summary,
+                "key_actions": segment.key_actions,
+                "key_dialogues": segment.key_dialogues,
+                "continuity_from_prev": segment.continuity_from_prev,
+                "continuity_to_next": segment.continuity_to_next,
+                "prompt_focus": segment.prompt_focus,
+            }
+            for segment in segments
+        ]
+
+        system_prompt = f"""你是一位专业的短剧后期总导演，负责审核“剧本拆分成视频片段”的结果是否适合进入视频生成阶段。
+
+审核重点：
+1. 每个片段时长必须不超过 {self.config.max_segment_duration:.0f} 秒
+2. 片段内容量必须与该片段时长匹配，避免剧情内容明显过多但时长过短
+3. 多个片段之间要具备剧情连续性、动作衔接性、情绪延续性
+4. 如果给了目标总时长，要判断拆分后的总时长是否合理贴合目标
+5. 输出要指出问题最严重的片段，并给出明确修改建议
+
+输出必须是合法 JSON，格式：
+{{
+  "status": "pass|warning|fail",
+  "summary": "整体结论",
+  "checks": [
+    {{
+      "code": "duration_limit",
+      "label": "单片段时长限制",
+      "status": "pass|warning|fail",
+      "detail": "说明"
+    }},
+    {{
+      "code": "content_fit",
+      "label": "片段内容与时长匹配",
+      "status": "pass|warning|fail",
+      "detail": "说明"
+    }},
+    {{
+      "code": "continuity",
+      "label": "多段剧情连贯性",
+      "status": "pass|warning|fail",
+      "detail": "说明"
+    }},
+    {{
+      "code": "target_total_duration",
+      "label": "总时长目标匹配",
+      "status": "pass|warning|fail",
+      "detail": "说明"
+    }}
+  ],
+  "issues": ["全局问题1"],
+  "suggestions": ["全局建议1"],
+  "segment_reviews": [
+    {{
+      "segment_number": 1,
+      "status": "pass|warning|fail",
+      "summary": "这一段的审核结论",
+      "issues": ["问题1"],
+      "suggestions": ["建议1"]
+    }}
+  ]
+}}
+
+不要输出解释文字，不要输出 markdown 代码块。"""
+
+        user_prompt = (
+            f"完整剧本：\n{script[:7000]}\n\n"
+            f"目标总时长：{target_duration if target_duration is not None else '未指定'}\n"
+            f"拆分结果：\n{json.dumps(segment_payload, ensure_ascii=False, indent=2)}\n\n"
+            "请按要求输出 JSON 审核报告。"
+        )
+
+        response = await self.llm.chat_completion(
+            [
+                DoubaoMessage(role="system", content=system_prompt),
+                DoubaoMessage(role="user", content=user_prompt),
+            ],
+            temperature=0.2,
+            max_tokens=2200,
+            request_label="script_segment_review",
+        )
+        parsed = self._parse_llm_json(response.get_content().strip())
+        return self._normalize_validation_report(
+            report=parsed,
+            segments=segments,
+            target_duration=target_duration,
+            source="llm",
+        )
+
+    def _build_rule_based_validation_report(
+        self,
+        *,
+        segments: List[VideoSegment],
+        target_duration: Optional[float],
+    ) -> Dict[str, Any]:
+        checks: List[Dict[str, str]] = []
+        issues: List[str] = []
+        suggestions: List[str] = []
+        segment_reviews: List[Dict[str, Any]] = []
+
+        duration_check_status = "pass"
+        for segment in segments:
+            if float(segment.duration) > self.config.max_segment_duration + 0.01:
+                duration_check_status = "fail"
+                issues.append(
+                    f"片段 {segment.segment_number} 时长 {float(segment.duration):.1f}s，超过 {self.config.max_segment_duration:.0f}s 限制。"
+                )
+
+        checks.append(
+            {
+                "code": "duration_limit",
+                "label": "单片段时长限制",
+                "status": duration_check_status,
+                "detail": "所有片段都在时长限制内。" if duration_check_status == "pass" else "存在片段时长超过限制。",
+            }
+        )
+
+        content_check_status = "pass"
+        for segment in segments:
+            segment_issues = self._estimate_content_fit_issues(segment)
+            status = "pass"
+            summary = "片段内容量与时长基本匹配。"
+            if segment_issues:
+                status = "warning"
+                content_check_status = "warning" if content_check_status == "pass" else content_check_status
+                summary = "片段内容密度偏高，建议压缩剧情或拉长时长。"
+            segment_reviews.append(
+                {
+                    "segment_number": segment.segment_number,
+                    "title": segment.title,
+                    "duration": round(float(segment.duration), 2),
+                    "status": status,
+                    "summary": summary,
+                    "issues": segment_issues,
+                    "suggestions": ["减少同段动作/对白数量，或将该段拆成更清晰的小节奏。"] if segment_issues else [],
+                }
+            )
+
+        checks.append(
+            {
+                "code": "content_fit",
+                "label": "片段内容与时长匹配",
+                "status": content_check_status,
+                "detail": "片段内容量整体可控。"
+                if content_check_status == "pass"
+                else "存在片段在当前时长下承载内容偏多的情况。",
+            }
+        )
+
+        continuity_status = "pass"
+        for index, segment in enumerate(segments):
+            if index == 0:
+                continue
+            previous = segments[index - 1]
+            if abs(float(segment.start_time) - float(previous.end_time)) > 0.1:
+                continuity_status = "fail"
+                issues.append(
+                    f"片段 {previous.segment_number} 与片段 {segment.segment_number} 时间边界不连续："
+                    f"{float(previous.end_time):.1f}s -> {float(segment.start_time):.1f}s。"
+                )
+            elif not (segment.continuity_from_prev or previous.continuity_to_next):
+                if continuity_status == "pass":
+                    continuity_status = "warning"
+                issues.append(
+                    f"片段 {previous.segment_number} 与片段 {segment.segment_number} 缺少明确的承接说明。"
+                )
+
+        checks.append(
+            {
+                "code": "continuity",
+                "label": "多段剧情连贯性",
+                "status": continuity_status,
+                "detail": "片段之间的时间与承接描述基本连贯。"
+                if continuity_status == "pass"
+                else "部分片段之间的衔接还不够清晰。",
+            }
+        )
+
+        actual_total_duration = round(sum(float(segment.duration) for segment in segments), 2)
+        target_status = "pass"
+        target_detail = "未设置目标总时长，跳过该项。"
+        if target_duration is not None:
+            tolerance = self._target_duration_tolerance(target_duration)
+            delta = abs(actual_total_duration - float(target_duration))
+            if delta > tolerance * 1.5:
+                target_status = "fail"
+            elif delta > tolerance:
+                target_status = "warning"
+            target_detail = (
+                f"拆分总时长 {actual_total_duration:.1f}s，目标 {float(target_duration):.1f}s，"
+                f"偏差 {delta:.1f}s。"
+            )
+            if target_status != "pass":
+                issues.append(target_detail)
+                suggestions.append("重新拆分时优先调整前中段时长分配，使总时长更贴近目标。")
+
+        checks.append(
+            {
+                "code": "target_total_duration",
+                "label": "总时长目标匹配",
+                "status": target_status,
+                "detail": target_detail,
+            }
+        )
+
+        if not suggestions and any(check["status"] != "pass" for check in checks):
+            suggestions.append("根据审核报告调整片段划分，再进入首尾帧生成。")
+
+        overall_status = self._merge_statuses(
+            [check["status"] for check in checks] + [item["status"] for item in segment_reviews]
+        )
+        summary = self._build_validation_summary(overall_status, issues)
+
+        return {
+            "status": overall_status,
+            "summary": summary,
+            "checks": checks,
+            "issues": self._dedupe_text_items(issues),
+            "suggestions": self._dedupe_text_items(suggestions),
+            "segment_reviews": segment_reviews,
+            "source": "rules",
+            "target_total_duration": float(target_duration) if target_duration is not None else None,
+            "actual_total_duration": actual_total_duration,
+        }
+
+    def _normalize_validation_report(
+        self,
+        *,
+        report: Dict[str, Any],
+        segments: List[VideoSegment],
+        target_duration: Optional[float],
+        source: str,
+    ) -> Dict[str, Any]:
+        base_report = self._build_rule_based_validation_report(
+            segments=segments,
+            target_duration=target_duration,
+        )
+        allowed_codes = {
+            "duration_limit": "单片段时长限制",
+            "content_fit": "片段内容与时长匹配",
+            "continuity": "多段剧情连贯性",
+            "target_total_duration": "总时长目标匹配",
+        }
+
+        raw_checks = report.get("checks") if isinstance(report.get("checks"), list) else []
+        normalized_checks: List[Dict[str, str]] = []
+        raw_checks_by_code: Dict[str, Dict[str, Any]] = {}
+        for item in raw_checks:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or "").strip()
+            if code in allowed_codes:
+                raw_checks_by_code[code] = item
+
+        for base_check in base_report["checks"]:
+            code = str(base_check["code"])
+            raw_item = raw_checks_by_code.get(code, {})
+            normalized_checks.append(
+                {
+                    "code": code,
+                    "label": allowed_codes[code],
+                    "status": self._normalize_review_status(raw_item.get("status"), fallback=base_check["status"]),
+                    "detail": str(raw_item.get("detail") or base_check["detail"]),
+                }
+            )
+
+        raw_segment_reviews = report.get("segment_reviews") if isinstance(report.get("segment_reviews"), list) else []
+        raw_segment_map: Dict[int, Dict[str, Any]] = {}
+        for item in raw_segment_reviews:
+            if not isinstance(item, dict):
+                continue
+            try:
+                segment_number = int(item.get("segment_number"))
+            except (TypeError, ValueError):
+                continue
+            raw_segment_map[segment_number] = item
+
+        base_segment_map = {
+            int(item["segment_number"]): item
+            for item in base_report["segment_reviews"]
+            if isinstance(item, dict) and item.get("segment_number") is not None
+        }
+        normalized_segment_reviews: List[Dict[str, Any]] = []
+        for segment in segments:
+            base_item = base_segment_map.get(segment.segment_number, {})
+            raw_item = raw_segment_map.get(segment.segment_number, {})
+            normalized_segment_reviews.append(
+                {
+                    "segment_number": segment.segment_number,
+                    "title": segment.title,
+                    "duration": round(float(segment.duration), 2),
+                    "status": self._normalize_review_status(raw_item.get("status"), fallback=base_item.get("status", "pass")),
+                    "summary": str(raw_item.get("summary") or base_item.get("summary") or "该片段可进入下一步。"),
+                    "issues": self._normalize_string_list(raw_item.get("issues") or base_item.get("issues")),
+                    "suggestions": self._normalize_string_list(raw_item.get("suggestions") or base_item.get("suggestions")),
+                }
+            )
+
+        overall_status = self._normalize_review_status(
+            report.get("status"),
+            fallback=self._merge_statuses(
+                [check["status"] for check in normalized_checks] + [item["status"] for item in normalized_segment_reviews]
+            ),
+        )
+        summary = str(report.get("summary") or self._build_validation_summary(overall_status, base_report["issues"]))
+
+        return {
+            "status": overall_status,
+            "summary": summary,
+            "checks": normalized_checks,
+            "issues": self._normalize_string_list(report.get("issues") or base_report["issues"]),
+            "suggestions": self._normalize_string_list(report.get("suggestions") or base_report["suggestions"]),
+            "segment_reviews": normalized_segment_reviews,
+            "source": source,
+            "target_total_duration": float(target_duration) if target_duration is not None else None,
+            "actual_total_duration": round(sum(float(segment.duration) for segment in segments), 2),
+        }
+
+    def _estimate_content_fit_issues(self, segment: VideoSegment) -> List[str]:
+        issues: List[str] = []
+        description_units = len((segment.description or "").strip()) / 26.0
+        summary_units = len((segment.shots_summary or "").strip()) / 36.0
+        action_units = len(segment.key_actions) * 1.4
+        dialogue_units = len(segment.key_dialogues) * 1.2
+        density_score = (description_units + summary_units + action_units + dialogue_units) / max(float(segment.duration), 1.0)
+
+        if float(segment.duration) <= 4.0 and density_score >= 3.2:
+            issues.append("该片段时长偏短，但承载的剧情信息明显偏多。")
+        elif density_score >= 4.2:
+            issues.append("该片段信息密度过高，视频模型可能无法在当前时长内稳定表达。")
+
+        if len(segment.key_actions) + len(segment.key_dialogues) >= 6 and float(segment.duration) <= 5.0:
+            issues.append("单段动作和对白节点过多，建议进一步拆分或压缩。")
+
+        return issues
+
+    def _target_duration_tolerance(self, target_duration: float) -> float:
+        return max(1.0, min(3.0, float(target_duration) * 0.1))
+
+    def _normalize_review_status(self, value: Any, *, fallback: str = "pass") -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"pass", "warning", "fail"}:
+            return normalized
+        return fallback
+
+    def _merge_statuses(self, statuses: List[str]) -> str:
+        normalized = [self._normalize_review_status(item) for item in statuses]
+        if "fail" in normalized:
+            return "fail"
+        if "warning" in normalized:
+            return "warning"
+        return "pass"
+
+    def _normalize_string_list(self, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return self._dedupe_text_items([str(item).strip() for item in value if str(item).strip()])
+
+    def _dedupe_text_items(self, items: List[str]) -> List[str]:
+        seen = set()
+        result: List[str] = []
+        for item in items:
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            result.append(item)
+        return result
+
+    def _build_validation_summary(self, status: str, issues: List[str]) -> str:
+        if status == "fail":
+            return issues[0] if issues else "片段审核未通过，建议先调整拆分结果。"
+        if status == "warning":
+            return issues[0] if issues else "片段审核存在风险，建议人工确认后再继续。"
+        return "片段拆分通过二次校验，可继续生成首尾帧。"
+
     async def _generate_video_prompt_with_llm(
         self,
         *,
@@ -1307,7 +1986,7 @@ async def split_script(
         SplitResult: 拆分结果
     """
     config = SplitConfig(
-        max_segment_duration=max_segment_duration,
+        max_segment_duration=min(float(max_segment_duration), MAX_VIDEO_SEGMENT_DURATION),
         min_segment_duration=3.0,
         prefer_scene_boundary=True,
         preserve_dialogue=True,
