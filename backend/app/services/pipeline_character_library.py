@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.pipeline_character_profile import PipelineCharacterProfile
+from app.services.audio_renderer import build_doubao_tts_provider_from_settings
 from app.services.nanobanana_pro import NanoBananaProClient
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,12 @@ class PipelineCharacterLibraryService:
         self.prototype_root = self.library_root / "prototypes"
         self.three_view_root = self.library_root / "three_views"
         self.face_closeup_root = self.library_root / "face_closeups"
+        self.voice_preview_root = self.library_root / "voice_previews"
         self.reference_root.mkdir(parents=True, exist_ok=True)
         self.prototype_root.mkdir(parents=True, exist_ok=True)
         self.three_view_root.mkdir(parents=True, exist_ok=True)
         self.face_closeup_root.mkdir(parents=True, exist_ok=True)
+        self.voice_preview_root.mkdir(parents=True, exist_ok=True)
         self.nanobanana = NanoBananaProClient()
 
     async def list_profiles(self, db: AsyncSession) -> List[Dict[str, Any]]:
@@ -137,6 +140,7 @@ class PipelineCharacterLibraryService:
             speaking_style=str(payload.get("speaking_style") or "").strip(),
             common_actions=str(payload.get("common_actions") or "").strip(),
             emotion_baseline=str(payload.get("emotion_baseline") or "").strip(),
+            voice_profile=self._normalize_voice_profile(payload.get("voice_profile") or {}),
             forbidden_behaviors=str(payload.get("forbidden_behaviors") or "").strip(),
             prompt_hint=str(payload.get("prompt_hint") or "").strip(),
             llm_summary=str(payload.get("llm_summary") or "").strip(),
@@ -263,6 +267,7 @@ class PipelineCharacterLibraryService:
         profile.speaking_style = str(payload.get("speaking_style") or "").strip()
         profile.common_actions = str(payload.get("common_actions") or "").strip()
         profile.emotion_baseline = str(payload.get("emotion_baseline") or "").strip()
+        profile.voice_profile = self._normalize_voice_profile(payload.get("voice_profile") or {})
         profile.forbidden_behaviors = str(payload.get("forbidden_behaviors") or "").strip()
         profile.prompt_hint = str(payload.get("prompt_hint") or "").strip()
         profile.llm_summary = str(payload.get("llm_summary") or "").strip()
@@ -298,6 +303,47 @@ class PipelineCharacterLibraryService:
             self._delete_local_asset(original_face_closeup_image_path)
 
         return profile.to_dict()
+
+    async def generate_voice_preview(
+        self,
+        *,
+        text: str,
+        character_name: str,
+        voice_profile: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        preview_text = str(text or "").strip() or f"我是{str(character_name or '这个角色').strip() or '这个角色'}，现在开始试音。"
+        normalized_name = str(character_name or "").strip() or "角色"
+        normalized_voice_profile = self._normalize_voice_profile(voice_profile or {})
+        provider_name = str(normalized_voice_profile.get("provider") or "doubao-tts").strip().lower()
+
+        if provider_name not in {"", "doubao", "doubao-tts", "volcengine", "bytedance"}:
+            raise ValueError(f"当前试音只支持豆包 TTS，收到 provider: {provider_name}")
+
+        provider = build_doubao_tts_provider_from_settings(
+            sample_rate=settings.AUDIO_SAMPLE_RATE,
+            channels=1,
+        )
+        asset_id = uuid.uuid4().hex
+        output_dir = self.voice_preview_root / datetime.utcnow().strftime("%Y%m%d")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{asset_id}_voice_preview.wav"
+
+        await provider.synthesize_text_to_wav(
+            text=preview_text,
+            character_name=normalized_name,
+            voice_profile=normalized_voice_profile,
+            output_path=output_path,
+        )
+
+        return {
+            "asset_url": self._build_asset_url(output_path),
+            "asset_type": "audio/wav",
+            "asset_filename": output_path.name,
+            "provider": provider.name,
+            "text": preview_text,
+            "character_name": normalized_name,
+            "voice_profile": normalized_voice_profile,
+        }
 
     async def delete_profile(self, db: AsyncSession, profile_id: str) -> bool:
         result = await db.execute(
@@ -500,6 +546,7 @@ class PipelineCharacterLibraryService:
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
+            "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
             "forbidden_behaviors": str(profile.get("forbidden_behaviors") or "").strip(),
             "prompt_hint": str(profile.get("prompt_hint") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
@@ -550,11 +597,45 @@ class PipelineCharacterLibraryService:
             "outfit": str(profile.get("outfit") or "").strip(),
             "color_palette": str(profile.get("color_palette") or "").strip(),
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
+            "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
             "image_prompt_base": str(profile.get("image_prompt_base") or "").strip(),
             "video_prompt_base": str(profile.get("video_prompt_base") or "").strip(),
         }
+
+    def _normalize_voice_profile(self, value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+
+        provider = str(value.get("provider") or "").strip()
+        voice_type = str(value.get("voice_type") or "").strip()
+        voice_name = str(value.get("voice_name") or "").strip()
+        emotion = str(value.get("emotion") or "").strip()
+        language = str(value.get("language") or "").strip()
+
+        normalized: Dict[str, Any] = {}
+        if provider:
+            normalized["provider"] = provider
+        if voice_type:
+            normalized["voice_type"] = voice_type
+        if voice_name:
+            normalized["voice_name"] = voice_name
+        if emotion:
+            normalized["emotion"] = emotion
+        if language:
+            normalized["language"] = language
+
+        for key in ["speed_ratio", "pitch_ratio", "volume_ratio"]:
+            raw = value.get(key)
+            if raw in (None, "", "null"):
+                continue
+            try:
+                normalized[key] = round(float(raw), 3)
+            except (TypeError, ValueError):
+                continue
+
+        return normalized
 
     def _build_three_view_prompt(
         self,

@@ -1,6 +1,7 @@
 import React from 'react'
 import { Alert, Button, Card, Col, Row, Space, Statistic, Typography } from 'antd'
 import {
+  AudioOutlined,
   CheckCircleOutlined,
   FolderOpenOutlined,
   TeamOutlined,
@@ -50,6 +51,13 @@ export const HomePage: React.FC = () => {
             onClick={() => navigate('/characters/library')}
           >
             角色档案库
+          </Button>
+          <Button
+            size="large"
+            icon={<AudioOutlined />}
+            onClick={() => navigate('/voices')}
+          >
+            音色目录
           </Button>
         </Space>
       </div>

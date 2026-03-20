@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     DOUBAO_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_MODEL: str = "doubao-seed-2-0-lite-260215"
     DOUBAO_VIDEO_MODEL: str = "doubao-seedance-1-5-pro-251215"
+    DOUBAO_TTS_API_URL: str = "https://openspeech.bytedance.com/api/v1/tts"
+    DOUBAO_TTS_APP_ID: Optional[str] = None
+    DOUBAO_TTS_ACCESS_TOKEN: Optional[str] = None
+    DOUBAO_TTS_CLUSTER: str = "volcano_tts"
+    DOUBAO_TTS_DEFAULT_VOICE_TYPE: str = ""
     DOUBAO_CONNECT_TIMEOUT: float = 20.0
     DOUBAO_READ_TIMEOUT: float = 240.0
     DOUBAO_WRITE_TIMEOUT: float = 60.0
@@ -83,6 +88,19 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL: str = "gpt-4"
+
+    # 项目级音频链路配置
+    AUDIO_PIPELINE_ENABLED: bool = True
+    AUDIO_TTS_PROVIDER: str = "doubao-tts"
+    AUDIO_SFX_PROVIDER: str = "mock-silent"
+    AUDIO_AMBIENCE_PROVIDER: str = "mock-silent"
+    AUDIO_MUSIC_PROVIDER: str = "mock-silent"
+    AUDIO_LIBRARY_ROOT: str = "uploads/generated/pipeline/audio_library"
+    AUDIO_LIBRARY_MANIFEST: str = ""
+    AUDIO_SAMPLE_RATE: int = 48000
+    AUDIO_CHANNELS: int = 2
+    AUDIO_MASTER_CODEC: str = "aac"
+    AUDIO_MASTER_BITRATE: str = "192k"
     
     # 视频生成默认配置
     DEFAULT_VIDEO_DURATION: int = 10
@@ -101,6 +119,8 @@ class Settings(BaseSettings):
     CELERY_WORKER_CONCURRENCY: int = 4
     CELERY_TASK_SOFT_TIME_LIMIT: int = 300  # 5分钟
     CELERY_TASK_TIME_LIMIT: int = 600  # 10分钟
+    CELERY_RENDER_TASK_SOFT_TIME_LIMIT: int = 3600  # 60分钟
+    CELERY_RENDER_TASK_TIME_LIMIT: int = 3900  # 65分钟
     
     # 日志配置
     LOG_LEVEL: str = "INFO"

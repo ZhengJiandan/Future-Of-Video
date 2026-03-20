@@ -43,12 +43,14 @@ import {
 import { useNavigate } from 'react-router-dom'
 import {
   CharacterProfile,
+  RenderAudioPlanSegment,
   GeneratedScriptResponse,
   PrepareCharactersResponse,
   ReferenceImageAsset,
   RenderClipResult,
   RenderStatusResponse,
   SceneProfile,
+  SegmentDialogueItem,
   ScriptSummary,
   SegmentItem,
   SegmentKeyframes,
@@ -74,6 +76,7 @@ const statusColorMap: Record<string, string> = {
   queued: 'default',
   dispatching: 'processing',
   processing: 'processing',
+  paused: 'orange',
   completed: 'success',
   failed: 'error',
   cancelled: 'orange',
@@ -160,9 +163,137 @@ const clampSegmentDuration = (value: number): number => {
   return Math.max(1, Math.min(MAX_SEGMENT_DURATION, value))
 }
 
+const looksLikeCharacterId = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9_-]{5,}$/.test(value.trim())
+
+const parseSegmentDialogueLine = (rawValue: unknown): SegmentDialogueItem | null => {
+  if (rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)) {
+    const item = rawValue as Record<string, unknown>
+    const normalized: SegmentDialogueItem = {
+      text: String(item.text || item.dialogue || '').trim(),
+      speaker_name: String(item.speaker_name || item.speaker || '').trim(),
+      speaker_character_id: String(item.speaker_character_id || item.character_id || '').trim(),
+      emotion: String(item.emotion || '').trim(),
+      tone: String(item.tone || '').trim(),
+    }
+    return normalized.text ? normalized : null
+  }
+
+  const rawText = String(rawValue || '').trim()
+  if (!rawText) {
+    return null
+  }
+
+  let speakerName = ''
+  let speakerCharacterId = ''
+  let emotion = ''
+  let tone = ''
+  let text = rawText
+  let prefix = ''
+  let content = ''
+
+  for (const separator of ['：', ':']) {
+    const index = rawText.indexOf(separator)
+    if (index >= 0) {
+      prefix = rawText.slice(0, index)
+      content = rawText.slice(index + 1)
+      break
+    }
+  }
+
+  if (prefix) {
+    const bracketValues = Array.from(prefix.matchAll(/\[([^\]]+)\]/g)).map((match) => match[1].trim())
+    speakerName = prefix.replace(/\[[^\]]+\]/g, '').trim()
+    text = content.trim()
+
+    bracketValues.forEach((item) => {
+      if (!speakerCharacterId && looksLikeCharacterId(item)) {
+        speakerCharacterId = item
+        return
+      }
+      const labels = item.split('/').map((part) => part.trim()).filter(Boolean)
+      if (!emotion && labels[0]) {
+        emotion = labels[0]
+      }
+      if (!tone && labels[1]) {
+        tone = labels[1]
+      }
+    })
+  }
+
+  return {
+    text: text || rawText,
+    speaker_name: speakerName,
+    speaker_character_id: speakerCharacterId,
+    emotion,
+    tone,
+  }
+}
+
+const normalizeSegmentDialogues = (value: unknown): SegmentDialogueItem[] => {
+  const iterable = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value]
+  const normalized: SegmentDialogueItem[] = []
+  const seen = new Set<string>()
+
+  iterable.forEach((item) => {
+    const parsed = parseSegmentDialogueLine(item)
+    if (!parsed?.text) {
+      return
+    }
+    const fingerprint = [
+      parsed.text,
+      parsed.speaker_name || '',
+      parsed.speaker_character_id || '',
+      parsed.emotion || '',
+      parsed.tone || '',
+    ].join('||')
+    if (seen.has(fingerprint)) {
+      return
+    }
+    seen.add(fingerprint)
+    normalized.push(parsed)
+  })
+
+  return normalized
+}
+
+const formatSegmentDialogueLine = (dialogue: SegmentDialogueItem): string => {
+  const text = String(dialogue.text || '').trim()
+  const speakerName = String(dialogue.speaker_name || '').trim()
+  const speakerCharacterId = String(dialogue.speaker_character_id || '').trim()
+  const labels = [dialogue.emotion, dialogue.tone].map((item) => String(item || '').trim()).filter(Boolean)
+
+  let prefix = speakerName
+  if (speakerCharacterId) {
+    prefix = `${prefix} [${speakerCharacterId}]`.trim()
+  }
+  if (labels.length) {
+    prefix = `${prefix} [${labels.join(' / ')}]`.trim()
+  }
+
+  if (prefix && text) {
+    return `${prefix}: ${text}`
+  }
+  return text || prefix
+}
+
+const formatSegmentDialoguesText = (dialogues: SegmentDialogueItem[]): string =>
+  normalizeSegmentDialogues(dialogues)
+    .map((item) => formatSegmentDialogueLine(item))
+    .join('\n')
+
 const normalizeSegmentItem = (segment: SegmentItem): SegmentItem => ({
   ...segment,
   duration: clampSegmentDuration(Number(segment.duration)),
+  key_dialogues: normalizeSegmentDialogues(segment.key_dialogues),
+  contains_primary_character: Boolean(segment.contains_primary_character),
+  ending_contains_primary_character: Boolean(segment.ending_contains_primary_character),
+  pre_generate_start_frame: Boolean(segment.pre_generate_start_frame),
+  start_frame_generation_reason: String(segment.start_frame_generation_reason || ''),
+  prefer_primary_character_end_frame: Boolean(segment.prefer_primary_character_end_frame),
+  new_character_profile_ids: Array.isArray(segment.new_character_profile_ids) ? segment.new_character_profile_ids : [],
+  handoff_character_profile_ids: Array.isArray(segment.handoff_character_profile_ids) ? segment.handoff_character_profile_ids : [],
+  ending_contains_handoff_characters: Boolean(segment.ending_contains_handoff_characters),
+  prefer_character_handoff_end_frame: Boolean(segment.prefer_character_handoff_end_frame),
 })
 
 const normalizeSegmentItems = (items: SegmentItem[]): SegmentItem[] => items.map(normalizeSegmentItem)
@@ -312,8 +443,10 @@ export const ScriptPipelinePage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
 
   const [generatedScript, setGeneratedScript] = useState<GeneratedScriptResponse | null>(null)
+  const [manualCharacterProfiles, setManualCharacterProfiles] = useState<CharacterProfile[]>([])
   const [characterPrepareResult, setCharacterPrepareResult] = useState<PrepareCharactersResponse | null>(null)
   const [characterConfirmOpen, setCharacterConfirmOpen] = useState(false)
+  const [characterConfirmMode, setCharacterConfirmMode] = useState<'generate_script' | 'split_script'>('generate_script')
   const [preparingCharacters, setPreparingCharacters] = useState(false)
   const [confirmedLibraryCharacterIds, setConfirmedLibraryCharacterIds] = useState<string[]>([])
   const [confirmedTemporaryCharacterIds, setConfirmedTemporaryCharacterIds] = useState<string[]>([])
@@ -350,6 +483,7 @@ export const ScriptPipelinePage: React.FC = () => {
     setSelectedCharacterIds([])
     setSelectedSceneIds([])
     setGeneratedScript(null)
+    setManualCharacterProfiles([])
     setCharacterPrepareResult(null)
     setCharacterConfirmOpen(false)
     setPreparingCharacters(false)
@@ -464,6 +598,9 @@ export const ScriptPipelinePage: React.FC = () => {
       )
       setSelectedSceneIds(Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : [])
       setGeneratedScript(restoredGeneratedScript)
+      setManualCharacterProfiles(
+        Array.isArray(state.manualCharacterProfiles) ? (state.manualCharacterProfiles as CharacterProfile[]) : [],
+      )
       setScriptDraft(String(state.scriptDraft || ''))
       setScriptSummary(restoredScriptSummary)
       setSegments(restoredSegments)
@@ -528,6 +665,10 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
+    if (renderStatus?.status && ['completed', 'failed', 'cancelled', 'paused'].includes(renderStatus.status)) {
+      return
+    }
+
     let active = true
     let timer: number | undefined
 
@@ -571,7 +712,7 @@ export const ScriptPipelinePage: React.FC = () => {
         window.clearTimeout(timer)
       }
     }
-  }, [renderTaskId])
+  }, [renderTaskId, renderStatus?.status])
 
   useEffect(() => {
     const track = flowTrackRef.current
@@ -616,6 +757,7 @@ export const ScriptPipelinePage: React.FC = () => {
       selectedCharacterIds,
       selectedSceneIds,
       generatedScript,
+      manualCharacterProfiles,
       scriptDraft,
       scriptSummary,
       segments,
@@ -649,6 +791,8 @@ export const ScriptPipelinePage: React.FC = () => {
         status:
           renderStatus?.status === 'queued' || renderStatus?.status === 'dispatching' || renderStatus?.status === 'processing'
             ? 'in_progress'
+            : renderStatus?.status === 'paused'
+              ? 'paused'
             : renderStatus?.status === 'completed'
               ? 'completed'
               : renderStatus?.status === 'failed'
@@ -694,6 +838,7 @@ export const ScriptPipelinePage: React.FC = () => {
     cameraFixed,
     currentStep,
     generatedScript,
+    manualCharacterProfiles,
     generateAudio,
     keyframes,
     keyframeLoading,
@@ -768,6 +913,7 @@ export const ScriptPipelinePage: React.FC = () => {
     setScriptLoading(true)
     setError(null)
     setGeneratedScript(null)
+    setManualCharacterProfiles([])
     setSegments([])
     setSplitValidationReport(null)
     setKeyframes([])
@@ -808,6 +954,7 @@ export const ScriptPipelinePage: React.FC = () => {
 
     setPreparingCharacters(true)
     setError(null)
+    setCharacterConfirmMode('generate_script')
 
     try {
       const response = await scriptPipelineApi.prepareCharacters({
@@ -827,10 +974,103 @@ export const ScriptPipelinePage: React.FC = () => {
     }
   }
 
-  const handleConfirmCharactersAndGenerate = async () => {
+  const handleUseInputAsScript = () => {
+    const manualScript = userInput.trim()
+    if (!manualScript) {
+      return
+    }
+
+    setError(null)
+    setGeneratedScript(null)
+    setManualCharacterProfiles([])
+    setCharacterPrepareResult(null)
+    setCharacterConfirmOpen(false)
+    setConfirmedLibraryCharacterIds([])
+    setConfirmedTemporaryCharacterIds([])
+    setScriptSummary(null)
+    setScriptDraft(manualScript)
+    setSegments([])
+    setSplitValidationReport(null)
+    setKeyframes([])
+    setRenderTaskId(null)
+    setRenderStatus(null)
+    setTransitionDirection('forward')
+    setCurrentStep(1)
+  }
+
+  const buildConfirmedCharacterProfiles = (
+    prepareResult: PrepareCharactersResponse | null,
+    libraryCharacterIds: string[],
+    temporaryCharacterIds: string[],
+  ): CharacterProfile[] => {
+    if (!prepareResult) {
+      return []
+    }
+
+    const selectedLibraryProfiles = (prepareResult.library_character_profiles || []).filter((profile) =>
+      libraryCharacterIds.includes(profile.id),
+    )
+    const selectedTemporaryProfiles = (prepareResult.temporary_character_profiles || []).filter((profile) =>
+      temporaryCharacterIds.includes(profile.id),
+    )
+
+    return [...selectedLibraryProfiles, ...selectedTemporaryProfiles]
+  }
+
+  const runSplitScript = async () => {
+    if (!scriptDraft.trim()) {
+      return
+    }
+
+    const normalizedMaxSegmentDuration = normalizeMaxSegmentDuration(maxSegmentDuration)
+
+    setCurrentStep(2)
+    setSplitLoading(true)
+    setError(null)
+    setSegments([])
+    setSplitValidationReport(null)
+    setKeyframes([])
+    setRenderTaskId(null)
+    setRenderStatus(null)
+    setMaxSegmentDuration(normalizedMaxSegmentDuration)
+
+    try {
+      const response = await scriptPipelineApi.splitScript({
+        script_text: scriptDraft,
+        max_segment_duration: normalizedMaxSegmentDuration,
+        target_total_duration: targetTotalDuration || undefined,
+      })
+      setSegments(normalizeSegmentItems(response.data.segments))
+      setSplitValidationReport(response.data.validation_report || null)
+      setKeyframes([])
+      setCurrentStep(2)
+    } catch (requestError: unknown) {
+      setError(extractApiErrorMessage(requestError, '视频片段拆分失败'))
+      setCurrentStep(1)
+    } finally {
+      setSplitLoading(false)
+    }
+  }
+
+  const handleConfirmCharactersAndContinue = async () => {
     const temporaryCharacters = (characterPrepareResult?.temporary_character_profiles || []).filter((profile) =>
       confirmedTemporaryCharacterIds.includes(profile.id),
     )
+    const confirmedProfiles = buildConfirmedCharacterProfiles(
+      characterPrepareResult,
+      confirmedLibraryCharacterIds,
+      confirmedTemporaryCharacterIds,
+    )
+
+    setSelectedCharacterIds(confirmedLibraryCharacterIds)
+
+    if (characterConfirmMode === 'split_script') {
+      setManualCharacterProfiles(confirmedProfiles)
+      setCharacterConfirmOpen(false)
+      await runSplitScript()
+      return
+    }
+
     await runGenerateScript({
       libraryCharacterIds: confirmedLibraryCharacterIds,
       temporaryCharacters,
@@ -899,34 +1139,32 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
-    const normalizedMaxSegmentDuration = normalizeMaxSegmentDuration(maxSegmentDuration)
-
-    setCurrentStep(2)
-    setSplitLoading(true)
     setError(null)
-    setSegments([])
-    setSplitValidationReport(null)
-    setKeyframes([])
-    setRenderTaskId(null)
-    setRenderStatus(null)
-    setMaxSegmentDuration(normalizedMaxSegmentDuration)
+    if (!generatedScript) {
+      setPreparingCharacters(true)
+      setCharacterConfirmMode('split_script')
 
-    try {
-      const response = await scriptPipelineApi.splitScript({
-        script_text: scriptDraft,
-        max_segment_duration: normalizedMaxSegmentDuration,
-        target_total_duration: targetTotalDuration || undefined,
-      })
-      setSegments(normalizeSegmentItems(response.data.segments))
-      setSplitValidationReport(response.data.validation_report || null)
-      setKeyframes([])
-      setCurrentStep(2)
-    } catch (requestError: unknown) {
-      setError(extractApiErrorMessage(requestError, '视频片段拆分失败'))
-      setCurrentStep(1)
-    } finally {
-      setSplitLoading(false)
+      try {
+        const response = await scriptPipelineApi.prepareCharacters({
+          user_input: scriptDraft.trim(),
+          style: stylePreference.trim(),
+          target_total_duration: targetTotalDuration || undefined,
+          selected_character_ids: selectedCharacterIds,
+          character_profiles: manualCharacterProfiles,
+        })
+        setCharacterPrepareResult(response.data)
+        setConfirmedLibraryCharacterIds(response.data.selected_character_ids || [])
+        setConfirmedTemporaryCharacterIds((response.data.temporary_character_profiles || []).map((item) => item.id))
+        setCharacterConfirmOpen(true)
+      } catch (requestError: unknown) {
+        setError(extractApiErrorMessage(requestError, '角色确认分析失败'))
+      } finally {
+        setPreparingCharacters(false)
+      }
+      return
     }
+
+    await runSplitScript()
   }
 
   const handleSegmentChange = (index: number, patch: Partial<SegmentItem>) => {
@@ -959,6 +1197,7 @@ export const ScriptPipelinePage: React.FC = () => {
         style: stylePreference.trim(),
         selected_character_ids: selectedCharacterIds,
         selected_scene_ids: selectedSceneIds,
+        character_profiles: effectiveCharacterProfiles,
         reference_images: referenceImages,
         segments: normalizedSegments,
       })
@@ -1002,7 +1241,7 @@ export const ScriptPipelinePage: React.FC = () => {
         seed: seedInput === null ? undefined : seedInput,
         selected_character_ids: selectedCharacterIds,
         selected_scene_ids: selectedSceneIds,
-        character_profiles: generatedScript?.character_profiles || [],
+        character_profiles: effectiveCharacterProfiles,
         scene_profiles: generatedScript?.scene_profiles || [],
         segments: normalizedSegments,
         keyframes,
@@ -1035,6 +1274,43 @@ export const ScriptPipelinePage: React.FC = () => {
     }
   }
 
+  const handlePauseRender = async () => {
+    if (!renderTaskId) {
+      return
+    }
+
+    setRenderActionLoading(true)
+    setError(null)
+    try {
+      const response = await scriptPipelineApi.pauseRenderTask(renderTaskId)
+      setRenderStatus(response.data)
+      message.success('暂停请求已提交，当前片段完成后会停止')
+    } catch (requestError: unknown) {
+      message.error(extractApiErrorMessage(requestError, '暂停渲染任务失败'))
+    } finally {
+      setRenderActionLoading(false)
+    }
+  }
+
+  const handleResumeRender = async () => {
+    if (!renderTaskId) {
+      return
+    }
+
+    setRenderActionLoading(true)
+    setError(null)
+    try {
+      const response = await scriptPipelineApi.resumeRenderTask(renderTaskId)
+      setRenderStatus(response.data)
+      setCurrentStep(4)
+      message.success('渲染任务已继续')
+    } catch (requestError: unknown) {
+      message.error(extractApiErrorMessage(requestError, '继续渲染任务失败'))
+    } finally {
+      setRenderActionLoading(false)
+    }
+  }
+
   const handleRetryRender = async () => {
     if (!renderTaskId) {
       return
@@ -1054,6 +1330,25 @@ export const ScriptPipelinePage: React.FC = () => {
     } finally {
       setRenderActionLoading(false)
       setRenderStarting(false)
+    }
+  }
+
+  const handleRetryRenderClip = async (clipNumber: number) => {
+    if (!renderTaskId) {
+      return
+    }
+
+    setRenderActionLoading(true)
+    setError(null)
+    try {
+      const response = await scriptPipelineApi.retryRenderClip(renderTaskId, clipNumber)
+      setRenderStatus(response.data)
+      setCurrentStep(4)
+      message.success(`片段 ${clipNumber} 已重新提交生成`)
+    } catch (requestError: unknown) {
+      message.error(extractApiErrorMessage(requestError, `片段 ${clipNumber} 重生成失败`))
+    } finally {
+      setRenderActionLoading(false)
     }
   }
 
@@ -1088,7 +1383,7 @@ export const ScriptPipelinePage: React.FC = () => {
   const isStepAvailable = (stepIndex: number) => {
     const availability = [
       true,
-      !!generatedScript || scriptLoading,
+      !!generatedScript || !!scriptDraft.trim() || scriptLoading,
       segments.length > 0 || splitLoading,
       keyframes.length > 0 || keyframeLoading,
       !!renderTaskId || renderStarting || !!renderStatus,
@@ -1101,12 +1396,17 @@ export const ScriptPipelinePage: React.FC = () => {
   const selectedScenes = sceneProfiles.filter((profile) => selectedSceneIds.includes(profile.id))
   const temporaryCharacters = generatedScript?.temporary_character_profiles || []
   const characterResolution = generatedScript?.character_resolution
+  const effectiveCharacterProfiles = generatedScript?.character_profiles || manualCharacterProfiles
+  const isManualScriptMode = !generatedScript
   const finalPreviewUrl = renderStatus?.final_output?.asset_url
   const finalPreviewType = renderStatus?.final_output?.asset_type
   const previousStepIndex = Math.max(currentStep - 1, 0)
   const nextStepIndex = Math.min(currentStep + 1, stepItems.length - 1)
-  const canCancelRender = renderStatus ? ['queued', 'dispatching', 'processing'].includes(renderStatus.status) : false
+  const canPauseRender = renderStatus ? ['queued', 'dispatching', 'processing'].includes(renderStatus.status) : false
+  const canCancelRender = canPauseRender
+  const canResumeRender = renderStatus?.status === 'paused'
   const canRetryRender = renderStatus ? ['failed', 'cancelled'].includes(renderStatus.status) : false
+  const canRetrySingleClip = renderStatus ? ['paused', 'failed', 'cancelled', 'completed'].includes(renderStatus.status) : false
 
   const renderStepContent = () => {
     if (currentStep === 0) {
@@ -1121,11 +1421,17 @@ export const ScriptPipelinePage: React.FC = () => {
             }
           >
             <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <Alert
+                type="info"
+                showIcon
+                message="也可以直接从剧本审核开始"
+                description="如果你已经有成熟剧本，可以直接把完整剧本贴在这里，然后跳过“生成剧本”，直接进入“审核剧本”阶段。"
+              />
               <TextArea
                 rows={7}
                 value={userInput}
                 onChange={(event) => setUserInput(event.target.value)}
-                placeholder="输入一句话创意、场景描述或完整故事想法。"
+                placeholder="输入一句话创意、场景描述，或直接粘贴完整剧本。"
               />
               <Row gutter={[16, 16]}>
                 <Col xs={24} md={12}>
@@ -1277,7 +1583,14 @@ export const ScriptPipelinePage: React.FC = () => {
             />
           </Card>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+            <Button
+              size="large"
+              disabled={!userInput.trim()}
+              onClick={handleUseInputAsScript}
+            >
+              直接进入剧本审核
+            </Button>
             <Button
               type="primary"
               size="large"
@@ -1322,6 +1635,15 @@ export const ScriptPipelinePage: React.FC = () => {
                       {scriptSummary.synopsis}
                     </Descriptions.Item>
                   </Descriptions>
+                ) : null}
+
+                {!scriptSummary && !generatedScript ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="当前使用的是手动输入剧本"
+                    description="这里不会显示自动生成摘要。继续下一步时，会先分析剧本里的角色并让你确认角色档案，再进入拆片阶段。"
+                  />
                 ) : null}
 
                 {characterResolution?.message ? (
@@ -1408,8 +1730,13 @@ export const ScriptPipelinePage: React.FC = () => {
               <Button loading={scriptLoading} disabled={!userInput.trim()} onClick={handleGenerateScript}>
                 重新生成剧本
               </Button>
-              <Button type="primary" loading={splitLoading} disabled={!scriptDraft.trim()} onClick={handleSplitScript}>
-                通过剧本并拆分片段
+              <Button
+                type="primary"
+                loading={splitLoading || preparingCharacters}
+                disabled={!scriptDraft.trim()}
+                onClick={handleSplitScript}
+              >
+                {isManualScriptMode ? '确认角色并拆分片段' : '通过剧本并拆分片段'}
               </Button>
             </Space>
           </div>
@@ -1561,6 +1888,21 @@ export const ScriptPipelinePage: React.FC = () => {
                         placeholder="片段描述"
                       />
                       <TextArea
+                        rows={5}
+                        value={formatSegmentDialoguesText(segment.key_dialogues)}
+                        onChange={(event) =>
+                          handleSegmentChange(index, {
+                            key_dialogues: normalizeSegmentDialogues(
+                              event.target.value
+                                .split('\n')
+                                .map((line) => line.trim())
+                                .filter(Boolean),
+                            ),
+                          })
+                        }
+                        placeholder={'对白（每行一条）\n角色名 [角色ID]: 台词\n角色名 [情绪 / 语气]: 台词\n角色名 [角色ID] [情绪 / 语气]: 台词'}
+                      />
+                      <TextArea
                         rows={6}
                         value={segment.video_prompt}
                         onChange={(event) => handleSegmentChange(index, { video_prompt: event.target.value })}
@@ -1664,43 +2006,44 @@ export const ScriptPipelinePage: React.FC = () => {
     }
 
     if (currentStep === 3) {
-      const firstKeyframe = keyframes[0]
-      const chainedKeyframes = keyframes.slice(1)
+      const generatedKeyframes = keyframes.filter((bundle) => Boolean(bundle.start_frame.asset_url))
+      const chainedKeyframes = keyframes.filter((bundle) => !bundle.start_frame.asset_url)
 
       return (
         <Space direction="vertical" size={20} style={{ width: '100%' }}>
           <Alert
             type="info"
             showIcon
-            message="当前只预生成第一段首帧；后续片段首帧会在渲染时自动复用上一段返回的尾帧。"
+            message="系统会按分段规则预生成必要的首帧；其余片段首帧会在渲染时自动复用上一段返回的尾帧。"
           />
           <Card title="首帧与串联方式确认">
             {keyframeLoading ? (
               <div style={{ padding: '72px 0', textAlign: 'center' }}>
                 <Spin size="large" />
-                <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>正在生成首段首帧</Paragraph>
+                <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>正在生成预设首帧</Paragraph>
               </div>
             ) : keyframes.length ? (
               <Space direction="vertical" size={20} style={{ width: '100%' }}>
-                {firstKeyframe ? (
+                {generatedKeyframes.map((bundle, index) => (
                   <Card
+                    key={`generated-${bundle.segment_number}`}
                     type="inner"
                     title={
                       <Space wrap>
-                        <Tag color="processing">片段 1</Tag>
-                        <Text>{firstKeyframe.title}</Text>
-                        <Tag color="success">唯一预生成首帧</Tag>
+                        <Tag color="processing">片段 {bundle.segment_number}</Tag>
+                        <Text>{bundle.title}</Text>
+                        <Tag color="success">{index === 0 ? '预生成首帧' : '额外首帧锚点'}</Tag>
                       </Space>
                     }
                   >
                     <Row gutter={[20, 20]}>
                       <Col xs={24} lg={13}>
-                        <Text strong>第一段首帧</Text>
+                        <Text strong>{bundle.segment_number === 1 ? '起始首帧' : '额外角色锚定首帧'}</Text>
                         <div style={{ marginTop: 12 }}>
                           <PreviewAsset
-                            assetUrl={firstKeyframe.start_frame.asset_url}
-                            assetType={firstKeyframe.start_frame.asset_type}
-                            title={`${firstKeyframe.title} 首帧`}
+                            assetUrl={bundle.start_frame.asset_url}
+                            assetType={bundle.start_frame.asset_type}
+                            title={`${bundle.title} 首帧`}
                           />
                         </div>
                       </Col>
@@ -1709,24 +2052,21 @@ export const ScriptPipelinePage: React.FC = () => {
                           <Alert
                             type="success"
                             showIcon
-                            message="这一张图将作为整条长视频的起始画面"
-                            description={firstKeyframe.continuity_notes}
+                            message={bundle.segment_number === 1 ? '这张图将作为整条长视频的起始画面' : '这张图会作为该段单独的起始锚点'}
+                            description={bundle.continuity_notes}
                           />
                           <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                            {firstKeyframe.start_frame.prompt || '未提供提示词'}
+                            {bundle.start_frame.prompt || '未提供提示词'}
                           </Paragraph>
                           <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                            来源: {firstKeyframe.start_frame.source || 'unknown'}
-                            {firstKeyframe.start_frame.notes ? ` | ${firstKeyframe.start_frame.notes}` : ''}
-                          </Paragraph>
-                          <Paragraph style={{ marginBottom: 0 }}>
-                            之后的每一段都不会再单独预生成首帧，而是在视频生成完成后，自动取上一段返回的尾帧作为下一段首帧。
+                            来源: {bundle.start_frame.source || 'unknown'}
+                            {bundle.start_frame.notes ? ` | ${bundle.start_frame.notes}` : ''}
                           </Paragraph>
                         </Space>
                       </Col>
                     </Row>
                   </Card>
-                ) : null}
+                ))}
 
                 {chainedKeyframes.length ? (
                   <Card type="inner" title="后续片段串联方式">
@@ -1756,7 +2096,7 @@ export const ScriptPipelinePage: React.FC = () => {
                 ) : null}
               </Space>
             ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先生成首段首帧" />
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先生成预设首帧" />
             )}
           </Card>
 
@@ -1848,13 +2188,16 @@ export const ScriptPipelinePage: React.FC = () => {
                   </Space>
                   <Space>
                     <Switch checked={generateAudio} onChange={setGenerateAudio} />
-                    <Text>生成音频</Text>
+                    <Text>统一音频规划</Text>
                   </Space>
                   <Space>
                     <Switch checked value disabled />
                     <Text>返回尾帧（串联模式固定开启）</Text>
                   </Space>
                 </Space>
+                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  当前不会调用 provider 原生音频。开启后只会生成项目级外部音频规划，用于后续统一配音、音效和配乐混音。
+                </Paragraph>
               </Col>
             </Row>
           </Card>
@@ -1875,6 +2218,8 @@ export const ScriptPipelinePage: React.FC = () => {
     }
 
     if (currentStep === 4) {
+      const audioPlan = renderStatus?.render_config?.audio_plan
+
       return (
         <Space direction="vertical" size={20} style={{ width: '100%' }}>
           <Card title="渲染进度">
@@ -1890,6 +2235,15 @@ export const ScriptPipelinePage: React.FC = () => {
                 <Paragraph type="secondary" style={{ marginBottom: 0 }}>
                   当前已启用严格模式。`auto` 或 `doubao` 只接受真实视频结果；只有显式选择 `local` 时才会生成本地预览。
                 </Paragraph>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="音频策略"
+                  description={
+                    audioPlan?.summary ||
+                    '当前渲染链路只生成画面，provider 原生音频已关闭；如需声音，将走外部统一音频链路。'
+                  }
+                />
                 {renderStatus.fallback_used ? (
                   <Alert
                     type="warning"
@@ -1904,7 +2258,25 @@ export const ScriptPipelinePage: React.FC = () => {
                 {renderStatus.status === 'cancelled' ? (
                   <Alert type="info" showIcon message="渲染任务已取消" description="可以直接重试，系统会创建新的任务继续渲染。" />
                 ) : null}
+                {renderStatus.status === 'paused' ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="渲染任务已暂停"
+                    description="已完成片段会保留。继续任务后，会从未完成片段或待重生成片段继续执行。"
+                  />
+                ) : null}
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+                  {canPauseRender ? (
+                    <Button loading={renderActionLoading} onClick={handlePauseRender}>
+                      暂停任务
+                    </Button>
+                  ) : null}
+                  {canResumeRender ? (
+                    <Button type="primary" loading={renderActionLoading} onClick={handleResumeRender}>
+                      继续任务
+                    </Button>
+                  ) : null}
                   {canCancelRender ? (
                     <Button danger loading={renderActionLoading} onClick={handleCancelRender}>
                       取消任务
@@ -1925,6 +2297,112 @@ export const ScriptPipelinePage: React.FC = () => {
             )}
           </Card>
 
+          {audioPlan ? (
+            <Card title="音频规划">
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Space wrap>
+                  <Tag color="blue">{audioPlan.strategy || 'external_audio_pipeline'}</Tag>
+                  <Tag color={audioPlan.provider_audio_disabled ? 'red' : 'default'}>
+                    豆包原生音频: {audioPlan.provider_audio_disabled ? '关闭' : '开启'}
+                  </Tag>
+                  <Tag color={audioPlan.requested_generate_audio === false ? 'default' : 'green'}>
+                    用户音频请求: {audioPlan.requested_generate_audio === false ? '关闭' : '开启'}
+                  </Tag>
+                </Space>
+
+                {audioPlan.mix_principles?.length ? (
+                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                    <Text strong>混音原则</Text>
+                    {audioPlan.mix_principles.map((item, index) => (
+                      <Paragraph key={`mix-${index}`} style={{ marginBottom: 0 }}>
+                        {index + 1}. {item}
+                      </Paragraph>
+                    ))}
+                  </Space>
+                ) : null}
+
+                {audioPlan.character_voice_bible?.length ? (
+                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                    <Text strong>角色声线设定</Text>
+                    {audioPlan.character_voice_bible.map((voice) => (
+                      <Paragraph key={voice.character_id || voice.name} style={{ marginBottom: 0 }}>
+                        {voice.name}
+                        {voice.role ? `｜${voice.role}` : ''}
+                        {voice.voice_direction ? `｜${voice.voice_direction}` : ''}
+                        {voice.voice_profile?.voice_type ? `｜音色:${voice.voice_profile.voice_type}` : ''}
+                      </Paragraph>
+                    ))}
+                  </Space>
+                ) : null}
+
+                {audioPlan.ambience_bible?.length ? (
+                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                    <Text strong>环境底音设定</Text>
+                    {audioPlan.ambience_bible.map((ambience) => (
+                      <Paragraph key={ambience.scene_profile_id || ambience.name} style={{ marginBottom: 0 }}>
+                        {ambience.name}
+                        {ambience.ambience_direction ? `｜${ambience.ambience_direction}` : ''}
+                      </Paragraph>
+                    ))}
+                  </Space>
+                ) : null}
+
+                {audioPlan.music_bible?.global_direction ? (
+                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                    <Text strong>配乐总原则</Text>
+                    <Paragraph style={{ marginBottom: 0 }}>{audioPlan.music_bible.global_direction}</Paragraph>
+                    {audioPlan.music_bible.suggested_motifs?.length ? (
+                      <Text type="secondary">建议母题：{audioPlan.music_bible.suggested_motifs.join(' / ')}</Text>
+                    ) : null}
+                  </Space>
+                ) : null}
+
+                {audioPlan.segment_audio_plan?.length ? (
+                  <Collapse
+                    items={audioPlan.segment_audio_plan.map((segmentPlan: RenderAudioPlanSegment) => ({
+                      key: `audio-${segmentPlan.segment_number}`,
+                      label: (
+                        <Space wrap>
+                          <Tag color="processing">片段 {segmentPlan.segment_number}</Tag>
+                          <Text>{segmentPlan.title}</Text>
+                          <Tag>{segmentPlan.duration} 秒</Tag>
+                        </Space>
+                      ),
+                      children: (
+                        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                          {segmentPlan.characters?.length ? (
+                            <Text>角色：{segmentPlan.characters.join('、')}</Text>
+                          ) : null}
+                          {segmentPlan.ambience ? <Text>环境：{segmentPlan.ambience}</Text> : null}
+                          {segmentPlan.music_direction ? <Text>配乐：{segmentPlan.music_direction}</Text> : null}
+                          {segmentPlan.dialogue_lines?.length ? (
+                            <Text>对白重点：{segmentPlan.dialogue_lines.map((item) => formatSegmentDialogueLine(item)).join('；')}</Text>
+                          ) : segmentPlan.dialogue_focus?.length ? (
+                            <Text>对白重点：{segmentPlan.dialogue_focus.join('；')}</Text>
+                          ) : null}
+                          {segmentPlan.sound_effects?.length ? (
+                            <Text>音效重点：{segmentPlan.sound_effects.join('；')}</Text>
+                          ) : null}
+                          {segmentPlan.transition_hint ? <Text>衔接提示：{segmentPlan.transition_hint}</Text> : null}
+                          {segmentPlan.mix_notes?.length ? (
+                            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                              <Text strong>混音备注</Text>
+                              {segmentPlan.mix_notes.map((note, index) => (
+                                <Paragraph key={`segment-note-${segmentPlan.segment_number}-${index}`} style={{ marginBottom: 0 }}>
+                                  {index + 1}. {note}
+                                </Paragraph>
+                              ))}
+                            </Space>
+                          ) : null}
+                        </Space>
+                      ),
+                    }))}
+                  />
+                ) : null}
+              </Space>
+            </Card>
+          ) : null}
+
           {renderStatus?.clips?.length ? (
             <Card title="片段生成结果">
               <Collapse
@@ -1944,12 +2422,21 @@ export const ScriptPipelinePage: React.FC = () => {
                     <Space direction="vertical" size={12} style={{ width: '100%' }}>
                       <Paragraph style={{ marginBottom: 0 }}>{clip.description}</Paragraph>
                       <PreviewAsset assetUrl={clip.asset_url} assetType={clip.asset_type} title={clip.title} />
-                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      {clip.error ? <Alert type="error" showIcon message="该片段生成失败" description={clip.error} /> : null}
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
                         <Button
+                          disabled={!clip.asset_url}
                           icon={<DownloadOutlined />}
                           onClick={() => downloadAsset(clip.asset_url, clip.asset_filename || `${clip.title}.mp4`)}
                         >
                           下载该片段
+                        </Button>
+                        <Button
+                          loading={renderActionLoading}
+                          disabled={!canRetrySingleClip || clip.status === 'processing' || clip.status === 'queued'}
+                          onClick={() => void handleRetryRenderClip(clip.clip_number)}
+                        >
+                          重生成该片段
                         </Button>
                       </div>
                       <Paragraph type="secondary" style={{ marginBottom: 0 }}>
@@ -2026,12 +2513,21 @@ export const ScriptPipelinePage: React.FC = () => {
                 children: (
                   <Space direction="vertical" size={12} style={{ width: '100%' }}>
                     <PreviewAsset assetUrl={clip.asset_url} assetType={clip.asset_type} title={clip.title} />
-                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    {clip.error ? <Alert type="error" showIcon message="该片段生成失败" description={clip.error} /> : null}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
                       <Button
+                        disabled={!clip.asset_url}
                         icon={<DownloadOutlined />}
                         onClick={() => downloadAsset(clip.asset_url, clip.asset_filename || `${clip.title}.mp4`)}
                       >
                         下载该片段
+                      </Button>
+                      <Button
+                        loading={renderActionLoading}
+                        disabled={!canRetrySingleClip || clip.status === 'processing' || clip.status === 'queued'}
+                        onClick={() => void handleRetryRenderClip(clip.clip_number)}
+                      >
+                        重生成该片段
                       </Button>
                     </div>
                   </Space>
@@ -2128,8 +2624,12 @@ export const ScriptPipelinePage: React.FC = () => {
           <Space wrap>
             <Button onClick={() => setCharacterConfirmOpen(false)}>取消</Button>
             <Button onClick={() => navigate('/characters/library')}>去角色档案库</Button>
-            <Button type="primary" loading={scriptLoading} onClick={() => void handleConfirmCharactersAndGenerate()}>
-              确认角色并生成剧本
+            <Button
+              type="primary"
+              loading={characterConfirmMode === 'generate_script' ? scriptLoading : splitLoading}
+              onClick={() => void handleConfirmCharactersAndContinue()}
+            >
+              {characterConfirmMode === 'generate_script' ? '确认角色并生成剧本' : '确认角色并拆分片段'}
             </Button>
           </Space>
         }
@@ -2147,7 +2647,13 @@ export const ScriptPipelinePage: React.FC = () => {
           <Card
             size="small"
             title={`正式角色档案 (${characterPrepareResult?.library_character_profiles?.length || 0})`}
-            extra={<Text type="secondary">勾选后作为正式角色约束进入剧本生成</Text>}
+            extra={
+              <Text type="secondary">
+                {characterConfirmMode === 'generate_script'
+                  ? '勾选后作为正式角色约束进入剧本生成'
+                  : '勾选后作为正式角色约束进入后续拆片、首帧和视频生成'}
+              </Text>
+            }
           >
             {characterPrepareResult?.library_character_profiles?.length ? (
               <Checkbox.Group
@@ -2229,7 +2735,11 @@ export const ScriptPipelinePage: React.FC = () => {
             type="info"
             showIcon
             message="确认说明"
-            description="你勾选的正式角色和临时角色会一起进入本次剧本生成。未勾选的角色不会参与生成。"
+            description={
+              characterConfirmMode === 'generate_script'
+                ? '你勾选的正式角色和临时角色会一起进入本次剧本生成。未勾选的角色不会参与生成。'
+                : '你勾选的正式角色和临时角色会作为后续拆片、首帧和视频生成时的角色约束。未勾选的角色不会参与后续流程。'
+            }
           />
         </Space>
       </Modal>

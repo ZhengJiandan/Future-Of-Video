@@ -31,6 +31,7 @@ class PipelineCharacterProfile(BaseModel):
     speaking_style = Column(Text, nullable=True)
     common_actions = Column(Text, nullable=True)
     emotion_baseline = Column(Text, nullable=True)
+    voice_profile = Column(JSON, nullable=True)
     forbidden_behaviors = Column(Text, nullable=True)
     prompt_hint = Column(Text, nullable=True)
     llm_summary = Column(Text, nullable=True)
@@ -106,6 +107,7 @@ class PipelineCharacterProfile(BaseModel):
             "speaking_style": self.speaking_style or "",
             "common_actions": self.common_actions or "",
             "emotion_baseline": self.emotion_baseline or "",
+            "voice_profile": self.voice_profile or {},
             "forbidden_behaviors": self.forbidden_behaviors or "",
             "prompt_hint": self.prompt_hint or "",
             "llm_summary": self.llm_summary or "",
@@ -137,6 +139,7 @@ class PipelineCharacterProfile(BaseModel):
                 "outfit": self.outfit or "",
                 "color_palette": self.color_palette or "",
                 "speaking_style": self.speaking_style or "",
+                "voice_profile": self.voice_profile or {},
                 "common_actions": self.common_actions or "",
                 "llm_summary": self.llm_summary or "",
                 "image_prompt_base": self.image_prompt_base or "",

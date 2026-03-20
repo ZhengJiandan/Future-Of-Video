@@ -86,6 +86,42 @@ export interface ReferenceImageAsset {
   source: string
 }
 
+export interface CharacterVoiceProfile {
+  provider?: string
+  voice_type?: string
+  voice_name?: string
+  emotion?: string
+  language?: string
+  speed_ratio?: number
+  pitch_ratio?: number
+  volume_ratio?: number
+}
+
+export interface DoubaoVoiceCatalogItem {
+  voice_type: string
+  voice_name: string
+  scenario: string
+  language: string
+  gender: string
+  style: string
+  provider: string
+  metadata_warning?: string
+}
+
+export interface DoubaoVoiceCatalogResponse {
+  success: boolean
+  provider: string
+  catalog_version: string
+  source?: {
+    primary_name?: string
+    primary_url?: string
+    secondary_name?: string
+    secondary_url?: string
+    note?: string
+  }
+  items: DoubaoVoiceCatalogItem[]
+}
+
 export interface CharacterProfile {
   id: string
   name: string
@@ -108,6 +144,7 @@ export interface CharacterProfile {
   speaking_style: string
   common_actions: string
   emotion_baseline: string
+  voice_profile?: CharacterVoiceProfile
   forbidden_behaviors: string
   prompt_hint: string
   llm_summary: string
@@ -181,6 +218,14 @@ export interface ScriptSummary {
   scene_count: number
 }
 
+export interface SegmentDialogueItem {
+  text: string
+  speaker_name?: string
+  speaker_character_id?: string
+  emotion?: string
+  tone?: string
+}
+
 export interface GeneratedScriptResponse {
   success: boolean
   message: string
@@ -232,7 +277,7 @@ export interface SegmentItem {
   duration: number
   shots_summary: string
   key_actions: string[]
-  key_dialogues: string[]
+  key_dialogues: SegmentDialogueItem[]
   transition_in: string
   transition_out: string
   continuity_from_prev: string
@@ -245,6 +290,15 @@ export interface SegmentItem {
   character_profile_ids: string[]
   character_profile_versions: Record<string, number>
   prompt_focus: string
+  contains_primary_character: boolean
+  ending_contains_primary_character: boolean
+  pre_generate_start_frame: boolean
+  start_frame_generation_reason: string
+  prefer_primary_character_end_frame: boolean
+  new_character_profile_ids: string[]
+  handoff_character_profile_ids: string[]
+  ending_contains_handoff_characters: boolean
+  prefer_character_handoff_end_frame: boolean
   video_url: string
   status: string
 }
@@ -377,6 +431,18 @@ export interface CharacterPrototypeResponse {
   notes: string
 }
 
+export interface CharacterVoicePreviewResponse {
+  success: boolean
+  message: string
+  asset_url: string
+  asset_type: string
+  asset_filename: string
+  provider: string
+  text: string
+  character_name: string
+  voice_profile?: CharacterVoiceProfile
+}
+
 export interface ScenePrototypeResponse {
   success: boolean
   message: string
@@ -412,6 +478,55 @@ export interface RenderClipResult {
   error: string
 }
 
+export interface RenderAudioPlanVoice {
+  character_id?: string
+  name: string
+  role?: string
+  speaking_style?: string
+  emotion_baseline?: string
+  voice_direction?: string
+  voice_profile?: CharacterVoiceProfile
+}
+
+export interface RenderAudioPlanAmbience {
+  scene_profile_id?: string
+  name: string
+  atmosphere?: string
+  lighting?: string
+  ambience_direction?: string
+}
+
+export interface RenderAudioPlanSegment {
+  segment_number: number
+  title: string
+  duration: number
+  characters?: string[]
+  voice_tracks?: RenderAudioPlanVoice[]
+  dialogue_focus?: string[]
+  dialogue_lines?: SegmentDialogueItem[]
+  sound_effects?: string[]
+  ambience?: string
+  music_direction?: string
+  transition_hint?: string
+  mix_notes?: string[]
+}
+
+export interface RenderAudioPlan {
+  strategy?: string
+  provider_audio_disabled?: boolean
+  requested_generate_audio?: boolean
+  summary?: string
+  mix_principles?: string[]
+  character_voice_bible?: RenderAudioPlanVoice[]
+  music_bible?: {
+    global_direction?: string
+    suggested_motifs?: string[]
+    avoid?: string[]
+  }
+  ambience_bible?: RenderAudioPlanAmbience[]
+  segment_audio_plan?: RenderAudioPlanSegment[]
+}
+
 export interface RenderStatusResponse {
   task_id: string
   project_id?: string
@@ -440,6 +555,9 @@ export interface RenderStatusResponse {
     provider_model?: string
     camera_fixed?: boolean
     generate_audio?: boolean
+    requested_generate_audio?: boolean
+    audio_strategy?: string
+    audio_plan?: RenderAudioPlan | null
     return_last_frame?: boolean
     service_tier?: string
     seed?: number | null
@@ -504,6 +622,7 @@ export const scriptPipelineApi = {
   },
 
   listCharacters: () => apiClient.get<CharacterListResponse>('/pipeline/characters'),
+  listDoubaoTtsVoices: () => apiClient.get<DoubaoVoiceCatalogResponse>('/pipeline/tts/voices'),
   getCharacter: (characterId: string) => apiClient.get<CharacterDetailResponse>(`/pipeline/characters/${characterId}`),
   listScenes: () => apiClient.get<SceneListResponse>('/pipeline/scenes'),
   getScene: (sceneId: string) => apiClient.get<SceneDetailResponse>(`/pipeline/scenes/${sceneId}`),
@@ -543,6 +662,7 @@ export const scriptPipelineApi = {
     speaking_style?: string
     common_actions?: string
     emotion_baseline?: string
+    voice_profile?: CharacterVoiceProfile
     forbidden_behaviors?: string
     prompt_hint?: string
     llm_summary?: string
@@ -585,6 +705,7 @@ export const scriptPipelineApi = {
       speaking_style?: string
       common_actions?: string
       emotion_baseline?: string
+      voice_profile?: CharacterVoiceProfile
       forbidden_behaviors?: string
       prompt_hint?: string
       llm_summary?: string
@@ -604,6 +725,12 @@ export const scriptPipelineApi = {
       face_closeup_image_url?: string
     },
   ) => apiClient.put<CharacterMutationResponse>(`/pipeline/characters/${characterId}`, data),
+
+  generateCharacterVoicePreview: (data: {
+    text?: string
+    character_name?: string
+    voice_profile?: CharacterVoiceProfile
+  }) => apiClient.post<CharacterVoicePreviewResponse>('/pipeline/characters/generate-voice-preview', data),
 
   uploadSceneReference: async (file: File) => {
     const formData = new FormData()
@@ -791,6 +918,10 @@ export const scriptPipelineApi = {
 
   getRenderStatus: (taskId: string) => apiClient.get<RenderStatusResponse>(`/pipeline/render/${taskId}`),
   cancelRenderTask: (taskId: string) => apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/cancel`),
+  pauseRenderTask: (taskId: string) => apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/pause`),
+  resumeRenderTask: (taskId: string) => apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/resume`),
+  retryRenderClip: (taskId: string, clipNumber: number) =>
+    apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/clips/${clipNumber}/retry`),
   retryRenderTask: (taskId: string) => apiClient.post<RenderStartResponse>(`/pipeline/render/${taskId}/retry`),
 
   healthCheck: () => apiClient.get('/pipeline/health'),

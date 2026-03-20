@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { Layout, Menu, Button, Typography, theme, Space } from 'antd'
 import {
+  AudioOutlined,
   EnvironmentOutlined,
   FolderOpenOutlined,
   TeamOutlined,
@@ -26,6 +27,9 @@ export const MainLayout: React.FC = () => {
   } = theme.useToken()
 
   const getSelectedMenuKey = (pathname: string) => {
+    if (pathname.startsWith('/voices')) {
+      return '/voices'
+    }
     if (pathname.startsWith('/characters')) {
       return '/characters'
     }
@@ -57,6 +61,11 @@ export const MainLayout: React.FC = () => {
       key: '/script-pipeline',
       icon: <ThunderboltOutlined />,
       label: '视频生成',
+    },
+    {
+      key: '/voices',
+      icon: <AudioOutlined />,
+      label: '音色目录',
     },
     {
       key: '/characters',

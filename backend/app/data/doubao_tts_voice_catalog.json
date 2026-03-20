@@ -1,0 +1,277 @@
+{
+  "provider": "doubao-tts",
+  "catalog_version": "2026-03-20",
+  "source": {
+    "primary_name": "Voice List - Seed Speech / BytePlus",
+    "primary_url": "https://docs.byteplus.com/ja/docs/byteplusvoice/Voice_List",
+    "secondary_name": "Text-to-Speech (TTS) - Seed Speech / BytePlus",
+    "secondary_url": "https://docs.byteplus.com/id/docs/byteplusvoice/TTS_Product_Overview",
+    "note": "Catalog compiled from official documentation snippets indexed by the search engine because the doc site is JavaScript-rendered."
+  },
+  "voices": [
+    {
+      "voice_type": "zh_female_shaoergushi_mars_bigtts",
+      "voice_name": "Tina",
+      "scenario": "Dubbing",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Vivid"
+    },
+    {
+      "voice_type": "zh_male_silang_mars_bigtts",
+      "voice_name": "William",
+      "scenario": "Dubbing",
+      "language": "English & Chinese",
+      "gender": "Male",
+      "style": "Deep"
+    },
+    {
+      "voice_type": "zh_male_jieshuonansheng_mars_bigtts",
+      "voice_name": "James",
+      "scenario": "Dubbing",
+      "language": "English & Chinese",
+      "gender": "Male",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "zh_female_jitangmeimei_mars_bigtts",
+      "voice_name": "Grace",
+      "scenario": "Dubbing",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Soft"
+    },
+    {
+      "voice_type": "zh_female_tiexinnvsheng_mars_bigtts",
+      "voice_name": "Sophia",
+      "scenario": "Dubbing",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Warm"
+    },
+    {
+      "voice_type": "zh_female_qiaopinvsheng_mars_bigtts",
+      "voice_name": "Mia",
+      "scenario": "Dubbing",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Vivid"
+    },
+    {
+      "voice_type": "zh_female_mengyatou_mars_bigtts",
+      "voice_name": "Ava",
+      "scenario": "Dubbing",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Vivid"
+    },
+    {
+      "voice_type": "zh_female_cancan_mars_bigtts",
+      "voice_name": "Luna",
+      "scenario": "General",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "zh_female_qingxinnvsheng_mars_bigtts",
+      "voice_name": "Olivia",
+      "scenario": "General",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "zh_female_linjia_mars_bigtts",
+      "voice_name": "Lily",
+      "scenario": "General",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Vivid"
+    },
+    {
+      "voice_type": "zh_male_wennuanahu_moon_bigtts",
+      "voice_name": "Mark",
+      "scenario": "General",
+      "language": "English & Chinese",
+      "gender": "Male",
+      "style": "Warm"
+    },
+    {
+      "voice_type": "zh_male_shaonianzixin_moon_bigtts",
+      "voice_name": "Ethan",
+      "scenario": "General",
+      "language": "English & Chinese",
+      "gender": "Male",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "zh_female_shuangkuaisisi_moon_bigtts",
+      "voice_name": "Aria",
+      "scenario": "General",
+      "language": "English & Chinese",
+      "gender": "Female",
+      "style": "Vivid"
+    },
+    {
+      "voice_type": "zh_male_jingqiangkanye_moon_bigtts",
+      "voice_name": "Thomas",
+      "scenario": "Fun",
+      "language": "English & Chinese - Beijing Accent",
+      "gender": "Male",
+      "style": "Fun"
+    },
+    {
+      "voice_type": "en_female_anna_mars_bigtts",
+      "voice_name": "Anna",
+      "scenario": "General",
+      "language": "English",
+      "gender": "Female",
+      "style": "Soft"
+    },
+    {
+      "voice_type": "en_male_adam_mars_bigtts",
+      "voice_name": "Adam",
+      "scenario": "General",
+      "language": "American English",
+      "gender": "Male",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "en_female_sarah_mars_bigtts",
+      "voice_name": "Sarah",
+      "scenario": "General",
+      "language": "Australian English",
+      "gender": "Female",
+      "style": "Soft"
+    },
+    {
+      "voice_type": "en_male_dryw_mars_bigtts",
+      "voice_name": "Dryw",
+      "scenario": "General",
+      "language": "Australian English",
+      "gender": "Male",
+      "style": "Deep"
+    },
+    {
+      "voice_type": "en_male_smith_mars_bigtts",
+      "voice_name": "Smith",
+      "scenario": "General",
+      "language": "British English",
+      "gender": "Male",
+      "style": "Deep"
+    },
+    {
+      "voice_type": "zh_male_baqiqingshu_mars_bigtts",
+      "voice_name": "Edward",
+      "scenario": "Audio Book",
+      "language": "Chinese",
+      "gender": "Male",
+      "style": "Deep"
+    },
+    {
+      "voice_type": "zh_female_wenroushunv_mars_bigtts",
+      "voice_name": "Emma",
+      "scenario": "Audio Book",
+      "language": "Chinese",
+      "gender": "Female",
+      "style": "Soft"
+    },
+    {
+      "voice_type": "zh_female_gaolengyujie_moon_bigtts",
+      "voice_name": "Charlotte",
+      "scenario": "Role",
+      "language": "Chinese",
+      "gender": "Female",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "zh_female_linjianvhai_moon_bigtts",
+      "voice_name": "Lila",
+      "scenario": "General",
+      "language": "Chinese",
+      "gender": "Female",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "zh_male_yuanboxiaoshu_moon_bigtts",
+      "voice_name": "Joseph",
+      "scenario": "General",
+      "language": "Chinese",
+      "gender": "Male",
+      "style": "Deep"
+    },
+    {
+      "voice_type": "zh_male_yangguangqingnian_moon_bigtts",
+      "voice_name": "George",
+      "scenario": "General",
+      "language": "Chinese",
+      "gender": "Male",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "zh_male_guozhoudege_moon_bigtts",
+      "voice_name": "Andrew",
+      "scenario": "Fun",
+      "language": "Chinese - Cantonese Accent",
+      "gender": "Male",
+      "style": "Clear"
+    },
+    {
+      "voice_type": "zh_female_wanqudashu_moon_bigtts",
+      "voice_name": "Robert",
+      "scenario": "Fun",
+      "language": "Chinese - Cantonese Accent",
+      "gender": "Male",
+      "style": "Fun"
+    },
+    {
+      "voice_type": "zh_female_daimengchuanmei_moon_bigtts",
+      "voice_name": "Elena",
+      "scenario": "Fun",
+      "language": "Chinese - Sichuan Accent",
+      "gender": "Female",
+      "style": "Cute"
+    },
+    {
+      "voice_type": "zh_female_wanwanxiaohe_moon_bigtts",
+      "voice_name": "Isabella",
+      "scenario": "Fun",
+      "language": "Chinese - Taiwanese Accent",
+      "gender": "Female",
+      "style": "Vivid"
+    },
+    {
+      "voice_type": "multi_male_jingqiangkanye_moon_bigtts",
+      "voice_name": "かずね",
+      "scenario": "General",
+      "language": "Japanese & Spanish",
+      "gender": "Male",
+      "style": "Fun"
+    },
+    {
+      "voice_type": "multi_female_shuangkuaisisi_moon_bigtts",
+      "voice_name": "はるこ",
+      "scenario": "General",
+      "language": "Japanese & Spanish",
+      "gender": "Female",
+      "style": "Vivid"
+    },
+    {
+      "voice_type": "multi_male_wanqudashu_moon_bigtts",
+      "voice_name": "ひろし",
+      "scenario": "General",
+      "language": "Japanese & Spanish",
+      "gender": "Male",
+      "style": "Fun"
+    },
+    {
+      "voice_type": "multi_female_gaolengyujie_moon_bigtts",
+      "voice_name": "あけみ",
+      "scenario": "General",
+      "language": "Japanese",
+      "gender": "Female",
+      "style": "Clear"
+    }
+  ]
+}

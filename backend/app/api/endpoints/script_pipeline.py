@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
+from app.services.doubao_voice_catalog import doubao_voice_catalog_service
 from app.services.auth_service import get_current_user
 from app.services.pipeline_character_library import pipeline_character_library_service
 from app.services.pipeline_scene_library import pipeline_scene_library_service
@@ -40,6 +41,17 @@ class ReferenceAssetPayload(BaseModel):
     content_type: str = "image/png"
     size: int = 0
     source: str = "upload"
+
+
+class DoubaoVoiceCatalogItemPayload(BaseModel):
+    voice_type: str
+    voice_name: str
+    scenario: str = ""
+    language: str = ""
+    gender: str = ""
+    style: str = ""
+    provider: str = "doubao-tts"
+    metadata_warning: str = ""
 
 
 class CharacterProfilePayload(BaseModel):
@@ -64,6 +76,7 @@ class CharacterProfilePayload(BaseModel):
     speaking_style: str = ""
     common_actions: str = ""
     emotion_baseline: str = ""
+    voice_profile: Dict[str, Any] = Field(default_factory=dict)
     forbidden_behaviors: str = ""
     prompt_hint: str = ""
     llm_summary: str = ""
@@ -106,6 +119,7 @@ class CreateCharacterRequest(BaseModel):
     speaking_style: str = Field(default="", description="说话方式")
     common_actions: str = Field(default="", description="常见动作")
     emotion_baseline: str = Field(default="", description="情绪基线")
+    voice_profile: Dict[str, Any] = Field(default_factory=dict, description="角色语音绑定配置")
     forbidden_behaviors: str = Field(default="", description="禁止行为")
     prompt_hint: str = Field(default="", description="额外提示词")
     llm_summary: str = Field(default="", description="给剧本模型的压缩档案")
@@ -215,6 +229,12 @@ class GenerateCharacterPrototypeRequest(BaseModel):
     refine_prompt: str = Field(default="", description="用户微调要求")
 
 
+class GenerateCharacterVoicePreviewRequest(BaseModel):
+    text: str = Field(default="", description="试听文本")
+    character_name: str = Field(default="", description="角色名称")
+    voice_profile: Dict[str, Any] = Field(default_factory=dict, description="角色语音绑定配置")
+
+
 class GenerateScenePrototypeRequest(BaseModel):
     base_image_url: str = Field(default="", description="当前场景图片 URL，可为空")
     name: str = Field(default="", description="场景名称")
@@ -264,6 +284,14 @@ class SplitScriptRequest(BaseModel):
     target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0)
 
 
+class SegmentDialoguePayload(BaseModel):
+    text: str = ""
+    speaker_name: str = ""
+    speaker_character_id: str = ""
+    emotion: str = ""
+    tone: str = ""
+
+
 class SegmentPayload(BaseModel):
     """前端可编辑片段结构。"""
 
@@ -275,7 +303,7 @@ class SegmentPayload(BaseModel):
     duration: float = Field(default=5.0, ge=1.0, le=10.0)
     shots_summary: str = ""
     key_actions: List[str] = Field(default_factory=list)
-    key_dialogues: List[str] = Field(default_factory=list)
+    key_dialogues: List[Union[str, SegmentDialoguePayload]] = Field(default_factory=list)
     transition_in: str = ""
     transition_out: str = ""
     continuity_from_prev: str = ""
@@ -288,6 +316,15 @@ class SegmentPayload(BaseModel):
     character_profile_ids: List[str] = Field(default_factory=list)
     character_profile_versions: Dict[str, int] = Field(default_factory=dict)
     prompt_focus: str = ""
+    contains_primary_character: bool = False
+    ending_contains_primary_character: bool = False
+    pre_generate_start_frame: bool = False
+    start_frame_generation_reason: str = ""
+    prefer_primary_character_end_frame: bool = False
+    new_character_profile_ids: List[str] = Field(default_factory=list)
+    handoff_character_profile_ids: List[str] = Field(default_factory=list)
+    ending_contains_handoff_characters: bool = False
+    prefer_character_handoff_end_frame: bool = False
     video_url: str = ""
     status: str = "ready"
 
@@ -353,6 +390,15 @@ async def list_characters(db: AsyncSession = Depends(get_db)):
     return {
         "success": True,
         "items": await pipeline_character_library_service.list_profiles(db),
+    }
+
+
+@router.get("/tts/voices")
+async def list_tts_voices():
+    catalog = doubao_voice_catalog_service.list_voices()
+    return {
+        "success": True,
+        **catalog,
     }
 
 
@@ -466,6 +512,22 @@ async def generate_character_prototype(request: GenerateCharacterPrototypeReques
     except Exception as exc:
         logger.error("Generate character prototype failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"角色原型图生成失败: {exc}") from exc
+
+
+@router.post("/characters/generate-voice-preview")
+async def generate_character_voice_preview(request: GenerateCharacterVoicePreviewRequest):
+    try:
+        result = await pipeline_character_library_service.generate_voice_preview(**request.model_dump())
+        return {
+            "success": True,
+            "message": "角色试音生成完成",
+            **result,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Generate character voice preview failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"角色试音生成失败: {exc}") from exc
 
 
 @router.post("/scenes/generate-prototype")
@@ -605,7 +667,7 @@ class RenderProjectRequest(BaseModel):
     watermark: bool = Field(default=False, description="是否添加水印")
     provider_model: str = Field(default="", description="provider 模型 ID")
     camera_fixed: bool = Field(default=False, description="是否固定镜头")
-    generate_audio: bool = Field(default=True, description="是否生成音频")
+    generate_audio: bool = Field(default=True, description="是否规划统一音频")
     return_last_frame: bool = Field(default=False, description="是否返回尾帧")
     service_tier: str = Field(default="default", description="provider 服务等级")
     seed: Optional[int] = Field(default=None, description="随机种子")
@@ -851,6 +913,69 @@ async def cancel_render_task(
     except Exception as exc:
         logger.error("Cancel render task failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"取消渲染任务失败: {exc}") from exc
+
+
+@router.post("/render/{task_id}/pause")
+async def pause_render_task(
+    task_id: str,
+    current_user=Depends(get_current_user),
+):
+    """暂停渲染任务。"""
+    try:
+        state = await pipeline_workflow_service.pause_render_task(task_id, user_id=current_user.id)
+        if not state:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return state.to_dict()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Pause render task failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"暂停渲染任务失败: {exc}") from exc
+
+
+@router.post("/render/{task_id}/resume")
+async def resume_render_task(
+    task_id: str,
+    current_user=Depends(get_current_user),
+):
+    """继续已暂停的渲染任务。"""
+    try:
+        state = await pipeline_workflow_service.resume_render_task(task_id, user_id=current_user.id)
+        if not state:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return state.to_dict()
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Resume render task failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"继续渲染任务失败: {exc}") from exc
+
+
+@router.post("/render/{task_id}/clips/{clip_number}/retry")
+async def retry_render_clip(
+    task_id: str,
+    clip_number: int,
+    current_user=Depends(get_current_user),
+):
+    """单独重生成某个片段。"""
+    try:
+        state = await pipeline_workflow_service.retry_render_clip(
+            task_id,
+            clip_number=clip_number,
+            user_id=current_user.id,
+        )
+        if not state:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return state.to_dict()
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Retry render clip failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"片段重生成失败: {exc}") from exc
 
 
 @router.post("/render/{task_id}/retry")

@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS `pipeline_character_profiles` (
   `speaking_style` TEXT NULL,
   `common_actions` TEXT NULL,
   `emotion_baseline` TEXT NULL,
+  `voice_profile` JSON NULL,
   `forbidden_behaviors` TEXT NULL,
   `prompt_hint` TEXT NULL,
   `llm_summary` TEXT NULL,

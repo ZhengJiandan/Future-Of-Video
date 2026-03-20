@@ -1,0 +1,83 @@
+{
+  "entries": [
+    {
+      "kind": "sfx",
+      "path": "sfx/footsteps_sand_cc0.mp3",
+      "label": "沙地脚步",
+      "tags": ["脚步", "走路", "跑步", "沙地", "footstep", "sand"],
+      "gain": 0.9
+    },
+    {
+      "kind": "sfx",
+      "path": "sfx/punch_hit_cc0.ogg",
+      "label": "拳击命中",
+      "tags": ["打斗", "击中", "拳击", "碰撞", "punch", "hit", "fight"],
+      "gain": 0.95
+    },
+    {
+      "kind": "sfx",
+      "path": "sfx/fabric_rustle_cc0.ogg",
+      "label": "衣料摩擦",
+      "tags": ["衣料", "布料", "转身", "摩擦", "rustle", "cloth", "fabric"],
+      "gain": 0.82
+    },
+    {
+      "kind": "sfx",
+      "path": "sfx/landing_wood_floor_cc0.wav",
+      "label": "木地板落地",
+      "tags": ["落地", "脚步", "木地板", "室内", "landing", "wood", "floor"],
+      "gain": 0.92
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/city_scifi_cc0.mp3",
+      "label": "赛博城市环境",
+      "tags": ["城市", "街道", "科幻", "赛博", "环境音", "cyberworld", "city"],
+      "gain": 0.72,
+      "default": true
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/courtyard_birds_wind_cc0.ogg",
+      "label": "庭院鸟鸣风声",
+      "tags": ["庭院", "鸟鸣", "风声", "古风", "院子", "birds", "wind", "courtyard"],
+      "gain": 0.72
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/courtyard_outdoor_loop_cc0.ogg",
+      "label": "庭院户外循环底噪",
+      "tags": ["庭院", "户外", "环境音", "古风", "ambient", "outdoor", "loop"],
+      "gain": 0.68
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/interior_dark_room_tone_cc0.wav",
+      "label": "室内暗场底噪",
+      "tags": ["室内", "内景", "底噪", "房间", "暗场", "room", "interior", "tone"],
+      "gain": 0.64
+    },
+    {
+      "kind": "music",
+      "path": "music/space_graveyard_cc0.mp3",
+      "label": "太空墓场氛围铺底",
+      "tags": ["太空", "悬疑", "压抑", "氛围", "铺底", "space", "graveyard"],
+      "gain": 0.58,
+      "default": true
+    },
+    {
+      "kind": "music",
+      "path": "music/gentle_oriental_cc0.ogg",
+      "label": "轻柔东方氛围",
+      "tags": ["温柔", "古风", "东方", "舒缓", "oriented", "gentle", "oriental"],
+      "gain": 0.56
+    },
+    {
+      "kind": "music",
+      "path": "music/sad_contemplation_cc0.mp3",
+      "label": "悲伤沉思铺底",
+      "tags": ["悲伤", "沉思", "抒情", "低落", "sad", "contemplation"],
+      "gain": 0.56
+    }
+  ]
+}

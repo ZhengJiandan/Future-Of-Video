@@ -1,0 +1,27 @@
+{
+  "entries": [
+    {
+      "kind": "sfx",
+      "path": "sfx/footstep_soft.wav",
+      "label": "脚步",
+      "tags": ["脚步", "走路", "footstep"],
+      "gain": 0.9
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/city_street_day.wav",
+      "label": "城市街道白天",
+      "tags": ["街道", "城市", "白天", "环境音"],
+      "gain": 0.7,
+      "default": true
+    },
+    {
+      "kind": "music",
+      "path": "music/light_tension_pad.wav",
+      "label": "轻微紧张铺底",
+      "tags": ["紧张", "铺底", "悬疑", "配乐"],
+      "gain": 0.6,
+      "default": true
+    }
+  ]
+}

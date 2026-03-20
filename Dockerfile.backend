@@ -1,4 +1,4 @@
-# 三角洲视频生成系统 - 后端Dockerfile
+# future of video - 后端Dockerfile
 FROM python:3.11-slim
 
 # 设置工作目录

@@ -39,6 +39,7 @@ from app.core.config import settings
 from app.db.base import AsyncSessionLocal
 from app.models.pipeline_project import PipelineProject
 from app.models.pipeline_render_task import PipelineRenderTask
+from app.services.audio_renderer import ProjectAudioRenderer
 from app.services.script_generator import FullScript, ScriptGenerator
 from app.services.script_splitter import ScriptSplitter, SplitConfig
 from app.services.video_merger import MergeOptions, VideoMergerService, VideoSegment as MergedVideoSegment
@@ -63,6 +64,10 @@ SUBMITTED_TO_QUEUE_STEP = "已提交到队列，等待 worker 处理"
 
 class RenderTaskCancelledError(RuntimeError):
     """渲染任务被用户取消。"""
+
+
+class RenderTaskPausedError(RuntimeError):
+    """渲染任务被用户暂停。"""
 
 
 @dataclass
@@ -346,9 +351,12 @@ class PipelineWorkflowService:
         task_dir.mkdir(parents=True, exist_ok=True)
 
         keyframe_bundles: List[SegmentKeyframes] = []
+        generated_start_frame_count = 0
 
         for index, segment in enumerate(normalized_segments):
-            if index == 0:
+            should_pre_generate_start_frame = bool(segment.get("pre_generate_start_frame", False) or index == 0)
+            start_frame_reason = str(segment.get("start_frame_generation_reason") or "")
+            if should_pre_generate_start_frame:
                 start_frame = await self._generate_keyframe_asset(
                     task_dir=task_dir,
                     segment=segment,
@@ -359,7 +367,17 @@ class PipelineWorkflowService:
                     reference_images=normalized_references,
                     base_asset=None,
                 )
-                start_notes = "首段首帧由 NanoBanana/参考图生成，作为整条视频的起始画面"
+                generated_start_frame_count += 1
+                if start_frame_reason == "new_character_entry":
+                    start_notes = "该段是新角色首次正式登场段，额外预生成首帧以突出角色造型并稳定后续角色连续性"
+                    if start_frame.notes:
+                        start_frame.notes = f"{start_frame.notes} | 新角色首次正式登场段的额外首帧锚点"
+                    else:
+                        start_frame.notes = "新角色首次正式登场段的额外首帧锚点"
+                elif index == 0:
+                    start_notes = "首段首帧由 NanoBanana/参考图生成，作为整条视频的起始画面"
+                else:
+                    start_notes = "该段首帧由 NanoBanana/参考图额外预生成，作为角色和镜头起始锚点"
             else:
                 start_frame = KeyframeAsset(
                     asset_url="",
@@ -391,9 +409,13 @@ class PipelineWorkflowService:
             )
             keyframe_bundles.append(bundle)
 
+        message = "已生成首段首帧，后续片段将在渲染时自动串联上一段尾帧"
+        if generated_start_frame_count > 1:
+            message = "已按分段规则生成多张首帧，其余片段将在渲染时自动串联上一段尾帧"
+
         return {
             "success": True,
-            "message": "已生成首段首帧，后续片段将在渲染时自动串联上一段尾帧",
+            "message": message,
             "project_title": project_title or "未命名项目",
             "style": style,
             "selected_character_ids": [profile["id"] for profile in resolved_character_profiles if profile.get("id")],
@@ -420,6 +442,12 @@ class PipelineWorkflowService:
         normalized_segments = [self._normalize_segment(segment, index) for index, segment in enumerate(segments)]
         normalized_keyframes = [self._normalize_keyframe_bundle(bundle, index) for index, bundle in enumerate(keyframes or [])]
         config = self._normalize_render_config(render_config or {})
+        config["audio_plan"] = self._build_project_audio_plan(
+            segments=normalized_segments,
+            character_profiles=character_profiles or [],
+            scene_profiles=scene_profiles or [],
+            render_config=config,
+        )
         task_id = uuid.uuid4().hex
         renderer = self._choose_render_provider(config)
 
@@ -483,8 +511,8 @@ class PipelineWorkflowService:
 
             enqueue_render_task(task_id)
             try:
-                await self._ensure_render_task_not_cancelled(task_id, state)
-            except RenderTaskCancelledError:
+                await self._ensure_render_task_can_continue(task_id, state)
+            except (RenderTaskCancelledError, RenderTaskPausedError):
                 revoke_render_task(task_id, terminate=False)
                 return
             state.status = "queued"
@@ -508,7 +536,7 @@ class PipelineWorkflowService:
             state = await self._load_render_task_state(task_id)
         if state is None:
             raise RuntimeError(f"渲染任务不存在: {task_id}")
-        await self._ensure_render_task_not_cancelled(task_id, state)
+        await self._ensure_render_task_can_continue(task_id, state)
 
         state.status = "processing"
         state.current_step = "开始生成视频片段"
@@ -524,19 +552,41 @@ class PipelineWorkflowService:
             for bundle in state.keyframes
         }
         previous_last_frame: Optional[KeyframeAsset] = None
+        active_clip_index: Optional[int] = None
 
         try:
             total_segments = len(state.segments)
             for index, segment in enumerate(state.segments):
-                await self._ensure_render_task_not_cancelled(task_id, state)
+                active_clip_index = index
+                await self._ensure_render_task_can_continue(task_id, state)
                 clip_number = segment["segment_number"]
+                clip_state = state.clips[index]
+                if clip_state.status == "completed" and clip_state.asset_url:
+                    completed_bundle = keyframe_map.get(clip_number) or {}
+                    completed_end_frame = dict(completed_bundle.get("end_frame") or {})
+                    if str(completed_end_frame.get("asset_url") or "").strip():
+                        previous_last_frame = KeyframeAsset(
+                            asset_url=str(completed_end_frame.get("asset_url") or ""),
+                            asset_type=str(completed_end_frame.get("asset_type") or "image/png"),
+                            asset_filename=str(
+                                completed_end_frame.get("asset_filename") or f"clip_{clip_number:02d}_last_frame.png"
+                            ),
+                            prompt=str(completed_end_frame.get("prompt") or f"{segment['title']} 尾帧"),
+                            source=str(completed_end_frame.get("source") or "provider-return-last-frame"),
+                            status=str(completed_end_frame.get("status") or "completed"),
+                            notes=str(completed_end_frame.get("notes") or "沿用已完成片段的尾帧作为下一片段起始锚点"),
+                        )
+                    continue
+
                 state.current_step = f"生成片段 {clip_number}/{total_segments}"
                 state.progress = 5.0 + (index / max(total_segments, 1)) * 75.0
+                clip_state.status = "processing"
+                clip_state.error = ""
                 state.touch()
                 await self._persist_render_task_state(state=state)
 
                 runtime_bundle = keyframe_map.get(clip_number)
-                if previous_last_frame:
+                if previous_last_frame and self._should_reuse_previous_last_frame(runtime_bundle):
                     runtime_bundle = self._with_runtime_start_frame(
                         bundle=runtime_bundle,
                         segment=segment,
@@ -557,15 +607,20 @@ class PipelineWorkflowService:
                     scene_profiles=state.scene_profiles,
                     render_config=state.render_config,
                 )
-                await self._ensure_render_task_not_cancelled(task_id, state)
+                await self._ensure_render_task_can_continue(task_id, state)
 
-                state.clips[index].status = "completed"
-                state.clips[index].asset_url = clip_asset["asset_url"]
-                state.clips[index].asset_type = clip_asset["asset_type"]
-                state.clips[index].asset_filename = clip_asset["asset_filename"]
-                state.clips[index].provider = clip_asset.get("provider", "")
+                clip_state.status = "completed"
+                clip_state.asset_url = clip_asset["asset_url"]
+                clip_state.asset_type = clip_asset["asset_type"]
+                clip_state.asset_filename = clip_asset["asset_filename"]
+                clip_state.provider = clip_asset.get("provider", "")
+                clip_state.error = ""
                 if clip_asset.get("provider") == "doubao-official-text-only":
                     warning = f"片段 {clip_number} 因参考图被风控，已降级为豆包纯文本视频生成"
+                    if warning not in state.warnings:
+                        state.warnings.append(warning)
+                if "sanitized" in str(clip_asset.get("provider") or ""):
+                    warning = f"片段 {clip_number} 因文本风控，已自动净化提示词后重试"
                     if warning not in state.warnings:
                         state.warnings.append(warning)
                 previous_last_frame = self._build_runtime_last_frame_asset(
@@ -582,7 +637,7 @@ class PipelineWorkflowService:
                 state.touch()
                 await self._persist_render_task_state(state=state)
 
-            await self._ensure_render_task_not_cancelled(task_id, state)
+            await self._ensure_render_task_can_continue(task_id, state)
             state.current_step = "合并最终成片"
             state.progress = 85.0
             state.touch()
@@ -606,11 +661,24 @@ class PipelineWorkflowService:
                 else:
                     raise RuntimeError("存在未生成成功的视频片段，已停止最终合成")
 
-            await self._ensure_render_task_not_cancelled(task_id, state)
+            await self._ensure_render_task_can_continue(task_id, state)
+            final_output = await self._finalize_project_audio(
+                task_id=task_id,
+                task_dir=task_dir,
+                state=state,
+                final_output=final_output,
+            )
+            await self._ensure_render_task_can_continue(task_id, state)
             state.final_output = final_output
             state.status = "completed"
             state.progress = 100.0
             state.current_step = "完成"
+            state.touch()
+            await self._persist_render_task_state(state=state)
+        except RenderTaskPausedError:
+            state.status = "paused"
+            state.current_step = "已暂停"
+            state.error = ""
             state.touch()
             await self._persist_render_task_state(state=state)
         except RenderTaskCancelledError:
@@ -622,6 +690,9 @@ class PipelineWorkflowService:
             await self._persist_render_task_state(state=state)
         except Exception as exc:
             logger.error("Render task failed: %s", exc, exc_info=True)
+            if active_clip_index is not None and active_clip_index < len(state.clips):
+                state.clips[active_clip_index].status = "failed"
+                state.clips[active_clip_index].error = str(exc)
             state.status = "failed"
             state.error = str(exc)
             state.current_step = "失败"
@@ -652,6 +723,82 @@ class PipelineWorkflowService:
             logger.warning("Failed to revoke render task %s: %s", task_id, exc)
         return state
 
+    async def pause_render_task(self, task_id: str, *, user_id: str) -> Optional[RenderTaskState]:
+        state = self.tasks.get(task_id)
+        if state is None:
+            state = await self._load_render_task_state(task_id)
+        if state is None or state.user_id != user_id:
+            return None
+        if state.status in {"completed", "failed", "cancelled", "paused"}:
+            return state
+
+        was_processing = state.status == "processing"
+        state.status = "paused"
+        state.current_step = "暂停中，当前片段完成后停止" if was_processing else "已暂停"
+        state.error = ""
+        state.touch()
+        await self._persist_render_task_state(state=state)
+
+        try:
+            from app.workers.render_tasks import revoke_render_task
+
+            revoke_render_task(task_id, terminate=False)
+        except Exception as exc:
+            logger.warning("Failed to pause render task %s: %s", task_id, exc)
+        return state
+
+    async def resume_render_task(self, task_id: str, *, user_id: str) -> Optional[RenderTaskState]:
+        state = self.tasks.get(task_id)
+        if state is None:
+            state = await self._load_render_task_state(task_id)
+        if state is None or state.user_id != user_id:
+            return None
+        if state.status != "paused":
+            raise RuntimeError("只有已暂停的任务才可以继续")
+
+        state.status = "queued"
+        state.current_step = "等待重新投递"
+        state.error = ""
+        state.final_output = {}
+        state.touch()
+        await self._persist_render_task_state(state=state)
+        await self.start_render_task(task_id)
+        return self.tasks.get(task_id) or await self._load_render_task_state(task_id)
+
+    async def retry_render_clip(
+        self,
+        task_id: str,
+        *,
+        clip_number: int,
+        user_id: str,
+    ) -> Optional[RenderTaskState]:
+        state = self.tasks.get(task_id)
+        if state is None:
+            state = await self._load_render_task_state(task_id)
+        if state is None or state.user_id != user_id:
+            return None
+        if state.status in {"processing", "queued", DISPATCHING_STATUS}:
+            raise RuntimeError("请先暂停当前任务，再单独重生成片段")
+
+        target_clip = next((clip for clip in state.clips if int(clip.clip_number) == int(clip_number)), None)
+        if target_clip is None:
+            raise RuntimeError(f"片段 {clip_number} 不存在")
+
+        target_clip.status = "queued"
+        target_clip.asset_url = ""
+        target_clip.asset_type = ""
+        target_clip.asset_filename = ""
+        target_clip.provider = ""
+        target_clip.error = ""
+        state.final_output = {}
+        state.status = "queued"
+        state.current_step = "等待重新投递"
+        state.error = ""
+        state.touch()
+        await self._persist_render_task_state(state=state)
+        await self.start_render_task(task_id)
+        return self.tasks.get(task_id) or await self._load_render_task_state(task_id)
+
     async def retry_render_task(self, task_id: str, *, user_id: str) -> Optional[RenderTaskState]:
         state = self.tasks.get(task_id)
         if state is None:
@@ -676,12 +823,6 @@ class PipelineWorkflowService:
 
     async def get_render_task(self, task_id: str, *, user_id: str) -> Optional[Dict[str, Any]]:
         """获取任务状态。"""
-        state = self.tasks.get(task_id)
-        if state and state.user_id == user_id:
-            return state.to_dict()
-        if state and state.user_id != user_id:
-            return None
-
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(PipelineRenderTask).where(
@@ -690,7 +831,41 @@ class PipelineWorkflowService:
                 )
             )
             task = result.scalar_one_or_none()
-            return task.to_dict() if task else None
+
+        if task is None:
+            cached_state = self.tasks.get(task_id)
+            if cached_state and cached_state.user_id == user_id:
+                return cached_state.to_dict()
+            return None
+
+        refreshed_state = RenderTaskState(
+            task_id=task.id,
+            user_id=task.user_id,
+            project_id=task.project_id or "",
+            project_title=task.project_title or "未命名项目",
+            segments=list(task.segments or []),
+            keyframes=list(task.keyframes or []),
+            character_profiles=list(task.character_profiles or []),
+            scene_profiles=list(task.scene_profiles or []),
+            render_config=dict(task.render_config or {}),
+            status=task.status or "queued",
+            progress=float(task.progress or 0.0),
+            current_step=task.current_step or "等待开始",
+            renderer=task.renderer or "pending",
+            clips=[
+                RenderedClip(**clip)
+                for clip in (task.clips or [])
+                if isinstance(clip, dict)
+            ],
+            final_output=dict(task.final_output or {}),
+            fallback_used=bool(task.fallback_used),
+            warnings=list(task.warnings or []),
+            error=task.error or "",
+            created_at=task.created_at.isoformat() if task.created_at else datetime.now().isoformat(),
+            updated_at=task.updated_at.isoformat() if task.updated_at else datetime.now().isoformat(),
+        )
+        self.tasks[task_id] = refreshed_state
+        return refreshed_state.to_dict()
 
     async def recover_interrupted_tasks(self) -> Dict[str, Any]:
         async with AsyncSessionLocal() as db:
@@ -780,7 +955,7 @@ class PipelineWorkflowService:
             self.tasks[task_id] = claimed_state
         return claimed_state
 
-    async def _ensure_render_task_not_cancelled(
+    async def _ensure_render_task_can_continue(
         self,
         task_id: str,
         state: Optional[RenderTaskState] = None,
@@ -797,11 +972,44 @@ class PipelineWorkflowService:
                 state.status = "cancelled"
                 state.current_step = row[1] or "已取消"
             raise RenderTaskCancelledError(f"渲染任务已取消: {task_id}")
+        if row and row[0] == "paused":
+            if state is not None:
+                state.status = "paused"
+                state.current_step = row[1] or "已暂停"
+            raise RenderTaskPausedError(f"渲染任务已暂停: {task_id}")
 
     def _mark_unfinished_clips_cancelled(self, state: RenderTaskState) -> None:
         for clip in state.clips:
             if clip.status not in {"completed", "failed", "cancelled"}:
                 clip.status = "cancelled"
+
+    def _mark_unfinished_clips_failed(self, state: RenderTaskState) -> None:
+        for clip in state.clips:
+            if clip.status not in {"completed", "failed", "cancelled"}:
+                clip.status = "failed"
+
+    async def mark_render_task_failed(
+        self,
+        task_id: str,
+        *,
+        error: str,
+        current_step: str = "失败",
+    ) -> Optional[RenderTaskState]:
+        state = self.tasks.get(task_id)
+        if state is None:
+            state = await self._load_render_task_state(task_id)
+        if state is None:
+            return None
+        if state.status in {"completed", "cancelled"}:
+            return state
+
+        state.status = "failed"
+        state.error = error
+        state.current_step = current_step
+        self._mark_unfinished_clips_failed(state)
+        state.touch()
+        await self._persist_render_task_state(state=state)
+        return state
 
     def format_full_script_text(self, script: FullScript) -> str:
         """将结构化剧本转换为可读、可编辑文本。"""
@@ -1011,7 +1219,7 @@ class PipelineWorkflowService:
             "duration": normalized_duration,
             "shots_summary": str(segment.get("shots_summary") or ""),
             "key_actions": list(segment.get("key_actions") or []),
-            "key_dialogues": list(segment.get("key_dialogues") or []),
+            "key_dialogues": self._normalize_segment_dialogues(segment.get("key_dialogues") or []),
             "transition_in": str(segment.get("transition_in") or ""),
             "transition_out": str(segment.get("transition_out") or ""),
             "continuity_from_prev": str(segment.get("continuity_from_prev") or ""),
@@ -1024,9 +1232,171 @@ class PipelineWorkflowService:
             "character_profile_ids": list(segment.get("character_profile_ids") or []),
             "character_profile_versions": dict(segment.get("character_profile_versions") or {}),
             "prompt_focus": str(segment.get("prompt_focus") or ""),
+            "contains_primary_character": bool(segment.get("contains_primary_character", False)),
+            "ending_contains_primary_character": bool(segment.get("ending_contains_primary_character", False)),
+            "pre_generate_start_frame": bool(segment.get("pre_generate_start_frame", False)),
+            "start_frame_generation_reason": str(segment.get("start_frame_generation_reason") or ""),
+            "prefer_primary_character_end_frame": bool(segment.get("prefer_primary_character_end_frame", False)),
+            "new_character_profile_ids": list(segment.get("new_character_profile_ids") or []),
+            "handoff_character_profile_ids": list(segment.get("handoff_character_profile_ids") or []),
+            "ending_contains_handoff_characters": bool(segment.get("ending_contains_handoff_characters", False)),
+            "prefer_character_handoff_end_frame": bool(segment.get("prefer_character_handoff_end_frame", False)),
             "video_url": str(segment.get("video_url") or ""),
             "status": str(segment.get("status") or "ready"),
         }
+
+    def _looks_like_character_id(self, value: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{5,}", str(value or "").strip()))
+
+    def _parse_segment_dialogue_text(self, raw_value: Any) -> Dict[str, str]:
+        raw_text = str(raw_value or "").strip()
+        if not raw_text:
+            return {}
+
+        speaker_name = ""
+        speaker_character_id = ""
+        emotion = ""
+        tone = ""
+        text = raw_text
+
+        prefix = ""
+        content = ""
+        for separator in ("：", ":"):
+            if separator in raw_text:
+                prefix, content = raw_text.split(separator, 1)
+                break
+
+        if prefix:
+            bracket_values = re.findall(r"\[([^\]]+)\]", prefix)
+            speaker_name = re.sub(r"\[[^\]]+\]", "", prefix).strip()
+            text = content.strip()
+
+            for item in bracket_values:
+                normalized = str(item or "").strip()
+                if not normalized:
+                    continue
+                if not speaker_character_id and self._looks_like_character_id(normalized):
+                    speaker_character_id = normalized
+                    continue
+
+                labels = [part.strip() for part in re.split(r"\s*/\s*", normalized) if part.strip()]
+                if labels and not emotion:
+                    emotion = labels[0]
+                if len(labels) >= 2 and not tone:
+                    tone = labels[1]
+
+        return {
+            "text": text or raw_text,
+            "speaker_name": speaker_name,
+            "speaker_character_id": speaker_character_id,
+            "emotion": emotion,
+            "tone": tone,
+        }
+
+    def _normalize_segment_dialogues(self, value: Any) -> List[Dict[str, str]]:
+        if isinstance(value, (str, dict)):
+            iterable = [value]
+        elif isinstance(value, (list, tuple)):
+            iterable = list(value)
+        else:
+            iterable = []
+
+        result: List[Dict[str, str]] = []
+        seen: set[tuple[str, str, str, str, str]] = set()
+
+        for item in iterable:
+            if isinstance(item, dict):
+                normalized = {
+                    "text": str(item.get("text") or item.get("dialogue") or "").strip(),
+                    "speaker_name": str(item.get("speaker_name") or item.get("speaker") or "").strip(),
+                    "speaker_character_id": str(item.get("speaker_character_id") or item.get("character_id") or "").strip(),
+                    "emotion": str(item.get("emotion") or "").strip(),
+                    "tone": str(item.get("tone") or "").strip(),
+                }
+            else:
+                normalized = self._parse_segment_dialogue_text(item)
+
+            if not normalized.get("text"):
+                continue
+
+            fingerprint = (
+                normalized["text"],
+                normalized["speaker_name"],
+                normalized["speaker_character_id"],
+                normalized["emotion"],
+                normalized["tone"],
+            )
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            result.append(normalized)
+
+        return result
+
+    def _normalize_lookup_key(self, value: str) -> str:
+        return re.sub(r"\s+", "", str(value or "").strip()).lower()
+
+    def _resolve_segment_dialogue_bindings(
+        self,
+        dialogue_lines: List[Dict[str, str]],
+        *,
+        segment_characters: List[Dict[str, Any]],
+    ) -> List[Dict[str, str]]:
+        if not dialogue_lines:
+            return []
+
+        name_to_id: Dict[str, str] = {}
+        for profile in segment_characters:
+            profile_name = str(profile.get("name") or "").strip()
+            profile_id = str(profile.get("id") or "").strip()
+            if profile_name and profile_id:
+                name_to_id[self._normalize_lookup_key(profile_name)] = profile_id
+
+        resolved: List[Dict[str, str]] = []
+        for item in dialogue_lines:
+            normalized = {
+                "text": str(item.get("text") or "").strip(),
+                "speaker_name": str(item.get("speaker_name") or "").strip(),
+                "speaker_character_id": str(item.get("speaker_character_id") or "").strip(),
+                "emotion": str(item.get("emotion") or "").strip(),
+                "tone": str(item.get("tone") or "").strip(),
+            }
+            if (
+                not normalized["speaker_character_id"]
+                and normalized["speaker_name"]
+                and self._normalize_lookup_key(normalized["speaker_name"]) in name_to_id
+            ):
+                normalized["speaker_character_id"] = name_to_id[self._normalize_lookup_key(normalized["speaker_name"])]
+            elif (
+                not normalized["speaker_character_id"]
+                and normalized["speaker_name"]
+                and len(segment_characters) == 1
+            ):
+                normalized["speaker_character_id"] = str(segment_characters[0].get("id") or "").strip()
+            resolved.append(normalized)
+
+        return resolved
+
+    def _dialogue_line_display_text(
+        self,
+        dialogue: Dict[str, Any],
+        *,
+        include_character_id: bool = True,
+    ) -> str:
+        text = str(dialogue.get("text") or "").strip()
+        speaker_name = str(dialogue.get("speaker_name") or "").strip()
+        speaker_character_id = str(dialogue.get("speaker_character_id") or "").strip()
+        labels = [part for part in [str(dialogue.get("emotion") or "").strip(), str(dialogue.get("tone") or "").strip()] if part]
+
+        prefix = speaker_name
+        if include_character_id and speaker_character_id:
+            prefix = f"{prefix} [{speaker_character_id}]".strip()
+        if labels:
+            prefix = f"{prefix} [{' / '.join(labels)}]".strip()
+
+        if prefix and text:
+            return f"{prefix}: {text}"
+        return text or prefix
 
     async def _persist_render_task_state(
         self,
@@ -1154,6 +1524,8 @@ class PipelineWorkflowService:
         project.last_render_task_id = task_id or None
         if status in {"queued", "processing", DISPATCHING_STATUS}:
             project.status = "in_progress"
+        elif status == "paused":
+            project.status = "paused"
         elif status == "completed":
             project.status = "completed"
         elif status == "failed":
@@ -1478,6 +1850,12 @@ class PipelineWorkflowService:
         continuity_text = str(segment.get("continuity_to_next") if frame_kind == "end" else segment.get("continuity_from_prev") or "")
         hard_constraints = self._build_segment_hard_constraints(segment_characters, segment_scene)
         stable_visual_base = self._build_segment_image_prompt_base(segment_characters, segment_scene)
+        start_frame_extra = ""
+        if frame_kind == "start" and str(segment.get("start_frame_generation_reason") or "") == "new_character_entry":
+            start_frame_extra = (
+                "This frame is a new character's first formal entrance. "
+                "Compose the newly entering character prominently, make face, hairstyle, outfit, silhouette, and color palette exceptionally clear, and prioritize identity stability over spectacle. "
+            )
         return (
             f"{character_text}{scene_text}{style_text}{reference_text}"
             f"{f'Stable visual base: {stable_visual_base}. ' if stable_visual_base else ''}"
@@ -1485,6 +1863,7 @@ class PipelineWorkflowService:
             f"{f'Key focus: {prompt_focus}. ' if prompt_focus else ''}"
             f"{f'Continuity note: {continuity_text}. ' if continuity_text else ''}"
             f"{hard_constraints}"
+            f"{start_frame_extra}"
             f"Generate a {frame_goal} keyframe for clip {segment['segment_number']}, "
             f"cinematic, coherent subject identity, clear feature details, spatially accurate environment, 16:9 composition."
         ).strip()
@@ -1555,6 +1934,7 @@ class PipelineWorkflowService:
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
+            "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
             "forbidden_behaviors": str(profile.get("forbidden_behaviors") or "").strip(),
             "prompt_hint": str(profile.get("prompt_hint") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
@@ -1711,6 +2091,8 @@ class PipelineWorkflowService:
             )
 
             used_text_only_retry = False
+            used_sanitized_text_retry = False
+            response = None
             try:
                 request_kwargs = {
                     "ratio": self._normalize_doubao_aspect_ratio(render_config.get("aspect_ratio", "16:9")),
@@ -1755,12 +2137,46 @@ class PipelineWorkflowService:
                             scene_profiles=scene_profiles,
                             render_config=render_config,
                         )
+                        try:
+                            response = await generator.create_video_task(
+                                content=text_only_content,
+                                **request_kwargs,
+                            )
+                        except httpx.HTTPStatusError as retry_exc:
+                            if self._is_sensitive_text_error(retry_exc):
+                                used_sanitized_text_retry = True
+                                logger.warning(
+                                    "Doubao rejected text-only prompt for segment %s, retrying with sanitized text-only prompt",
+                                    segment.get("segment_number"),
+                                )
+                                sanitized_text_only_content = self._sanitize_doubao_content_for_retry(
+                                    content=text_only_content,
+                                    segment=segment,
+                                )
+                                response = await generator.create_video_task(
+                                    content=sanitized_text_only_content,
+                                    **request_kwargs,
+                                )
+                            else:
+                                raise
+                    elif self._is_sensitive_text_error(exc):
+                        used_sanitized_text_retry = True
+                        logger.warning(
+                            "Doubao rejected prompt text for segment %s, retrying with sanitized prompt",
+                            segment.get("segment_number"),
+                        )
+                        sanitized_content = self._sanitize_doubao_content_for_retry(
+                            content=primary_content,
+                            segment=segment,
+                        )
                         response = await generator.create_video_task(
-                            content=text_only_content,
+                            content=sanitized_content,
                             **request_kwargs,
                         )
                     else:
                         raise
+                if response is None:
+                    raise RuntimeError(f"片段 {segment['segment_number']} 未获得豆包视频任务响应")
                 if response.status in {"pending", "processing", "queued", "running"}:
                     response = await generator.wait_for_completion(response.id, poll_interval=5, max_wait_time=900)
             finally:
@@ -1768,11 +2184,18 @@ class PipelineWorkflowService:
 
             if response.video_url:
                 asset_filename = f"clip_{segment['segment_number']:02d}.mp4"
+                provider = "doubao-official"
+                if used_text_only_retry and used_sanitized_text_retry:
+                    provider = "doubao-official-text-only-sanitized"
+                elif used_text_only_retry:
+                    provider = "doubao-official-text-only"
+                elif used_sanitized_text_retry:
+                    provider = "doubao-official-sanitized"
                 return {
                     "asset_url": response.video_url,
                     "asset_type": "video/mp4",
                     "asset_filename": asset_filename,
-                    "provider": "doubao-official-text-only" if used_text_only_retry else "doubao-official",
+                    "provider": provider,
                     "last_frame_url": response.last_frame_url or "",
                 }
             raise RuntimeError(f"片段 {segment['segment_number']} 未返回 video_url")
@@ -1789,6 +2212,107 @@ class PipelineWorkflowService:
             return False
         error = payload.get("error") or {}
         return error.get("code") == "InputImageSensitiveContentDetected"
+
+    def _is_sensitive_text_error(self, exc: Exception) -> bool:
+        if not isinstance(exc, httpx.HTTPStatusError) or exc.response is None:
+            return False
+        try:
+            payload = exc.response.json()
+        except Exception:
+            return False
+        error = payload.get("error") or {}
+        return error.get("code") == "InputTextSensitiveContentDetected"
+
+    def _sanitize_doubao_content_for_retry(
+        self,
+        *,
+        content: List[Dict[str, Any]],
+        segment: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        sanitized_content: List[Dict[str, Any]] = []
+        for item in content:
+            if (item or {}).get("type") != "text":
+                sanitized_content.append(item)
+                continue
+            original_text = str((item or {}).get("text") or "")
+            sanitized_text = self._sanitize_doubao_text(original_text)
+            if not sanitized_text:
+                sanitized_text = self._build_minimal_safe_doubao_text(segment)
+            sanitized_content.append(
+                {
+                    "type": "text",
+                    "text": sanitized_text,
+                }
+            )
+        if not sanitized_content:
+            sanitized_content.append({"type": "text", "text": self._build_minimal_safe_doubao_text(segment)})
+        return sanitized_content
+
+    def _sanitize_doubao_text(self, value: str) -> str:
+        text = " ".join(str(value or "").split())
+        if not text:
+            return ""
+
+        replacements = {
+            "character profile ids": "character references",
+            "scene profile": "scene setup",
+            "Hard constraints": "Visual continuity constraints",
+            "枪战": "对峙",
+            "枪": "道具",
+            "武器": "装备",
+            "爆炸": "强烈冲击",
+            "击杀": "制服",
+            "杀死": "制服",
+            "杀": "控制",
+            "鲜血": "痕迹",
+            "血": "痕迹",
+            "尸体": "人物",
+            "死亡": "倒地",
+            "敌人": "对手",
+            "军人": "角色",
+            "特种兵": "角色",
+            "战斗": "行动",
+            "作战": "行动",
+            "军事": "专业",
+            "枪口": "镜头前景",
+            "狙击": "远距观察",
+            "gunfight": "confrontation",
+            "gun": "prop",
+            "weapon": "gear",
+            "weapons": "gear",
+            "kill": "stop",
+            "killing": "stopping",
+            "blood": "mark",
+            "corpse": "person",
+            "explosion": "impact",
+            "enemy": "opponent",
+            "battle": "encounter",
+            "combat": "action",
+            "military": "professional",
+            "soldier": "character",
+            "sniper": "observer",
+        }
+        for source, target in replacements.items():
+            text = re.sub(re.escape(source), target, text, flags=re.IGNORECASE)
+
+        text = re.sub(r"profile ids? [^.,;:\n]+", "character references", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b[a-f0-9]{8,}\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" ,.;:")
+        return text[:1600]
+
+    def _build_minimal_safe_doubao_text(self, segment: Dict[str, Any]) -> str:
+        parts = [
+            "Create a cinematic, coherent short video clip with stable character identity and environment continuity.",
+            f"Scene summary: {self._sanitize_doubao_text(str(segment.get('description') or segment.get('title') or 'continuous scene'))}.",
+        ]
+        prompt_focus = self._sanitize_doubao_text(str(segment.get("prompt_focus") or ""))
+        if prompt_focus:
+            parts.append(f"Visual focus: {prompt_focus}.")
+        continuity = self._sanitize_doubao_text(str(segment.get("continuity_to_next") or ""))
+        if continuity:
+            parts.append(f"Ending target: {continuity}.")
+        parts.append("Natural motion, clean composition, no on-screen text, preserve face, outfit, silhouette, and color consistency.")
+        return " ".join(parts)
 
     def _render_segment_gif(
         self,
@@ -2061,13 +2585,426 @@ class PipelineWorkflowService:
     def _can_merge_as_video(self, clips: Iterable[RenderedClip]) -> bool:
         return all(clip.asset_type.startswith("video/") for clip in clips)
 
+    async def _finalize_project_audio(
+        self,
+        *,
+        task_id: str,
+        task_dir: Path,
+        state: RenderTaskState,
+        final_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        requested = bool(state.render_config.get("requested_generate_audio", True))
+        if not requested:
+            final_output["audio"] = {
+                "status": "disabled",
+                "strategy": state.render_config.get("audio_strategy", "mute"),
+                "message": "用户关闭了统一音频生成，本次保留纯画面成片。",
+            }
+            return final_output
+
+        if not bool(settings.AUDIO_PIPELINE_ENABLED):
+            warning = "AUDIO_PIPELINE_ENABLED=false，已跳过项目级音频渲染。"
+            if warning not in state.warnings:
+                state.warnings.append(warning)
+            final_output["audio"] = {
+                "status": "skipped",
+                "strategy": state.render_config.get("audio_strategy", "external_audio_pipeline"),
+                "message": warning,
+            }
+            return final_output
+
+        if not str(final_output.get("asset_type") or "").startswith("video/"):
+            warning = "最终输出不是视频文件，当前音频链路只支持对真实视频进行混音与 mux。"
+            if warning not in state.warnings:
+                state.warnings.append(warning)
+            final_output["audio"] = {
+                "status": "skipped",
+                "strategy": state.render_config.get("audio_strategy", "external_audio_pipeline"),
+                "message": warning,
+            }
+            return final_output
+
+        video_path = self._asset_url_to_path(str(final_output.get("asset_url") or "").strip())
+        if video_path is None or not video_path.exists():
+            warning = "最终视频文件不存在，无法执行项目级音频渲染。"
+            if warning not in state.warnings:
+                state.warnings.append(warning)
+            final_output["audio"] = {
+                "status": "skipped",
+                "strategy": state.render_config.get("audio_strategy", "external_audio_pipeline"),
+                "message": warning,
+            }
+            return final_output
+
+        state.current_step = "生成项目级音频"
+        state.progress = 92.0
+        state.touch()
+        await self._persist_render_task_state(state=state)
+
+        try:
+            audio_renderer = ProjectAudioRenderer(
+                output_dir=str(task_dir),
+                sample_rate=int(settings.AUDIO_SAMPLE_RATE),
+                channels=int(settings.AUDIO_CHANNELS),
+                master_codec=str(settings.AUDIO_MASTER_CODEC or "aac"),
+                master_bitrate=str(settings.AUDIO_MASTER_BITRATE or "192k"),
+                tts_provider=str(settings.AUDIO_TTS_PROVIDER or "mock-silent"),
+                sfx_provider=str(settings.AUDIO_SFX_PROVIDER or "mock-silent"),
+                ambience_provider=str(settings.AUDIO_AMBIENCE_PROVIDER or "mock-silent"),
+                music_provider=str(settings.AUDIO_MUSIC_PROVIDER or "mock-silent"),
+            )
+            audio_result = await audio_renderer.render_project_audio(
+                video_path=str(video_path),
+                audio_plan=dict(state.render_config.get("audio_plan") or {}),
+                project_title=state.project_title,
+                output_basename=f"{self._slugify(state.project_title)}_{task_id[:8]}",
+                expected_duration=self._extract_media_duration(final_output),
+            )
+        except Exception as exc:
+            warning = f"项目级音频渲染失败，已保留无音频成片: {exc}"
+            logger.warning("Project audio rendering failed for task %s: %s", task_id, exc, exc_info=True)
+            if warning not in state.warnings:
+                state.warnings.append(warning)
+            final_output["audio"] = {
+                "status": "failed",
+                "strategy": state.render_config.get("audio_strategy", "external_audio_pipeline"),
+                "message": warning,
+            }
+            return final_output
+
+        for warning in audio_result.get("warnings") or []:
+            if warning not in state.warnings:
+                state.warnings.append(str(warning))
+
+        final_output["audio"] = {
+            "status": audio_result.get("status", "completed"),
+            "strategy": audio_result.get("strategy", state.render_config.get("audio_strategy", "external_audio_pipeline")),
+            "providers": audio_result.get("providers") or {},
+            "duration": audio_result.get("duration"),
+            "manifest_url": self._build_optional_asset_url(audio_result.get("manifest_path")),
+            "master_audio_url": self._build_optional_asset_url(audio_result.get("master_audio_path")),
+            "muxed_video_url": self._build_optional_asset_url(audio_result.get("muxed_video_path")),
+            "warnings": audio_result.get("warnings") or [],
+        }
+
+        muxed_video_path_raw = str(audio_result.get("muxed_video_path") or "").strip()
+        muxed_video_path = Path(muxed_video_path_raw).expanduser() if muxed_video_path_raw else None
+        if muxed_video_path is None or not muxed_video_path.exists():
+            warning = "项目级音频流程未产出 mux 后视频，已保留无音频成片。"
+            if warning not in state.warnings:
+                state.warnings.append(warning)
+            return final_output
+
+        final_output["video_without_audio"] = {
+            "asset_url": final_output.get("asset_url"),
+            "asset_type": final_output.get("asset_type"),
+            "asset_filename": final_output.get("asset_filename"),
+        }
+        final_output["asset_url"] = self._build_asset_url(muxed_video_path)
+        final_output["asset_type"] = "video/mp4"
+        final_output["asset_filename"] = muxed_video_path.name
+
+        merger = VideoMergerService(output_dir=str(task_dir))
+        final_output["video_info"] = await merger.get_video_info(str(muxed_video_path))
+        return final_output
+
     def _doubao_enabled(self) -> bool:
         return bool(self._get_doubao_api_key())
 
     def _get_doubao_api_key(self) -> Optional[str]:
         return settings.DOUBAO_API_KEY or os.getenv("DOUBAO_API_KEY")
 
+    def _build_project_audio_plan(
+        self,
+        *,
+        segments: List[Dict[str, Any]],
+        character_profiles: List[Dict[str, Any]],
+        scene_profiles: List[Dict[str, Any]],
+        render_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        requested_generate_audio = bool(render_config.get("requested_generate_audio", True))
+        if not requested_generate_audio:
+            return {
+                "strategy": "mute",
+                "provider_audio_disabled": True,
+                "requested_generate_audio": False,
+                "summary": "本次任务只生成纯画面视频，不规划外部音频。",
+                "mix_principles": [],
+                "character_voice_bible": [],
+                "music_bible": {
+                    "global_direction": "",
+                    "avoid": [],
+                },
+                "ambience_bible": [],
+                "segment_audio_plan": [],
+            }
+
+        active_character_ids: List[str] = []
+        for segment in segments:
+            for profile_id in segment.get("character_profile_ids") or []:
+                normalized_id = str(profile_id).strip()
+                if normalized_id and normalized_id not in active_character_ids:
+                    active_character_ids.append(normalized_id)
+
+        active_characters = [
+            profile for profile in character_profiles
+            if not active_character_ids or str(profile.get("id") or "").strip() in active_character_ids
+        ]
+        if not active_characters:
+            active_characters = list(character_profiles or [])
+
+        active_scene_ids = {
+            str(segment.get("scene_profile_id") or "").strip()
+            for segment in segments
+            if str(segment.get("scene_profile_id") or "").strip()
+        }
+        active_scenes = [
+            profile for profile in scene_profiles
+            if not active_scene_ids or str(profile.get("id") or "").strip() in active_scene_ids
+        ]
+        if not active_scenes:
+            active_scenes = list(scene_profiles or [])
+
+        character_voice_bible = []
+        for profile in active_characters:
+            speaking_style = str(profile.get("speaking_style") or "").strip()
+            personality = str(profile.get("personality") or "").strip()
+            role = str(profile.get("role") or "").strip()
+            must_keep = self._ensure_text_list(profile.get("must_keep") or [])
+            voice_profile = self._normalize_voice_profile(profile.get("voice_profile") or {})
+            character_voice_bible.append(
+                {
+                    "character_id": str(profile.get("id") or "").strip(),
+                    "name": str(profile.get("name") or "").strip(),
+                    "role": role,
+                    "speaking_style": speaking_style,
+                    "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
+                    "voice_profile": voice_profile,
+                    "voice_direction": self._join_audio_parts(
+                        [
+                            role,
+                            speaking_style,
+                            personality,
+                            f"角色识别点：{'、'.join(must_keep[:3])}" if must_keep else "",
+                            self._describe_voice_profile(voice_profile),
+                        ]
+                    ),
+                }
+            )
+
+        ambience_bible = []
+        for profile in active_scenes:
+            must_have = self._ensure_text_list(profile.get("must_have_elements") or [])
+            ambience_bible.append(
+                {
+                    "scene_profile_id": str(profile.get("id") or "").strip(),
+                    "name": str(profile.get("name") or "").strip(),
+                    "atmosphere": str(profile.get("atmosphere") or "").strip(),
+                    "lighting": str(profile.get("lighting") or "").strip(),
+                    "ambience_direction": self._join_audio_parts(
+                        [
+                            str(profile.get("scene_type") or "").strip(),
+                            str(profile.get("location") or "").strip(),
+                            str(profile.get("atmosphere") or "").strip(),
+                            f"环境锚点：{'、'.join(must_have[:3])}" if must_have else "",
+                        ]
+                    ),
+                }
+            )
+
+        segment_audio_plan = [
+            self._build_segment_audio_plan(
+                segment=segment,
+                character_profiles=character_profiles,
+                scene_profiles=scene_profiles,
+            )
+            for segment in segments
+        ]
+        all_music_tags = self._unique_preserve_order(
+            plan.get("music_direction", "")
+            for plan in segment_audio_plan
+            if str(plan.get("music_direction") or "").strip()
+        )
+
+        return {
+            "strategy": "external_audio_pipeline",
+            "provider_audio_disabled": True,
+            "requested_generate_audio": True,
+            "summary": "视频模型只负责画面生成，音频统一由外部音频链路按项目级规划生成并最终混音。",
+            "mix_principles": [
+                "整片使用统一角色声线，不跟随单段视频模型漂移。",
+                "对白优先，音乐和环境音为连续层，不在片段切换处突变。",
+                "新角色首次登场时提高人声清晰度，帮助观众建立稳定识别。",
+                "片尾保留角色或环境尾音，为下一段首帧续接提供听觉锚点。",
+            ],
+            "character_voice_bible": character_voice_bible,
+            "music_bible": {
+                "global_direction": "延续同一套配乐母题和质感，避免每段重新起风格。",
+                "suggested_motifs": all_music_tags[:6],
+                "avoid": [
+                    "每段完全不同的人声音色",
+                    "片段间音乐调性突然跳变",
+                    "环境底噪忽有忽无",
+                ],
+            },
+            "ambience_bible": ambience_bible,
+            "segment_audio_plan": segment_audio_plan,
+        }
+
+    def _build_segment_audio_plan(
+        self,
+        *,
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+        scene_profiles: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        segment_characters, segment_scene = self._get_segment_profile_context(
+            segment=segment,
+            character_profiles=character_profiles,
+            scene_profiles=scene_profiles,
+        )
+        character_names = self._unique_preserve_order(
+            str(profile.get("name") or "").strip()
+            for profile in segment_characters
+            if str(profile.get("name") or "").strip()
+        )
+        dialogue_lines = self._resolve_segment_dialogue_bindings(
+            self._normalize_segment_dialogues(segment.get("key_dialogues") or []),
+            segment_characters=segment_characters,
+        )[:4]
+        dialogue_focus = [
+            str(item.get("text") or "").strip()
+            for item in dialogue_lines
+            if str(item.get("text") or "").strip()
+        ]
+        action_focus = self._ensure_text_list(segment.get("key_actions") or [])[:5]
+        voice_tracks = []
+        for profile in segment_characters:
+            voice_tracks.append(
+                {
+                    "character_id": str(profile.get("id") or "").strip(),
+                    "name": str(profile.get("name") or "").strip(),
+                    "speaking_style": str(profile.get("speaking_style") or "").strip(),
+                    "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
+                    "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
+                }
+            )
+
+        scene_name = str(segment_scene.get("name") or "").strip() if segment_scene else ""
+        scene_atmosphere = str(segment_scene.get("atmosphere") or "").strip() if segment_scene else ""
+        scene_location = str(segment_scene.get("location") or "").strip() if segment_scene else ""
+        scene_props = self._ensure_text_list((segment_scene or {}).get("props_must_have") or [])[:4]
+        scene_camera = self._ensure_text_list((segment_scene or {}).get("camera_preferences") or [])[:2]
+
+        sound_effects = self._unique_preserve_order(
+            [*action_focus, *(scene_props or []), *(scene_camera or [])]
+        )[:6]
+
+        music_direction_parts = [
+            scene_atmosphere,
+            str(segment.get("prompt_focus") or "").strip(),
+            str(segment.get("transition_out") or "").strip(),
+        ]
+        if segment.get("contains_primary_character"):
+            music_direction_parts.append("主角存在感要稳定，不要被音效盖住")
+        if segment.get("new_character_profile_ids"):
+            music_direction_parts.append("新角色登场时配乐先让位给声线辨识")
+        music_direction = self._join_audio_parts(music_direction_parts)
+
+        mix_notes = []
+        if dialogue_focus:
+            mix_notes.append("对白置于前景，优先保证台词清晰度。")
+        if segment.get("ending_contains_primary_character") or segment.get("ending_contains_handoff_characters"):
+            mix_notes.append("片尾保留角色呼吸、脚步或衣料尾音，帮助下一段衔接。")
+        if segment.get("prefer_primary_character_end_frame") or segment.get("prefer_character_handoff_end_frame"):
+            mix_notes.append("结尾避免音乐硬切，使用环境尾音或短延音过渡。")
+        if segment.get("continuity_to_next"):
+            mix_notes.append(f"与下一段衔接提示：{str(segment.get('continuity_to_next') or '').strip()}")
+
+        return {
+            "segment_number": int(segment.get("segment_number") or 0),
+            "title": str(segment.get("title") or ""),
+            "duration": float(segment.get("duration") or 0.0),
+            "characters": character_names,
+            "voice_tracks": voice_tracks,
+            "dialogue_focus": dialogue_focus,
+            "dialogue_lines": dialogue_lines,
+            "sound_effects": sound_effects,
+            "ambience": self._join_audio_parts([scene_name, scene_location, scene_atmosphere]),
+            "music_direction": music_direction,
+            "transition_hint": str(segment.get("continuity_to_next") or segment.get("continuity_from_prev") or "").strip(),
+            "mix_notes": mix_notes,
+        }
+
+    def _ensure_text_list(self, value: Any) -> List[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, tuple):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        return []
+
+    def _unique_preserve_order(self, values: Iterable[Any]) -> List[str]:
+        seen: set[str] = set()
+        result: List[str] = []
+        for value in values:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
+    def _join_audio_parts(self, parts: Iterable[Any]) -> str:
+        normalized = self._unique_preserve_order(parts)
+        return "；".join(normalized[:4])
+
+    def _normalize_voice_profile(self, value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+
+        normalized: Dict[str, Any] = {}
+        for key in ["provider", "voice_type", "voice_name", "emotion", "language"]:
+            text = str(value.get(key) or "").strip()
+            if text:
+                normalized[key] = text
+
+        for key in ["speed_ratio", "pitch_ratio", "volume_ratio"]:
+            raw = value.get(key)
+            if raw in (None, "", "null"):
+                continue
+            try:
+                normalized[key] = round(float(raw), 3)
+            except (TypeError, ValueError):
+                continue
+
+        return normalized
+
+    def _describe_voice_profile(self, voice_profile: Dict[str, Any]) -> str:
+        if not isinstance(voice_profile, dict) or not voice_profile:
+            return ""
+
+        parts: List[str] = []
+        provider = str(voice_profile.get("provider") or "").strip()
+        voice_type = str(voice_profile.get("voice_type") or "").strip()
+        emotion = str(voice_profile.get("emotion") or "").strip()
+        if provider:
+            parts.append(f"provider={provider}")
+        if voice_type:
+            parts.append(f"voice={voice_type}")
+        if emotion:
+            parts.append(f"emotion={emotion}")
+        return "语音绑定：" + " / ".join(parts) if parts else ""
+
     def _normalize_render_config(self, render_config: Dict[str, Any]) -> Dict[str, Any]:
+        requested_generate_audio = bool(
+            render_config.get(
+                "requested_generate_audio",
+                render_config.get("generate_audio", True),
+            )
+        )
         return {
             "provider": str(render_config.get("provider") or "auto"),
             "resolution": self._normalize_doubao_resolution(str(render_config.get("resolution") or "720p")),
@@ -2075,7 +3012,10 @@ class PipelineWorkflowService:
             "watermark": bool(render_config.get("watermark", False)),
             "provider_model": str(render_config.get("provider_model") or settings.DOUBAO_VIDEO_MODEL),
             "camera_fixed": bool(render_config.get("camera_fixed", False)),
-            "generate_audio": bool(render_config.get("generate_audio", True)),
+            "generate_audio": False,
+            "requested_generate_audio": requested_generate_audio,
+            "audio_strategy": "external_audio_pipeline" if requested_generate_audio else "mute",
+            "audio_plan": render_config.get("audio_plan") if isinstance(render_config.get("audio_plan"), dict) else None,
             "return_last_frame": True,
             "service_tier": self._normalize_service_tier(str(render_config.get("service_tier") or "default")),
             "seed": self._normalize_provider_seed(render_config.get("seed")),
@@ -2121,12 +3061,18 @@ class PipelineWorkflowService:
 
         if start_frame:
             anchor_labels = [str(item.get("label") or item.get("anchor_type") or "").strip() for item in character_anchor_images]
-            logger.info(
-                "Using start frame plus %s character anchor images for segment %s: %s; next clip start will come from provider returned last frame",
-                len(character_anchor_images),
-                segment.get("segment_number"),
-                ", ".join(label for label in anchor_labels if label) or "none",
-            )
+            if character_anchor_images:
+                logger.info(
+                    "Using start frame as the only image input for segment %s; %s character anchor images stay in text guidance only: %s",
+                    segment.get("segment_number"),
+                    len(character_anchor_images),
+                    ", ".join(label for label in anchor_labels if label) or "unnamed anchors",
+                )
+            else:
+                logger.info(
+                    "Using start frame as the only image input for segment %s; next clip start will come from provider returned last frame",
+                    segment.get("segment_number"),
+                )
             final_moment_hint = (
                 segment.get("continuity_to_next")
                 or segment.get("description")
@@ -2136,15 +3082,15 @@ class PipelineWorkflowService:
             prompt = (
                 f"{prompt}\n"
                 "Treat the provided first-frame image as the highest-priority motion and continuity anchor; do not reinvent shot composition from narrative text. "
-                "Treat the provided character anchor images as identity locks for face, hairstyle, outfit, silhouette, and color palette. "
-                "Keep the motion consistent with the first-frame image while keeping the subject identity consistent with both the first-frame image and the character anchor images. "
+                "Use the character identity and continuity instructions in the text as the identity lock for face, hairstyle, outfit, silhouette, and color palette. "
+                "Keep the motion consistent with the first-frame image while preserving the subject identity described in the text guidance. "
                 f"The final moment should land on this target ending state: {final_moment_hint}."
             )
         elif character_anchor_images:
             prompt = (
                 f"{prompt}\n"
-                "Treat the provided character anchor images as identity locks for face, hairstyle, outfit, silhouette, and color palette. "
-                "Do not let the character drift away from these anchors during motion."
+                "No image anchor is attached for this clip. "
+                "Rely on the character identity and continuity instructions in the text to keep face, hairstyle, outfit, silhouette, and color palette stable during motion."
             )
 
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -2159,16 +3105,6 @@ class PipelineWorkflowService:
                     "label": "start_frame",
                 }
             )
-        for item in character_anchor_images:
-            anchor_url = str(item.get("url") or "").strip()
-            if not anchor_url:
-                continue
-            image_candidates.append(
-                {
-                    "url": anchor_url,
-                    "label": str(item.get("label") or item.get("anchor_type") or "character_anchor").strip(),
-                }
-            )
 
         provider_images: List[Dict[str, str]] = []
         for candidate in image_candidates:
@@ -2180,17 +3116,6 @@ class PipelineWorkflowService:
                         "label": candidate["label"],
                     }
                 )
-
-        if len(provider_images) > 1:
-            kept = provider_images[0]
-            dropped_labels = [item["label"] for item in provider_images[1:] if item.get("label")]
-            logger.warning(
-                "Doubao video API accepts at most one image input; keeping %s for segment %s and folding %s extra anchors into text prompt: %s",
-                kept.get("label") or "start_frame",
-                segment.get("segment_number"),
-                len(provider_images) - 1,
-                ", ".join(dropped_labels) or "unnamed anchors",
-            )
 
         if provider_images:
             content.append({"type": "image_url", "image_url": {"url": provider_images[0]["url"]}})
@@ -2346,7 +3271,15 @@ class PipelineWorkflowService:
         character_profiles: List[Dict[str, Any]],
         stage: str,
     ) -> Optional[Dict[str, Any]]:
-        from PIL import Image, ImageDraw, ImageFont, ImageOps
+        try:
+            from PIL import Image, ImageDraw, ImageFont, ImageOps
+        except ModuleNotFoundError:
+            logger.warning(
+                "PIL is unavailable, skip multi-character identity board for segment %s stage=%s",
+                segment.get("segment_number"),
+                stage,
+            )
+            return None
 
         cards: List[Dict[str, Any]] = []
         for profile in character_profiles:
@@ -2483,7 +3416,7 @@ class PipelineWorkflowService:
         candidates = [self._build_character_anchor_candidates(profile) for profile in character_profiles]
         candidates = [item for item in candidates if item.get("primary") or item.get("supplements")]
 
-        if len(candidates) > 1:
+        if stage != "video" and len(candidates) > 1:
             board_item = self._build_multi_character_identity_board(
                 task_dir=task_dir,
                 segment=segment,
@@ -2540,6 +3473,7 @@ class PipelineWorkflowService:
             "outfit": str(profile.get("outfit") or "").strip(),
             "color_palette": str(profile.get("color_palette") or "").strip(),
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
+            "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
             "image_prompt_base": str(profile.get("image_prompt_base") or "").strip(),
@@ -2701,6 +3635,21 @@ class PipelineWorkflowService:
             parts.append(f"Previous tail-frame continuity to preserve: {segment['continuity_from_prev']}")
         if segment.get("continuity_to_next"):
             parts.append(f"Target ending state for next clip handoff: {segment['continuity_to_next']}")
+        if segment.get("prefer_character_handoff_end_frame"):
+            handoff_character_ids = list(segment.get("handoff_character_profile_ids") or [])
+            if handoff_character_ids:
+                parts.append(
+                    "Finish the clip with these continuing characters still clearly visible in the final frame for the next clip handoff: "
+                    + ", ".join(str(item) for item in handoff_character_ids if str(item).strip())
+                )
+            else:
+                parts.append(
+                    "Finish the clip with the continuing on-screen characters still clearly visible in the final frame for the next clip handoff"
+                )
+        elif segment.get("prefer_primary_character_end_frame"):
+            parts.append(
+                "Finish the clip with the main on-screen character still clearly visible in the final frame so the next clip can inherit stable identity and pose continuity"
+            )
         parts.append("Preserve character face, hairstyle, outfit, color palette, and environment logic consistently across the whole clip")
         return ". ".join(part for part in parts if part).strip()
 
@@ -2843,6 +3792,33 @@ class PipelineWorkflowService:
             relative_path = asset_url.replace("/uploads/", "", 1)
             return Path(settings.UPLOAD_DIR) / relative_path
         return None
+
+    def _build_optional_asset_url(self, asset_path: Optional[str]) -> str:
+        if not asset_path:
+            return ""
+        path = Path(str(asset_path)).expanduser()
+        if not path.exists():
+            return ""
+        try:
+            return self._build_asset_url(path)
+        except Exception:
+            return ""
+
+    def _extract_media_duration(self, final_output: Dict[str, Any]) -> Optional[float]:
+        video_info = dict(final_output.get("video_info") or {})
+        format_info = dict(video_info.get("format") or {})
+        try:
+            duration = float(format_info.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return duration if duration > 0 else None
+
+    def _should_reuse_previous_last_frame(self, bundle: Optional[Dict[str, Any]]) -> bool:
+        start_frame = dict((bundle or {}).get("start_frame") or {})
+        if str(start_frame.get("asset_url") or "").strip():
+            return False
+        source = str(start_frame.get("source") or "").strip()
+        return source in {"", "runtime-last-frame", "previous-render-last-frame"}
 
     def _with_runtime_start_frame(
         self,

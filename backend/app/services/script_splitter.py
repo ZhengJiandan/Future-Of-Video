@@ -22,7 +22,7 @@ import ast
 import re
 import json
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 import logging
@@ -49,7 +49,7 @@ class VideoSegment:
     # 内容概要
     shots_summary: str = ""               # 分镜概要
     key_actions: List[str] = field(default_factory=list)  # 关键动作
-    key_dialogues: List[str] = field(default_factory=list)  # 关键对话
+    key_dialogues: List["SegmentDialogue"] = field(default_factory=list)  # 关键对话
     
     # 衔接信息
     transition_in: str = ""               # 进入过渡效果
@@ -66,6 +66,15 @@ class VideoSegment:
     character_profile_ids: List[str] = field(default_factory=list)
     character_profile_versions: Dict[str, int] = field(default_factory=dict)
     prompt_focus: str = ""
+    contains_primary_character: bool = False
+    ending_contains_primary_character: bool = False
+    pre_generate_start_frame: bool = False
+    start_frame_generation_reason: str = ""
+    prefer_primary_character_end_frame: bool = False
+    new_character_profile_ids: List[str] = field(default_factory=list)
+    handoff_character_profile_ids: List[str] = field(default_factory=list)
+    ending_contains_handoff_characters: bool = False
+    prefer_character_handoff_end_frame: bool = False
     
     # 结果
     video_url: str = ""                   # 生成的视频URL
@@ -152,6 +161,15 @@ class ParsedShot:
     end_time: float = 0.0
 
 
+@dataclass
+class SegmentDialogue:
+    text: str
+    speaker_name: str = ""
+    speaker_character_id: str = ""
+    emotion: str = ""
+    tone: str = ""
+
+
 class ScriptSplitter:
     """
     剧本拆分器 - 核心类
@@ -204,10 +222,19 @@ class ScriptSplitter:
             parsed_shots=analysis.get("parsed_shots", []) or [],
             target_duration=effective_target_duration,
         )
+        split_points = self._optimize_split_points_for_character_continuity(
+            split_points=split_points,
+            parsed_shots=analysis.get("parsed_shots", []) or [],
+            target_duration=effective_target_duration,
+        )
         
         # 步骤3: 生成分段
         logger.info("步骤3: 生成视频片段...")
         segments = await self._generate_segments(script, split_points)
+        segments = self._annotate_segments_for_video_generation(
+            segments=segments,
+            parsed_shots=analysis.get("parsed_shots", []) or [],
+        )
 
         # 步骤4: 生成衔接信息
         logger.info("步骤4: 生成衔接信息...")
@@ -233,7 +260,6 @@ class ScriptSplitter:
             current_validation_report=validation_report,
             requested_target_duration=target_duration,
         )
-        
         # 组装结果
         total_duration = sum(seg.duration for seg in segments)
         result = SplitResult(
@@ -464,6 +490,7 @@ class ScriptSplitter:
         """生成视频片段"""
         
         segments = []
+        character_registry = self._extract_character_registry(script)
         
         for i, point in enumerate(split_points):
             segment_shots: List[ParsedShot] = point.get("shots", []) or []
@@ -474,8 +501,17 @@ class ScriptSplitter:
                 point["end_time"],
                 segment_shots,
             )
+            segment_character_ids = self._collect_unique_items(
+                [profile_id for shot in segment_shots for profile_id in shot.character_profile_ids if profile_id],
+                limit=12,
+            )
             key_actions = self._collect_unique_items([action for shot in segment_shots for action in shot.actions], limit=6)
-            key_dialogues = self._collect_unique_items([dialogue for shot in segment_shots for dialogue in shot.dialogues], limit=4)
+            key_dialogues = self._normalize_segment_dialogues(
+                [dialogue for shot in segment_shots for dialogue in shot.dialogues],
+                character_registry=character_registry,
+                segment_character_ids=segment_character_ids,
+                limit=4,
+            )
             shots_summary = self._build_shots_summary(segment_shots)
             
             # 生成视频Prompt
@@ -494,7 +530,12 @@ class ScriptSplitter:
                 or (segment_script[:200] + "..." if len(segment_script) > 200 else segment_script)
             )
             llm_key_actions = self._collect_unique_items(point.get("key_actions", []) or [], limit=6)
-            llm_key_dialogues = self._collect_unique_items(point.get("key_dialogues", []) or [], limit=4)
+            llm_key_dialogues = self._normalize_segment_dialogues(
+                point.get("key_dialogues", []) or [],
+                character_registry=character_registry,
+                segment_character_ids=segment_character_ids,
+                limit=4,
+            )
             # 创建片段
             segment = VideoSegment(
                 segment_number=point["segment_number"],
@@ -513,12 +554,18 @@ class ScriptSplitter:
                 continuity_to_next=str(point.get("continuity_to_next") or ("" if i == len(split_points) - 1 else self._describe_transition_out(segment_shots, split_points[i + 1].get("shots", [])))),
                 scene_profile_id=str(point.get("scene_profile_id") or (segment_shots[0].scene_profile_id if segment_shots else "")),
                 scene_profile_version=int(point.get("scene_profile_version") or (segment_shots[0].scene_profile_version if segment_shots else 1)),
-                character_profile_ids=self._collect_unique_items(
-                    [profile_id for shot in segment_shots for profile_id in shot.character_profile_ids if profile_id],
-                    limit=12,
-                ),
+                character_profile_ids=segment_character_ids,
                 character_profile_versions=self._merge_profile_versions(segment_shots),
                 prompt_focus=str(point.get("prompt_focus") or self._build_segment_prompt_focus(segment_shots)),
+                contains_primary_character=bool(point.get("contains_primary_character", False)),
+                ending_contains_primary_character=bool(point.get("ending_contains_primary_character", False)),
+                pre_generate_start_frame=bool(point.get("pre_generate_start_frame", False)),
+                start_frame_generation_reason=str(point.get("start_frame_generation_reason") or ""),
+                prefer_primary_character_end_frame=bool(point.get("prefer_primary_character_end_frame", False)),
+                new_character_profile_ids=list(point.get("new_character_profile_ids") or []),
+                handoff_character_profile_ids=list(point.get("handoff_character_profile_ids") or []),
+                ending_contains_handoff_characters=bool(point.get("ending_contains_handoff_characters", False)),
+                prefer_character_handoff_end_frame=bool(point.get("prefer_character_handoff_end_frame", False)),
                 status="ready"
             )
             
@@ -553,6 +600,238 @@ class ScriptSplitter:
             return "\n\n".join(block for block in blocks if block).strip()
 
         return f"[{start_time:.1f}s - {end_time:.1f}s] " + script[:500]
+
+    def _extract_character_registry(self, script: str) -> Dict[str, str]:
+        registry: Dict[str, str] = {}
+        in_character_section = False
+        current_name = ""
+
+        for raw_line in script.splitlines():
+            stripped = raw_line.strip()
+            if stripped == "【角色设定】":
+                in_character_section = True
+                current_name = ""
+                continue
+            if in_character_section and stripped.startswith("【") and stripped != "【角色设定】":
+                break
+            if not in_character_section or not stripped:
+                continue
+
+            character_match = re.match(r"^(?:角色\s*)?(\d+)[\.\:]\s*(.+)$", stripped)
+            if character_match:
+                current_name = character_match.group(2).strip()
+                continue
+
+            if stripped.startswith("档案ID:") and current_name:
+                profile_id = stripped.partition(":")[2].strip()
+                if profile_id and profile_id != "未绑定":
+                    registry[self._normalize_dialogue_lookup_key(current_name)] = profile_id
+
+        return registry
+
+    def _normalize_dialogue_lookup_key(self, value: str) -> str:
+        return re.sub(r"\s+", "", str(value or "").strip()).lower()
+
+    def _is_likely_character_id(
+        self,
+        value: str,
+        *,
+        character_registry: Dict[str, str],
+        segment_character_ids: List[str],
+    ) -> bool:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return False
+        if normalized in segment_character_ids or normalized in character_registry.values():
+            return True
+        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{5,}", normalized))
+
+    def _resolve_character_id_for_dialogue(
+        self,
+        *,
+        speaker_name: str,
+        speaker_character_id: str,
+        character_registry: Dict[str, str],
+        segment_character_ids: List[str],
+    ) -> str:
+        normalized_character_id = str(speaker_character_id or "").strip()
+        if normalized_character_id:
+            return normalized_character_id
+
+        normalized_name = self._normalize_dialogue_lookup_key(speaker_name)
+        if normalized_name and normalized_name in character_registry:
+            return character_registry[normalized_name]
+        if normalized_name and len(segment_character_ids) == 1:
+            return segment_character_ids[0]
+        return ""
+
+    def _parse_dialogue_text(
+        self,
+        raw_dialogue: str,
+        *,
+        character_registry: Dict[str, str],
+        segment_character_ids: List[str],
+    ) -> SegmentDialogue:
+        raw_text = str(raw_dialogue or "").strip()
+        if not raw_text:
+            return SegmentDialogue(text="")
+
+        speaker_name = ""
+        speaker_character_id = ""
+        emotion = ""
+        tone = ""
+        dialogue_text = raw_text
+
+        prefix = ""
+        content = ""
+        for separator in ("：", ":"):
+            if separator in raw_text:
+                prefix, content = raw_text.split(separator, 1)
+                break
+
+        if prefix:
+            bracket_values = re.findall(r"\[([^\]]+)\]", prefix)
+            speaker_name = re.sub(r"\[[^\]]+\]", "", prefix).strip()
+            dialogue_text = content.strip()
+
+            for item in bracket_values:
+                normalized = str(item or "").strip()
+                if not normalized:
+                    continue
+                if (
+                    not speaker_character_id
+                    and self._is_likely_character_id(
+                        normalized,
+                        character_registry=character_registry,
+                        segment_character_ids=segment_character_ids,
+                    )
+                ):
+                    speaker_character_id = normalized
+                    continue
+
+                labels = [part.strip() for part in re.split(r"\s*/\s*", normalized) if part.strip()]
+                if labels and not emotion:
+                    emotion = labels[0]
+                if len(labels) >= 2 and not tone:
+                    tone = labels[1]
+
+        speaker_character_id = self._resolve_character_id_for_dialogue(
+            speaker_name=speaker_name,
+            speaker_character_id=speaker_character_id,
+            character_registry=character_registry,
+            segment_character_ids=segment_character_ids,
+        )
+
+        return SegmentDialogue(
+            text=dialogue_text or raw_text,
+            speaker_name=speaker_name,
+            speaker_character_id=speaker_character_id,
+            emotion=emotion,
+            tone=tone,
+        )
+
+    def _normalize_segment_dialogues(
+        self,
+        raw_dialogues: Any,
+        *,
+        character_registry: Dict[str, str],
+        segment_character_ids: List[str],
+        limit: int = 4,
+    ) -> List[SegmentDialogue]:
+        if isinstance(raw_dialogues, (str, dict, SegmentDialogue)):
+            iterable = [raw_dialogues]
+        elif isinstance(raw_dialogues, (list, tuple)):
+            iterable = list(raw_dialogues)
+        else:
+            iterable = []
+
+        normalized_items: List[SegmentDialogue] = []
+        seen: set[tuple[str, str, str, str, str]] = set()
+
+        for raw_item in iterable:
+            dialogue: Optional[SegmentDialogue]
+            if isinstance(raw_item, SegmentDialogue):
+                dialogue = SegmentDialogue(
+                    text=str(raw_item.text or "").strip(),
+                    speaker_name=str(raw_item.speaker_name or "").strip(),
+                    speaker_character_id=str(raw_item.speaker_character_id or "").strip(),
+                    emotion=str(raw_item.emotion or "").strip(),
+                    tone=str(raw_item.tone or "").strip(),
+                )
+            elif isinstance(raw_item, dict):
+                speaker_name = str(raw_item.get("speaker_name") or raw_item.get("speaker") or "").strip()
+                speaker_character_id = str(raw_item.get("speaker_character_id") or raw_item.get("character_id") or "").strip()
+                dialogue = SegmentDialogue(
+                    text=str(raw_item.get("text") or raw_item.get("dialogue") or "").strip(),
+                    speaker_name=speaker_name,
+                    speaker_character_id=self._resolve_character_id_for_dialogue(
+                        speaker_name=speaker_name,
+                        speaker_character_id=speaker_character_id,
+                        character_registry=character_registry,
+                        segment_character_ids=segment_character_ids,
+                    ),
+                    emotion=str(raw_item.get("emotion") or "").strip(),
+                    tone=str(raw_item.get("tone") or "").strip(),
+                )
+            else:
+                dialogue = self._parse_dialogue_text(
+                    str(raw_item),
+                    character_registry=character_registry,
+                    segment_character_ids=segment_character_ids,
+                )
+
+            if not str((dialogue.text if dialogue else "") or "").strip():
+                continue
+
+            fingerprint = (
+                str(dialogue.text or "").strip(),
+                str(dialogue.speaker_name or "").strip(),
+                str(dialogue.speaker_character_id or "").strip(),
+                str(dialogue.emotion or "").strip(),
+                str(dialogue.tone or "").strip(),
+            )
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            normalized_items.append(dialogue)
+            if len(normalized_items) >= limit:
+                break
+
+        return normalized_items
+
+    def _dialogue_display_text(
+        self,
+        dialogue: SegmentDialogue,
+        *,
+        include_character_id: bool = True,
+    ) -> str:
+        text = str(dialogue.text or "").strip()
+        speaker_name = str(dialogue.speaker_name or "").strip()
+        speaker_character_id = str(dialogue.speaker_character_id or "").strip()
+        label_items = [part for part in [str(dialogue.emotion or "").strip(), str(dialogue.tone or "").strip()] if part]
+
+        prefix = speaker_name
+        if include_character_id and speaker_character_id:
+            prefix = f"{prefix} [{speaker_character_id}]".strip()
+        if label_items:
+            prefix = f"{prefix} [{' / '.join(label_items)}]".strip()
+
+        if prefix and text:
+            return f"{prefix}: {text}"
+        return text or prefix
+
+    def _serialize_segment_dialogues(self, dialogues: List[SegmentDialogue]) -> List[Dict[str, str]]:
+        return [
+            {
+                "text": str(dialogue.text or "").strip(),
+                "speaker_name": str(dialogue.speaker_name or "").strip(),
+                "speaker_character_id": str(dialogue.speaker_character_id or "").strip(),
+                "emotion": str(dialogue.emotion or "").strip(),
+                "tone": str(dialogue.tone or "").strip(),
+            }
+            for dialogue in dialogues
+            if str(dialogue.text or "").strip()
+        ]
     
     async def _generate_video_prompt(
         self, 
@@ -770,6 +1049,259 @@ class ScriptSplitter:
         descriptions = self._collect_unique_items([shot.description for shot in segment_shots if shot.description], limit=2)
         return "；".join(descriptions)
 
+    def _identify_primary_character_ids(self, parsed_shots: List[ParsedShot]) -> List[str]:
+        if not parsed_shots:
+            return []
+
+        stats: Dict[str, Dict[str, float]] = {}
+        total_duration = max(float(parsed_shots[-1].end_time or 0.0), 1.0)
+        for shot in parsed_shots:
+            unique_ids = self._collect_unique_items(
+                [profile_id for profile_id in shot.character_profile_ids if profile_id],
+                limit=20,
+            )
+            for profile_id in unique_ids:
+                entry = stats.setdefault(profile_id, {"duration": 0.0, "shots": 0.0})
+                entry["duration"] += float(shot.duration or 0.0)
+                entry["shots"] += 1.0
+
+        if not stats:
+            return []
+
+        ranked = sorted(
+            stats.items(),
+            key=lambda item: (-item[1]["duration"], -item[1]["shots"], item[0]),
+        )
+        duration_threshold = max(3.0, total_duration * 0.18)
+        selected = [
+            profile_id
+            for profile_id, meta in ranked
+            if meta["duration"] >= duration_threshold or meta["shots"] >= 2
+        ][:2]
+        if not selected:
+            selected = [ranked[0][0]]
+        return selected
+
+    def _shots_contain_primary_characters(
+        self,
+        segment_shots: List[ParsedShot],
+        primary_character_ids: List[str],
+    ) -> bool:
+        if not segment_shots or not primary_character_ids:
+            return False
+        primary_set = set(primary_character_ids)
+        return any(primary_set.intersection(set(shot.character_profile_ids or [])) for shot in segment_shots)
+
+    def _ending_shot_contains_primary_characters(
+        self,
+        segment_shots: List[ParsedShot],
+        primary_character_ids: List[str],
+    ) -> bool:
+        if not segment_shots or not primary_character_ids:
+            return False
+        return bool(set(primary_character_ids).intersection(set(segment_shots[-1].character_profile_ids or [])))
+
+    def _collect_segment_character_ids(self, segment_shots: List[ParsedShot]) -> List[str]:
+        return self._collect_unique_items(
+            [profile_id for shot in segment_shots for profile_id in shot.character_profile_ids if profile_id],
+            limit=20,
+        )
+
+    def _first_shot_character_ids(self, segment_shots: List[ParsedShot]) -> List[str]:
+        if not segment_shots:
+            return []
+        return self._collect_unique_items(
+            [profile_id for profile_id in (segment_shots[0].character_profile_ids or []) if profile_id],
+            limit=20,
+        )
+
+    def _ending_shot_contains_character_ids(
+        self,
+        segment_shots: List[ParsedShot],
+        character_ids: List[str],
+    ) -> bool:
+        if not segment_shots or not character_ids:
+            return False
+        return bool(set(character_ids).intersection(set(segment_shots[-1].character_profile_ids or [])))
+
+    def _rebuild_split_points_from_boundaries(
+        self,
+        *,
+        boundaries: List[float],
+        parsed_shots: List[ParsedShot],
+        target_duration: float,
+        split_reason: str,
+        enforce_duration_limits: bool = True,
+    ) -> List[Dict[str, Any]]:
+        if not boundaries or not parsed_shots:
+            return []
+
+        min_duration = float(self.config.min_segment_duration)
+        max_duration = float(self.config.max_segment_duration)
+        total_duration = round(min(float(target_duration), float(parsed_shots[-1].end_time)), 2)
+        normalized_boundaries = sorted(
+            {
+                round(point, 2)
+                for point in boundaries
+                if min_duration - 0.01 <= round(point, 2) <= total_duration + 0.01
+            }
+        )
+        if not normalized_boundaries or abs(normalized_boundaries[-1] - total_duration) > 0.01:
+            return []
+
+        rebuilt: List[Dict[str, Any]] = []
+        start_time = 0.0
+        for index, end_time in enumerate(normalized_boundaries, start=1):
+            duration = round(end_time - start_time, 2)
+            if duration < min_duration - 0.01:
+                return []
+            if enforce_duration_limits and duration > max_duration + 0.01:
+                return []
+            segment_shots = self._slice_shots_by_time(parsed_shots, start_time, end_time)
+            if not segment_shots:
+                return []
+            rebuilt.append(
+                {
+                    "segment_number": index,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "duration": duration,
+                    "split_reason": split_reason,
+                    "title": "",
+                    "description": "",
+                    "key_actions": [],
+                    "key_dialogues": [],
+                    "continuity_from_prev": "",
+                    "continuity_to_next": "",
+                    "prompt_focus": "",
+                    "shots": segment_shots,
+                }
+            )
+            start_time = end_time
+
+        return rebuilt
+
+    def _optimize_split_points_for_character_continuity(
+        self,
+        *,
+        split_points: List[Dict[str, Any]],
+        parsed_shots: List[ParsedShot],
+        target_duration: float,
+    ) -> List[Dict[str, Any]]:
+        if not split_points or not parsed_shots:
+            return split_points
+
+        min_duration = float(self.config.min_segment_duration)
+        existing_boundaries = sorted({round(float(point.get("end_time") or 0.0), 2) for point in split_points})
+        seen_character_ids: set[str] = set()
+        candidate_boundaries: List[tuple[float, List[str]]] = []
+
+        for shot in parsed_shots:
+            shot_character_ids = self._collect_unique_items(
+                [profile_id for profile_id in shot.character_profile_ids if profile_id],
+                limit=20,
+            )
+            new_character_ids = [profile_id for profile_id in shot_character_ids if profile_id not in seen_character_ids]
+            if new_character_ids and float(shot.start_time) > 0.01:
+                candidate_boundaries.append((round(float(shot.start_time), 2), new_character_ids))
+            seen_character_ids.update(shot_character_ids)
+
+        if not candidate_boundaries:
+            return split_points
+
+        updated_boundaries = list(existing_boundaries)
+        changed = False
+        for boundary_time, new_character_ids in candidate_boundaries:
+            if boundary_time in updated_boundaries:
+                continue
+            previous_boundary = max((point for point in updated_boundaries if point < boundary_time), default=0.0)
+            next_boundary = min(
+                (point for point in updated_boundaries if point > boundary_time),
+                default=round(min(float(target_duration), float(parsed_shots[-1].end_time)), 2),
+            )
+            if boundary_time - previous_boundary < min_duration - 0.01:
+                continue
+            if next_boundary - boundary_time < min_duration - 0.01:
+                continue
+            updated_boundaries.append(boundary_time)
+            updated_boundaries.sort()
+            changed = True
+            logger.info(
+                "Added split at %.2fs for new character entry: %s",
+                boundary_time,
+                ", ".join(new_character_ids),
+            )
+
+        if not changed:
+            return split_points
+
+        rebuilt = self._rebuild_split_points_from_boundaries(
+            boundaries=updated_boundaries,
+            parsed_shots=parsed_shots,
+            target_duration=target_duration,
+            split_reason="new_character_entry_split",
+            enforce_duration_limits=False,
+        )
+        return rebuilt or split_points
+
+    def _annotate_segments_for_video_generation(
+        self,
+        *,
+        segments: List[VideoSegment],
+        parsed_shots: List[ParsedShot],
+    ) -> List[VideoSegment]:
+        if not segments:
+            return segments
+
+        primary_character_ids = self._identify_primary_character_ids(parsed_shots)
+        segment_character_ids: List[List[str]] = []
+        segment_ending_character_ids: List[List[str]] = []
+        seen_character_ids: set[str] = set()
+
+        for index, segment in enumerate(segments):
+            segment_shots = self._slice_shots_by_time(
+                parsed_shots,
+                float(segment.start_time),
+                float(segment.end_time),
+            )
+            character_ids = self._collect_segment_character_ids(segment_shots)
+            first_shot_character_ids = self._first_shot_character_ids(segment_shots)
+            new_character_ids = [profile_id for profile_id in character_ids if profile_id not in seen_character_ids]
+            contains_primary = self._shots_contain_primary_characters(segment_shots, primary_character_ids)
+            ending_contains_primary = self._ending_shot_contains_primary_characters(segment_shots, primary_character_ids)
+
+            segment.contains_primary_character = contains_primary
+            segment.ending_contains_primary_character = ending_contains_primary
+            segment.new_character_profile_ids = new_character_ids
+            segment.pre_generate_start_frame = index == 0
+            segment.start_frame_generation_reason = "opening_segment" if index == 0 else ""
+            segment.prefer_primary_character_end_frame = index < len(segments) - 1 and contains_primary
+            if index > 0 and set(new_character_ids).intersection(set(first_shot_character_ids)):
+                segment.pre_generate_start_frame = True
+                segment.start_frame_generation_reason = "new_character_entry"
+
+            seen_character_ids.update(character_ids)
+            segment_character_ids.append(character_ids)
+            segment_ending_character_ids.append(
+                self._collect_unique_items(
+                    [profile_id for profile_id in (segment_shots[-1].character_profile_ids if segment_shots else []) if profile_id],
+                    limit=20,
+                )
+            )
+
+        for index, segment in enumerate(segments[:-1]):
+            next_character_ids = segment_character_ids[index + 1]
+            handoff_character_ids = [profile_id for profile_id in segment_character_ids[index] if profile_id in next_character_ids]
+            segment.handoff_character_profile_ids = handoff_character_ids
+            segment.prefer_character_handoff_end_frame = bool(handoff_character_ids)
+            segment.ending_contains_handoff_characters = bool(
+                set(handoff_character_ids).intersection(set(segment_ending_character_ids[index]))
+            )
+            if segment.prefer_character_handoff_end_frame:
+                segment.prefer_primary_character_end_frame = True
+
+        return segments
+
     def _merge_profile_versions(self, segment_shots: List[ParsedShot]) -> Dict[str, int]:
         merged: Dict[str, int] = {}
         for shot in segment_shots:
@@ -838,6 +1370,10 @@ class ScriptSplitter:
             prompt_parts.append("continuing naturally from the previous segment")
         if has_next:
             prompt_parts.append("ending with a clear transition into the next segment")
+        if point.get("prefer_character_handoff_end_frame"):
+            prompt_parts.append("end with the continuing on-screen characters still clearly visible in frame for the next segment handoff")
+        elif point.get("prefer_primary_character_end_frame"):
+            prompt_parts.append("end with the main character still clearly visible in frame for the next segment handoff")
 
         prompt = ", ".join(part for part in prompt_parts if part)
 
@@ -912,6 +1448,8 @@ class ScriptSplitter:
 6. 输出每个片段的优化信息：标题、片段描述、关键动作、关键对话、与前后片段衔接说明、该片段视频生成 prompt_focus
 7. 除最后一个片段外，不要把片段平均切短。像 6 秒 + 7 秒 这种拆法不理想，应优先改成接近 10 秒 + 剩余片段时长
 8. 如果总时长有余量，优先让前面的片段更接近 10 秒，最后一个片段再承担剩余的 3-9 秒
+9. 任何新角色首次正式登场时，优先从该角色出镜镜头开始新起一段，让该段首帧可以清楚承载角色造型
+10. 除最后一个片段外，若下一段继续使用同一批角色，尽量让本段结尾仍保留这些角色在画面内，方便下一段延续角色一致性
 
 输出必须是合法 JSON，格式：
 {{
@@ -958,6 +1496,7 @@ class ScriptSplitter:
                 parsed_shots=parsed_shots,
                 target_duration=target_duration,
                 candidate_boundaries=candidate_boundaries,
+                enforce_duration_limits=False,
             )
         except Exception as exc:
             logger.warning("LLM segment planning failed: %s", exc)
@@ -998,9 +1537,12 @@ class ScriptSplitter:
                 break
             actions = "；".join(shot.actions[:2]) if shot.actions else "无"
             dialogues = "；".join(shot.dialogues[:2]) if shot.dialogues else "无"
+            characters = "、".join(shot.characters_in_shot[:3]) if shot.characters_in_shot else "无"
+            character_ids = "、".join(shot.character_profile_ids[:3]) if shot.character_profile_ids else "无"
             lines.append(
                 f"{shot.start_time:.1f}-{shot.end_time:.1f}s | 场景{shot.scene_number} {shot.scene_title} | "
-                f"镜头{shot.shot_number} | {shot.description or '无描述'} | 动作:{actions} | 对话:{dialogues}"
+                f"镜头{shot.shot_number} | 人物:{characters} | 角色档案:{character_ids} | "
+                f"{shot.description or '无描述'} | 动作:{actions} | 对话:{dialogues}"
             )
         return "\n".join(lines)
 
@@ -1011,6 +1553,7 @@ class ScriptSplitter:
         parsed_shots: List[ParsedShot],
         target_duration: float,
         candidate_boundaries: List[float],
+        enforce_duration_limits: bool = True,
     ) -> List[Dict[str, Any]]:
         if not raw_segments:
             return []
@@ -1031,7 +1574,13 @@ class ScriptSplitter:
                 continue
 
             duration = round(end_time - start_time, 2)
-            if duration < self.config.min_segment_duration - 0.01 or duration > self.config.max_segment_duration + 0.01:
+            if (
+                enforce_duration_limits
+                and (
+                    duration < self.config.min_segment_duration - 0.01
+                    or duration > self.config.max_segment_duration + 0.01
+                )
+            ):
                 continue
 
             segment_shots = self._slice_shots_by_time(parsed_shots, start_time, end_time)
@@ -1049,7 +1598,7 @@ class ScriptSplitter:
                     "title": str(raw.get("title") or ""),
                     "description": str(raw.get("description") or ""),
                     "key_actions": [str(item) for item in (raw.get("key_actions") or []) if str(item).strip()],
-                    "key_dialogues": [str(item) for item in (raw.get("key_dialogues") or []) if str(item).strip()],
+                    "key_dialogues": list(raw.get("key_dialogues") or []) if isinstance(raw.get("key_dialogues"), list) else [],
                     "continuity_from_prev": str(raw.get("continuity_from_prev") or ""),
                     "continuity_to_next": str(raw.get("continuity_to_next") or ""),
                     "prompt_focus": str(raw.get("prompt_focus") or ""),
@@ -1264,10 +1813,19 @@ class ScriptSplitter:
         best_source: Optional[str] = None
 
         for source, split_points in candidate_variants:
+            split_points = self._optimize_split_points_for_character_continuity(
+                split_points=split_points,
+                parsed_shots=parsed_shots,
+                target_duration=effective_target_duration,
+            )
             if self._split_points_equivalent(split_points, current_split_points):
                 continue
 
             candidate_segments = await self._generate_segments(script, split_points)
+            candidate_segments = self._annotate_segments_for_video_generation(
+                segments=candidate_segments,
+                parsed_shots=parsed_shots,
+            )
             candidate_continuity_points = self._generate_continuity_points(candidate_segments)
             candidate_report = await self._review_segments(
                 script=script,
@@ -1328,7 +1886,10 @@ class ScriptSplitter:
                 "duration": round(float(segment.duration), 2),
                 "description": segment.description,
                 "key_actions": segment.key_actions,
-                "key_dialogues": segment.key_dialogues,
+                "key_dialogues": [
+                    self._dialogue_display_text(dialogue)
+                    for dialogue in segment.key_dialogues
+                ],
                 "continuity_from_prev": segment.continuity_from_prev,
                 "continuity_to_next": segment.continuity_to_next,
                 "prompt_focus": segment.prompt_focus,
@@ -1408,8 +1969,13 @@ class ScriptSplitter:
         parsed_shots: List[ParsedShot] = analysis.get("parsed_shots", []) or []
         if not recalculated or not parsed_shots:
             return recalculated
-        return self._rebalance_split_points(
+        rebalanced = self._rebalance_split_points(
             split_points=recalculated,
+            parsed_shots=parsed_shots,
+            target_duration=target_duration,
+        )
+        return self._optimize_split_points_for_character_continuity(
+            split_points=rebalanced,
             parsed_shots=parsed_shots,
             target_duration=target_duration,
         )
@@ -1471,7 +2037,10 @@ class ScriptSplitter:
                 "description": segment.description,
                 "shots_summary": segment.shots_summary,
                 "key_actions": segment.key_actions,
-                "key_dialogues": segment.key_dialogues,
+                "key_dialogues": [
+                    self._dialogue_display_text(dialogue)
+                    for dialogue in segment.key_dialogues
+                ],
                 "continuity_from_prev": segment.continuity_from_prev,
                 "continuity_to_next": segment.continuity_to_next,
                 "prompt_focus": segment.prompt_focus,
@@ -1487,6 +2056,8 @@ class ScriptSplitter:
 3. 多个片段之间要具备剧情连续性、动作衔接性、情绪延续性
 4. 如果给了目标总时长，要判断拆分后的总时长是否合理贴合目标
 5. 输出要指出问题最严重的片段，并给出明确修改建议
+6. 如果有新角色首次正式登场，审核时要判断该角色是否被单独起段，是否适合额外生成角色锚定首帧
+7. 除最后一段外，优先检查每段结尾是否仍保留下一段会继续出现的角色，避免下一段角色漂移
 
 输出必须是合法 JSON，格式：
 {{
@@ -1586,7 +2157,7 @@ class ScriptSplitter:
         )
 
         content_check_status = "pass"
-        for segment in segments:
+        for index, segment in enumerate(segments):
             segment_issues = self._estimate_content_fit_issues(segment)
             status = "pass"
             summary = "片段内容量与时长基本匹配。"
@@ -1594,6 +2165,12 @@ class ScriptSplitter:
                 status = "warning"
                 content_check_status = "warning" if content_check_status == "pass" else content_check_status
                 summary = "片段内容密度偏高，建议压缩剧情或拉长时长。"
+            if segment.prefer_character_handoff_end_frame and not segment.ending_contains_handoff_characters:
+                status = "warning"
+                content_check_status = "warning" if content_check_status == "pass" else content_check_status
+                segment_issues.append("该段结尾镜头未保留下一段仍会继续出现的角色，下一段角色连续性存在漂移风险。")
+            if index > 0 and segment.pre_generate_start_frame and segment.start_frame_generation_reason == "new_character_entry":
+                summary = "该段被识别为新角色正式登场段，已建议额外预生成首帧稳定角色造型。"
             segment_reviews.append(
                 {
                     "segment_number": segment.segment_number,
@@ -1602,7 +2179,21 @@ class ScriptSplitter:
                     "status": status,
                     "summary": summary,
                     "issues": segment_issues,
-                    "suggestions": ["减少同段动作/对白数量，或将该段拆成更清晰的小节奏。"] if segment_issues else [],
+                    "suggestions": (
+                        ["减少同段动作/对白数量，或将该段拆成更清晰的小节奏。"]
+                        if segment_issues
+                        else []
+                    )
+                    + (
+                        ["把该段结尾调整为下一段仍会继续出现的角色仍在画面内的镜头，方便下一段承接。"]
+                        if segment.prefer_character_handoff_end_frame and not segment.ending_contains_handoff_characters
+                        else []
+                    )
+                    + (
+                        ["保留该段的额外首帧生成，用于新角色首次正式出场时稳定造型。"]
+                        if segment.pre_generate_start_frame and segment.start_frame_generation_reason == "new_character_entry"
+                        else []
+                    ),
                 }
             )
 
