@@ -31,10 +31,10 @@ export const MainLayout: React.FC = () => {
       return '/voices'
     }
     if (pathname.startsWith('/characters')) {
-      return '/characters'
+      return '/characters/library'
     }
     if (pathname.startsWith('/scenes')) {
-      return '/scenes'
+      return '/scenes/library'
     }
     if (pathname.startsWith('/projects')) {
       return '/projects'
@@ -68,12 +68,12 @@ export const MainLayout: React.FC = () => {
       label: '音色目录',
     },
     {
-      key: '/characters',
+      key: '/characters/library',
       icon: <TeamOutlined />,
       label: '角色档案',
     },
     {
-      key: '/scenes',
+      key: '/scenes/library',
       icon: <EnvironmentOutlined />,
       label: '场景档案',
     },
@@ -113,7 +113,7 @@ export const MainLayout: React.FC = () => {
             padding: '0 16px',
           }}
         >
-          {collapsed ? 'Δ' : '三角洲视频'}
+          {collapsed ? 'FoV' : 'future of video'}
         </div>
         <Menu
           theme="dark"
@@ -144,7 +144,7 @@ export const MainLayout: React.FC = () => {
             }}
           />
           <Space size={16}>
-            <Text type="secondary">{user ? `${user.name} · ${user.email}` : '主链路开发模式'}</Text>
+            <Text type="secondary">{user ? `${user.name} · ${user.email}` : '未登录'}</Text>
             <Button onClick={handleLogout}>退出登录</Button>
           </Space>
         </Header>

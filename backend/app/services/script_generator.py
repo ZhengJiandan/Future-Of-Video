@@ -18,6 +18,27 @@ from app.services.doubao_llm import DoubaoLLM, DoubaoMessage
 
 logger = logging.getLogger(__name__)
 
+SHOT_LATE_ENTRY_KEYWORDS = (
+    "走入",
+    "走进",
+    "进入",
+    "进来",
+    "闯入",
+    "冲入",
+    "跑入",
+    "跑进",
+    "推门而入",
+    "现身",
+    "出现",
+    "突然出现",
+    "冒出",
+    "到来",
+    "赶来",
+    "加入画面",
+    "进入画面",
+    "出现在画面",
+)
+
 
 @dataclass
 class CharacterInfo:
@@ -280,6 +301,16 @@ class ScriptGenerator:
         )
         self._validate_full_script(full_script)
         full_script = await self._align_script_duration(
+            full_script,
+            user_input=user_input,
+            style=style,
+            target_total_duration=target_total_duration,
+            reference_image_count=len(reference_images or []),
+            intent=intent,
+            matched_characters=active_characters,
+            matched_scenes=matched_scenes,
+        )
+        full_script = await self._repair_shot_late_entry_risks(
             full_script,
             user_input=user_input,
             style=style,
@@ -627,6 +658,9 @@ class ScriptGenerator:
 6. 镜头数量必须按内容自适应，不许模板化凑镜头
 7. 如果给定目标总时长，所有 shots.duration 总和必须尽量贴近目标，总误差不能超过目标时长 10% 和 3 秒中的更小值
 8. 只要角色绑定了 selected_characters 中的 character_profile_id，就必须严格使用该档案原始 name，不允许改名、起别称、写错同音名
+9. 单个镜头默认只写首帧已经在画面中的角色及其动作、对白、互动，不要把“新角色中途走入/闯入/突然出现”写在同一镜头里
+10. 如果剧情需要新角色加入，必须从一个新镜头开始，并在该新镜头的 character_profile_ids / characters_in_shot 中明确包含该角色
+11. 尽量避免在同一镜头描述角色先不在场、后入场；角色登场要通过切新镜头解决，而不是在镜头中途补进来
 
 【JSON 结构】
 {
@@ -770,6 +804,7 @@ class ScriptGenerator:
         correction_note = (
             f"上一次生成总时长为 {current_duration:.1f} 秒，目标是 {target_total_duration:.1f} 秒。"
             " 请保持角色和场景绑定不变，增加或压缩有效镜头，使总时长严格贴近目标。"
+            " 同时继续遵守新角色必须从新镜头开始出场，不要写成同一镜头中途入场。"
         )
         retry_data = await self._call_llm_for_script(
             user_input=user_input,
@@ -798,6 +833,73 @@ class ScriptGenerator:
         if not self._duration_within_tolerance(current_duration, target_total_duration, tolerance):
             self._rebalance_script_duration(full_script, target_total_duration)
         return full_script
+
+    async def _repair_shot_late_entry_risks(
+        self,
+        full_script: FullScript,
+        *,
+        user_input: str,
+        style: str,
+        target_total_duration: Optional[float],
+        reference_image_count: int,
+        intent: Dict[str, Any],
+        matched_characters: List[Dict[str, Any]],
+        matched_scenes: List[Dict[str, Any]],
+    ) -> FullScript:
+        current_risks = self._collect_shot_late_entry_risks(full_script)
+        if not current_risks:
+            return full_script
+
+        correction_note = (
+            "上一次生成的剧本中，以下镜头疑似把新角色写成同一镜头中途入场："
+            + "；".join(current_risks[:8])
+            + "。请保持剧情主线、角色绑定、场景绑定和整体风格不变，"
+            + "把这些角色入场改写为从新镜头开始，不要在同一镜头里写“突然出现/走入/闯入/进入画面”之类的中途入场。"
+        )
+
+        try:
+            retry_data = await self._call_llm_for_script(
+                user_input=user_input,
+                style=style,
+                target_total_duration=target_total_duration,
+                reference_image_count=reference_image_count,
+                intent=intent,
+                matched_characters=matched_characters,
+                matched_scenes=matched_scenes,
+                correction_note=correction_note,
+            )
+            retried_script = self._parse_script_data(
+                data=retry_data,
+                original_input=user_input,
+                matched_characters=matched_characters,
+                matched_scenes=matched_scenes,
+                intent=intent,
+            )
+            self._validate_full_script(retried_script)
+        except Exception as exc:
+            logger.warning("剧本镜头入场稳定性二次修正失败，保留原结果: %s", exc)
+            return full_script
+
+        retried_risks = self._collect_shot_late_entry_risks(retried_script)
+        if len(retried_risks) >= len(current_risks):
+            logger.warning(
+                "剧本镜头入场稳定性二次修正未改善，保留原结果。风险数: %s -> %s",
+                len(current_risks),
+                len(retried_risks),
+            )
+            return full_script
+
+        if target_total_duration is not None:
+            tolerance = self._duration_tolerance(target_total_duration)
+            if not self._duration_within_tolerance(retried_script.total_duration, target_total_duration, tolerance):
+                self._rebalance_script_duration(retried_script, target_total_duration)
+
+        logger.info(
+            "剧本镜头入场稳定性二次修正完成，风险数: %s -> %s",
+            len(current_risks),
+            len(retried_risks),
+        )
+        return retried_script
 
     def _parse_script_data(
         self,
@@ -1391,6 +1493,40 @@ class ScriptGenerator:
         total_shots = sum(len(scene.shots) for scene in script.scenes)
         if total_shots <= 0:
             raise ValueError("生成结果缺少分镜")
+        late_entry_risks = self._collect_shot_late_entry_risks(script)
+        if late_entry_risks:
+            logger.warning(
+                "剧本存在疑似镜头内新角色中途入场风险，共 %s 处: %s",
+                len(late_entry_risks),
+                " | ".join(late_entry_risks[:8]),
+            )
+
+    def _collect_shot_late_entry_risks(self, script: FullScript) -> List[str]:
+        risks: List[str] = []
+        for scene in script.scenes:
+            for shot in scene.shots:
+                evidence = self._extract_shot_late_entry_evidence(shot)
+                if not evidence:
+                    continue
+                risks.append(
+                    f"场景{scene.scene_number}-镜头{shot.shot_number}: {evidence}"
+                )
+        return risks
+
+    def _extract_shot_late_entry_evidence(self, shot: ShotInfo) -> str:
+        text_parts = [
+            str(shot.description or "").strip(),
+            str(shot.prompt_focus or "").strip(),
+        ]
+        text_parts.extend(str(action.action_name or "").strip() for action in shot.actions)
+        text_parts.extend(str(action.description or "").strip() for action in shot.actions)
+        merged_text = " ".join(part for part in text_parts if part).lower()
+        if not merged_text:
+            return ""
+        for keyword in sorted(SHOT_LATE_ENTRY_KEYWORDS, key=len, reverse=True):
+            if keyword.lower() in merged_text:
+                return keyword
+        return ""
 
     def _rebalance_script_duration(self, script: FullScript, target_total_duration: float) -> None:
         shots = [shot for scene in script.scenes for shot in scene.shots]

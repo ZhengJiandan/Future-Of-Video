@@ -1,169 +1,358 @@
-# long-video-master
+# future of video
 
-当前仓库只保留一条主链路：
+`future of video` 是一个面向长链路创作的 AI 视频生成工作台。它把角色档案、场景档案、剧本生成、镜头拆分、关键帧生成、视频渲染和统一音频合成串成了一条可编辑、可审核、可恢复的工作流。
 
-1. 用户输入创意、选择角色档案、选择场景档案、上传参考图
-2. 后端生成完整剧本
-3. 用户审核剧本后拆分片段
-4. 生成首段首帧，后续片段串联上一段尾帧
-5. 调用真实视频 provider 生成片段并合成成片
+项目当前采用前后端分离架构：
 
-## 当前有效目录
+- 前端：React + Vite + Ant Design
+- 后端：FastAPI + SQLAlchemy + MySQL
+- 媒体处理：FFmpeg
+- 模型调用：Doubao、OpenAI 兼容接口、NanoBanana 等外部模型能力
+- 任务调度：
+  - `full` 模式：Celery + Redis
+  - `minimal` 模式：单进程本地后台任务，不依赖 Redis / Celery
 
-- `backend/app/api/endpoints/script_pipeline.py`
-- `backend/app/services/pipeline_workflow.py`
-- `backend/app/services/script_generator.py`
-- `backend/app/services/script_splitter.py`
-- `backend/app/services/doubao_video_official.py`
-- `backend/app/services/nanobanana_pro.py`
-- `backend/app/services/video_merger.py`
-- `frontend/src/pages/ScriptPipelinePage.tsx`
-- `frontend/src/pages/CharacterLibraryPage.tsx`
-- `frontend/src/pages/SceneLibraryPage.tsx`
+## 功能概览
 
-## 环境要求
+- 账号注册、登录和当前项目草稿保存
+- 角色档案库
+  - 角色参考图上传
+  - 图片分析补全角色字段
+  - 角色原型图生成
+  - 三视图生成
+  - 角色语音绑定与单句试音
+- 场景档案库
+  - 场景参考图上传
+  - 图片分析补全场景字段
+  - 场景原型图生成
+- 剧本主链路
+  - 用户描述生成完整剧本
+  - 剧本拆分为视频片段
+  - 片段二次校验
+  - 关键首帧生成与片段首尾串联
+  - 视频渲染
+  - 统一音频规划、对白 / 音效 / 环境 / 配乐合成
+  - 最终成片输出
+
+
+## 仓库结构
+
+```text
+.
+├── backend
+│   ├── app
+│   │   ├── api            # FastAPI 路由
+│   │   ├── core           # 配置与安全
+│   │   ├── db             # 数据库引擎与初始化
+│   │   ├── models         # SQLAlchemy 模型
+│   │   ├── services       # 核心工作流、角色/场景库、音频/视频能力
+│   │   └── workers        # Celery worker 入口
+│   ├── sql                # 初始化 SQL 与升级脚本
+│   ├── tests              # 后端测试
+│   └── requirements.txt
+├── frontend
+│   ├── src
+│   │   ├── layouts
+│   │   ├── pages
+│   │   ├── services       # API client
+│   │   └── stores
+│   └── package.json
+├── docker-compose.yml
+└── README.md
+```
+
+## 核心流程
+
+1. 用户创建项目并输入创意描述。
+2. 选择或创建角色档案、场景档案，并可上传参考图。
+3. 后端基于档案与用户描述生成完整剧本。
+4. 剧本被拆分为多个视频片段，并做连续性校验。
+5. 系统为必要片段生成首帧，其他片段复用上一段尾帧进行串联。
+6. 视频片段生成完成后，系统统一补对白、音效、环境音与配乐。
+7. FFmpeg 合成最终成片并回写任务状态。
+
+## 运行要求
+
+建议环境：
 
 - Python 3.9+
 - Node.js 18+
-- MySQL 8
-- FFmpeg
+- MySQL 8.0+
+- FFmpeg 可执行文件已安装并在 `PATH` 中可用
 
-## 数据库
+可选组件：
 
-执行：
+- Redis
+- Celery worker
 
-```sql
-SOURCE backend/sql/init_schema.sql;
+如果只是本地体验完整主链路，推荐直接使用 `minimal` 模式，不需要 Redis / Celery。
+
+## 快速开始
+
+### 1. 克隆仓库
+
+```bash
+git clone <your-repo-url>
+cd future-of-video
 ```
 
-当前主链路现在需要五张表：
+### 2. 准备数据库
 
-- `users`
-- `pipeline_projects`
-- `pipeline_character_profiles`
-- `pipeline_scene_profiles`
-- `pipeline_render_tasks`
+创建 MySQL 数据库，或直接执行：
 
-如果你之前已经执行过旧版 `init_schema.sql`，还需要额外执行一次：
-
-```sql
-SOURCE backend/sql/upgrade_project_history.sql;
+```bash
+mysql -u root -p < backend/sql/init_schema.sql
 ```
 
-这个脚本会把 `pipeline_projects` 从“每个用户只能有一个项目”升级成“每个用户可保存多个历史项目”。
+默认数据库名示例是 `delta_force_video`。如果你使用自己的数据库名，请同步修改 `backend/.env` 中的 `DATABASE_URL`。
 
-如果你本地还保留了历史版本的 `users` 表，注册时报类似 `Unknown column 'users.name'`，再执行一次：
+### 3. 配置后端环境变量
 
-```sql
-SOURCE backend/sql/upgrade_user_auth_schema.sql;
+```bash
+cp backend/.env.example backend/.env
 ```
 
-如果你之前已经建过角色档案/场景档案表，想升级到“分类标签”版本，再执行一次：
+至少需要确认这些配置：
 
-```sql
-SOURCE backend/sql/upgrade_profile_category_schema.sql;
-```
+- `DATABASE_URL`
+- `JWT_SECRET_KEY`
+- `SECRET_KEY`
+- `PIPELINE_RUNTIME_MODE`
+- `DOUBAO_API_KEY`
+- `DOUBAO_TTS_APP_ID`
+- `DOUBAO_TTS_ACCESS_TOKEN`
+- `NANOBANANA_API_KEY`
+- `OPENAI_API_KEY`
 
-如果你之前已经建过角色档案表，但还没有“面部特写锚点”字段，再执行一次：
-
-```sql
-SOURCE backend/sql/upgrade_character_anchor_pack_schema.sql;
-```
-
-如果你之前已经建过主链路表，但还没有渲染任务持久化表，再执行一次：
-
-```sql
-SOURCE backend/sql/upgrade_render_task_schema.sql;
-```
-
-## 环境变量
-
-后端读取 `backend/.env`。
-仓库提供了可提交的模板文件：`backend/.env.example`。
-
-至少确认这些配置存在且正确：
+如果你只想使用最小运行版：
 
 ```env
-DATABASE_URL=mysql+aiomysql://user:password@127.0.0.1:3306/delta_force_video
+PIPELINE_RUNTIME_MODE=minimal
+```
+
+如果你需要完整队列版：
+
+```env
+PIPELINE_RUNTIME_MODE=full
 CELERY_BROKER_URL=redis://127.0.0.1:6379/1
 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/2
-DOUBAO_API_KEY=...
-DOUBAO_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-DOUBAO_MODEL=...
-DOUBAO_VIDEO_MODEL=...
-DOUBAO_READ_TIMEOUT=240
-DOUBAO_SCRIPT_READ_TIMEOUT=360
-DOUBAO_MAX_RETRIES=2
-NANOBANANA_API_KEY=...
-UPLOAD_DIR=uploads
+```
+
+### 4. 启动后端
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 -m app.main
+```
+
+默认后端地址：
+
+- `http://127.0.0.1:8080`
+- API 前缀：`/api/v1`
+
+### 5. 启动前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+默认前端地址：
+
+- `http://127.0.0.1:5173`
+
+开发环境下，Vite 会把 `/api/v1` 和 `/uploads` 代理到 `http://127.0.0.1:8080`。
+
+## 运行模式
+
+### `minimal`
+
+适合本地开发、单机部署、演示环境。
+
+特点：
+
+- 需要数据库
+- 需要外部模型 API
+- 需要 FFmpeg
+- 不需要 Redis
+- 不需要 Celery worker
+- 渲染任务在 FastAPI 进程内以后台协程执行
+
+### `full`
+
+适合需要独立 worker 和队列调度的环境。
+
+特点：
+
+- 需要数据库
+- 需要外部模型 API
+- 需要 FFmpeg
+- 需要 Redis
+- 需要 Celery worker
+
+## 后端接口概览
+
+主要接口前缀为 `/api/v1`。
+
+认证：
+
+- `POST /auth/register`
+- `POST /auth/login`
+- `GET /auth/me`
+
+项目：
+
+- `GET /projects`
+- `POST /projects`
+- `GET /projects/current`
+- `PUT /projects/current`
+
+主链路：
+
+- `POST /pipeline/generate-script`
+- `POST /pipeline/prepare-characters`
+- `POST /pipeline/split-script`
+- `POST /pipeline/generate-keyframes`
+- `POST /pipeline/render`
+- `GET /pipeline/render/{task_id}`
+
+角色 / 场景档案：
+
+- `GET /pipeline/characters`
+- `POST /pipeline/characters`
+- `POST /pipeline/characters/analyze-reference`
+- `GET /pipeline/scenes`
+- `POST /pipeline/scenes`
+- `POST /pipeline/scenes/analyze-reference`
+
+## 测试与构建
+
+后端语法检查：
+
+```bash
+python3 -m py_compile backend/app/main.py
+```
+
+后端测试：
+
+```bash
+cd backend
+python3 -m pytest
+```
+
+前端构建：
+
+```bash
+cd frontend
+npm run build
+```
+
+## Docker Compose
+
+仓库中包含一个开源友好的 `docker-compose.yml` 示例：
+
+- 默认直接运行 `minimal` 模式
+- 默认只启动 `mysql`、`backend`、`frontend`
+- 如果你需要队列版，再启用 `full` profile
+
+最小模式：
+
+```bash
+docker compose up --build
+```
+
+完整模式：
+
+```bash
+PIPELINE_RUNTIME_MODE=full docker compose --profile full up --build
 ```
 
 注意：
 
-- 不要把真实密钥提交到仓库。
-- 旧版本里如果已经提交过真实凭据，需要立即轮换。
-- `DEBUG` 现在接受 `true/false/debug/release` 这类值，`ENVIRONMENT` 也可作为 `ENV` 的别名。
+- compose 中的数据库口令是公开示例值，生产环境必须改掉
+- 模型 API key 不在 compose 中硬编码，建议通过 `.env` 或 shell 环境传入
+- 如果你只做本地体验，优先使用 `minimal`
 
-## 启动方式
+## 开源发布前建议
 
-推荐只使用一个脚本：
+在真正公开到 GitHub 之前，建议优先完成这些动作：
 
-```bash
-bash dev.sh backend
-bash dev.sh worker
-bash dev.sh frontend
+### 必做
+
+- 补 `LICENSE`
+  - 这是开源发布的前提，否则别人默认没有合法使用权。
+- 全量检查凭证与示例配置
+  - 包括 `.env`、`.env.example`、`docker-compose.yml`、脚本、截图、日志、测试数据。
+- 清理本地产物
+  - 尤其是 `backend/uploads/` 下的渲染结果、音频文件、模型输出和下载素材。
+- 补完整 `README`
+  - 当前这份 README 已覆盖基础说明，但如果你要对外宣传，最好再补截图、Demo 视频和架构图。
+
+### 强烈建议
+
+- 增加 CI
+  - 仓库现在已经补了一个基础 GitHub Actions CI，但你仍然需要根据自己的发布策略继续完善。
+- 增加 `CONTRIBUTING.md`
+  - 说明分支策略、代码规范、提交流程。
+- 增加 Issue / PR 模板
+  - 降低沟通成本。
+- 增加部署说明
+  - 至少覆盖单机最小模式部署。
+
+### 可能要决定的事情
+
+- 是否公开模型 provider 绑定实现细节
+- 是否要把默认数据库从 MySQL 扩展到 SQLite 演示模式
+- 是否要提供在线 Demo
+- 是否要拆分“产品仓库”和“纯开源核心仓库”
+
+## 当前已做的开源准备
+
+本次已经顺手补了两件事：
+
+- `.gitignore` 增加了运行产物和上传目录忽略
+- `backend/.env.example` 清掉了看起来像真实凭证的示例值
+- 新增了 `LICENSE`、`CONTRIBUTING.md`、`SECURITY.md`、GitHub Issue / PR 模板和基础 CI
+
+## 常见问题
+
+### 1. 为什么我本地不想装 Redis / Celery？
+
+直接用：
+
+```env
+PIPELINE_RUNTIME_MODE=minimal
 ```
 
-或手动分别启动：
+这样主链路仍然可以跑，只是渲染任务不会走外部队列。
 
-```bash
-cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
-```
+### 2. 为什么生成视频失败？
 
-```bash
-cd frontend
-npm run dev
-```
+优先检查：
 
-```bash
-cd backend
-celery -A app.celery_app:celery_app worker --loglevel=info --concurrency=2
-```
+- 外部模型 API 是否已配置
+- FFmpeg 是否安装成功
+- MySQL 是否可连接
+- 上传目录是否可写
+- 后端日志中的 provider 返回错误
 
-现在渲染任务已经切到独立 Celery worker 执行：
+### 3. 为什么图片分析 / 试音 / 原型图不可用？
 
-- API 进程只负责创建任务、入库和投递到队列
-- Celery worker 负责实际渲染和合成
-- 服务重启后，数据库中处于 `processing` 的任务会重置为 `queued`，并在启动时重新投递
+这些能力依赖相应 provider 配置：
 
-## 本地联调
+- 图片分析：`OPENAI_API_KEY`
+- 剧本与视频相关能力：`DOUBAO_API_KEY`
+- 语音试音：`DOUBAO_TTS_APP_ID` 与 `DOUBAO_TTS_ACCESS_TOKEN`
+- 角色 / 场景图生成：`NANOBANANA_API_KEY`
 
-推荐按这个顺序做一次最小闭环联调：
+## 免责声明
 
-1. 启动基础依赖：MySQL、Redis，以及你配置的 Celery broker
-2. 执行数据库初始化或升级脚本，确认 `pipeline_render_tasks` 已存在
-3. 启动后端 API：`bash dev.sh backend`
-4. 启动 Celery worker：`bash dev.sh worker`
-5. 启动前端：`bash dev.sh frontend`
-6. 访问 `/api/v1/pipeline/health` 和 `/health`，确认 API 正常
-7. 在页面里走一遍“生成剧本 -> 拆片 -> 关键帧 -> 渲染”
-8. 观察后端日志和 worker 日志，确认任务经历 `queued -> processing -> completed`
+本项目会调用第三方模型服务，并可能生成图片、音频、视频等媒体内容。请确保你的使用方式符合：
 
-如果要验证异常链路，再补做这三项：
-
-1. 渲染过程中重启后端 API，确认任务会从数据库恢复并重新投递
-2. 在 `queued` 或 `processing` 状态点“取消任务”，确认任务变成 `cancelled`
-3. 对 `failed` 或 `cancelled` 的任务点“重试任务”，确认会生成新的 `task_id`
-
-## 访问地址
-
-- 前端: `http://127.0.0.1:5173`
-- 后端 OpenAPI: `http://127.0.0.1:8080/docs`
-- 后端健康检查: `http://127.0.0.1:8080/health`
-
-## 备注
-
-- FFmpeg 是系统依赖，不装在 Python 虚拟环境里。
-- 角色档案和场景档案都走数据库，不再使用旧 JSON 文件存储。
-- 仓库中此前的旧认证、旧角色/地图系统、旧批量脚本和旧占位页面已清理。
+- 相关模型服务商的使用条款
+- 你所在地区的法律法规
+- 你对素材、角色、音频和上传内容的授权边界

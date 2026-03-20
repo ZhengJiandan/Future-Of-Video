@@ -37,6 +37,14 @@ export const router = createBrowserRouter([
           },
           {
             path: 'characters',
+            element: <Navigate to="/characters/library" replace />,
+          },
+          {
+            path: 'characters/new',
+            element: <CharacterLibraryPage />,
+          },
+          {
+            path: 'characters/edit',
             element: <CharacterLibraryPage />,
           },
           {
@@ -45,6 +53,14 @@ export const router = createBrowserRouter([
           },
           {
             path: 'scenes',
+            element: <Navigate to="/scenes/library" replace />,
+          },
+          {
+            path: 'scenes/new',
+            element: <SceneLibraryPage />,
+          },
+          {
+            path: 'scenes/edit',
             element: <SceneLibraryPage />,
           },
           {

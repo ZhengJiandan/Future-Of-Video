@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Col,
+  Descriptions,
   Image,
   Input,
   Row,
@@ -23,7 +24,7 @@ import {
   UploadOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ReferenceImageAsset, SceneProfile, resolveAssetUrl, scriptPipelineApi } from '../services/api'
+import { ReferenceImageAsset, SceneImageAnalysisFields, SceneProfile, resolveAssetUrl, scriptPipelineApi } from '../services/api'
 
 const { Title, Paragraph, Text } = Typography
 const { TextArea } = Input
@@ -64,6 +65,7 @@ export const SceneLibraryPage: React.FC = () => {
   const [initializing, setInitializing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [referenceUploading, setReferenceUploading] = useState(false)
+  const [analyzingReference, setAnalyzingReference] = useState(false)
   const [prototypeGenerating, setPrototypeGenerating] = useState(false)
   const [sceneDraft, setSceneDraft] = useState(emptySceneDraft)
   const [referenceImage, setReferenceImage] = useState<ReferenceImageAsset | null>(null)
@@ -111,7 +113,7 @@ export const SceneLibraryPage: React.FC = () => {
 
   const exitEditMode = () => {
     resetDraft()
-    setSearchParams({})
+    navigate('/scenes/new')
   }
 
   useEffect(() => {
@@ -150,7 +152,7 @@ export const SceneLibraryPage: React.FC = () => {
       } catch (requestError: unknown) {
         const responseError = requestError as { response?: { data?: { detail?: string } } }
         message.error(responseError.response?.data?.detail || '场景档案加载失败')
-        setSearchParams({})
+        navigate('/scenes/library')
       } finally {
         setInitializing(false)
       }
@@ -161,6 +163,107 @@ export const SceneLibraryPage: React.FC = () => {
 
   const handleDraftChange = (field: keyof typeof emptySceneDraft, value: string) => {
     setSceneDraft((previous) => ({ ...previous, [field]: value }))
+  }
+
+  const mergeTextList = (currentValue: string, nextValues: string[]) => {
+    const merged = new Set(
+      currentValue
+        .split(/[，,\n]/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    )
+    nextValues.forEach((item) => {
+      const normalized = item.trim()
+      if (normalized) {
+        merged.add(normalized)
+      }
+    })
+    return Array.from(merged).join(', ')
+  }
+
+  const applySceneAnalysisFields = (fields: SceneImageAnalysisFields) => {
+    let filledCount = 0
+    setSceneDraft((previous) => {
+      const next = { ...previous }
+      const textKeys: Array<keyof typeof emptySceneDraft> = [
+        'name',
+        'category',
+        'scene_type',
+        'description',
+        'story_function',
+        'location',
+        'scene_rules',
+        'time_setting',
+        'weather',
+        'lighting',
+        'atmosphere',
+        'architecture_style',
+        'color_palette',
+        'prompt_hint',
+        'llm_summary',
+        'image_prompt_base',
+        'video_prompt_base',
+        'negative_prompt',
+      ]
+      textKeys.forEach((key) => {
+        const incoming = String(fields[key] || '').trim()
+        if (!incoming || String(previous[key] || '').trim()) {
+          return
+        }
+        next[key] = incoming
+        filledCount += 1
+      })
+
+      const listMappings: Array<[keyof typeof emptySceneDraft, string[]]> = [
+        ['tags', fields.tags || []],
+        ['allowed_characters', fields.allowed_characters || []],
+        ['props_must_have', fields.props_must_have || []],
+        ['props_forbidden', fields.props_forbidden || []],
+        ['must_have_elements', fields.must_have_elements || []],
+        ['forbidden_elements', fields.forbidden_elements || []],
+        ['camera_preferences', fields.camera_preferences || []],
+      ]
+      listMappings.forEach(([key, values]) => {
+        if (!values.length) {
+          return
+        }
+        const mergedValue = mergeTextList(String(previous[key] || ''), values)
+        if (mergedValue !== String(previous[key] || '')) {
+          next[key] = mergedValue
+          filledCount += 1
+        }
+      })
+
+      return next
+    })
+    return filledCount
+  }
+
+  const handleAnalyzeReferenceImage = async () => {
+    const targetAsset = referenceImage || sceneImage
+    if (!targetAsset?.url) {
+      message.warning('请先上传参考图，再进行图片分析')
+      return
+    }
+
+    setAnalyzingReference(true)
+    try {
+      const response = await scriptPipelineApi.analyzeSceneReference({
+        reference_image_url: targetAsset.url,
+        reference_image_original_name: targetAsset.original_filename || targetAsset.filename,
+      })
+      const filledCount = applySceneAnalysisFields(response.data.fields)
+      if (filledCount > 0) {
+        message.success(`图片分析完成，已补充 ${filledCount} 项场景信息`)
+      } else {
+        message.info('图片分析完成，但当前表单已有内容较完整，未自动覆盖现有信息')
+      }
+    } catch (requestError: unknown) {
+      const responseError = requestError as { response?: { data?: { detail?: string } } }
+      message.error(responseError.response?.data?.detail || '场景图片分析失败')
+    } finally {
+      setAnalyzingReference(false)
+    }
   }
 
   const handleReferenceUpload: UploadProps['customRequest'] = async (options) => {
@@ -356,181 +459,244 @@ export const SceneLibraryPage: React.FC = () => {
       </Card>
 
       <Card title={isEditMode ? '编辑场景档案' : '新建场景档案'} style={{ borderRadius: 20 }}>
-        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+        <Space direction="vertical" size={18} style={{ width: '100%' }}>
           {isEditMode ? (
             <Alert
               type="warning"
               showIcon
-              message="编辑模式"
-              description="这个页面已经回填当前场景数据。你可以继续调整场景参考图和约束信息后保存。"
+              message="正在编辑场景档案"
+              description="当前场景资料已载入，可以继续调整参考图和设定后保存。"
             />
           ) : null}
 
           <Alert
             type="info"
             showIcon
-            message="推荐流程"
-            description="先写场景设定。可以上传图片直接作为场景图，也可以先生成场景原型图，再不断微调，满意后保存。"
+            message="建议步骤"
+            description="先完善场景设定，再上传参考图或生成场景图进行微调，确认满意后保存。"
           />
 
           {initializing ? <Alert type="info" showIcon message="正在加载场景档案..." /> : null}
 
-          <Row gutter={[12, 12]}>
-            <Col span={9}>
-              <Input
-                value={sceneDraft.name}
-                onChange={(event) => handleDraftChange('name', event.target.value)}
-                placeholder="场景名称"
-                prefix={<EnvironmentOutlined />}
-              />
+          <Row gutter={[20, 20]} align="top">
+            <Col xs={24} xl={14}>
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Card
+                  size="small"
+                  title="基础信息"
+                  extra={<Tag color={isEditMode ? 'gold' : 'green'}>{isEditMode ? '编辑中' : '新建中'}</Tag>}
+                  style={{ borderRadius: 16 }}
+                >
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={10}>
+                        <Input
+                          value={sceneDraft.name}
+                          onChange={(event) => handleDraftChange('name', event.target.value)}
+                          placeholder="场景名称"
+                          prefix={<EnvironmentOutlined />}
+                        />
+                      </Col>
+                      <Col xs={24} md={7}>
+                        <Input
+                          value={sceneDraft.category}
+                          onChange={(event) => handleDraftChange('category', event.target.value)}
+                          placeholder="场景分类"
+                        />
+                      </Col>
+                      <Col xs={24} md={7}>
+                        <Input
+                          value={sceneDraft.scene_type}
+                          onChange={(event) => handleDraftChange('scene_type', event.target.value)}
+                          placeholder="场景类型"
+                        />
+                      </Col>
+                    </Row>
+
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <Input
+                          value={sceneDraft.story_function}
+                          onChange={(event) => handleDraftChange('story_function', event.target.value)}
+                          placeholder="剧情功能"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Input
+                          value={sceneDraft.color_palette}
+                          onChange={(event) => handleDraftChange('color_palette', event.target.value)}
+                          placeholder="配色关键词"
+                        />
+                      </Col>
+                    </Row>
+
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <Input
+                          value={sceneDraft.location}
+                          onChange={(event) => handleDraftChange('location', event.target.value)}
+                          placeholder="地点"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Input
+                          value={sceneDraft.time_setting}
+                          onChange={(event) => handleDraftChange('time_setting', event.target.value)}
+                          placeholder="时间设定"
+                        />
+                      </Col>
+                    </Row>
+
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <Input
+                          value={sceneDraft.weather}
+                          onChange={(event) => handleDraftChange('weather', event.target.value)}
+                          placeholder="天气"
+                        />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <Input
+                          value={sceneDraft.lighting}
+                          onChange={(event) => handleDraftChange('lighting', event.target.value)}
+                          placeholder="灯光"
+                        />
+                      </Col>
+                    </Row>
+
+                    <Input
+                      value={sceneDraft.tags}
+                      onChange={(event) => handleDraftChange('tags', event.target.value)}
+                      placeholder="标签，多个标签用逗号分隔"
+                      suffix={<Text type="secondary">{selectedTagCount} 个</Text>}
+                    />
+
+                    <TextArea rows={4} value={sceneDraft.description} onChange={(event) => handleDraftChange('description', event.target.value)} placeholder="场景描述" />
+                    <TextArea rows={3} value={sceneDraft.atmosphere} onChange={(event) => handleDraftChange('atmosphere', event.target.value)} placeholder="氛围描述" />
+                    <TextArea rows={2} value={sceneDraft.architecture_style} onChange={(event) => handleDraftChange('architecture_style', event.target.value)} placeholder="建筑风格" />
+                  </Space>
+                </Card>
+
+                <Card size="small" title="环境约束" style={{ borderRadius: 16 }}>
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <TextArea rows={2} value={sceneDraft.scene_rules} onChange={(event) => handleDraftChange('scene_rules', event.target.value)} placeholder="场景规则" />
+                    <TextArea rows={2} value={sceneDraft.allowed_characters} onChange={(event) => handleDraftChange('allowed_characters', event.target.value)} placeholder="允许角色，多个条目用逗号或换行分隔" />
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={3} value={sceneDraft.props_must_have} onChange={(event) => handleDraftChange('props_must_have', event.target.value)} placeholder="必备道具" />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={3} value={sceneDraft.props_forbidden} onChange={(event) => handleDraftChange('props_forbidden', event.target.value)} placeholder="禁用道具" />
+                      </Col>
+                    </Row>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={3} value={sceneDraft.must_have_elements} onChange={(event) => handleDraftChange('must_have_elements', event.target.value)} placeholder="必须元素" />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={3} value={sceneDraft.forbidden_elements} onChange={(event) => handleDraftChange('forbidden_elements', event.target.value)} placeholder="禁止元素" />
+                      </Col>
+                    </Row>
+                    <TextArea rows={2} value={sceneDraft.camera_preferences} onChange={(event) => handleDraftChange('camera_preferences', event.target.value)} placeholder="镜头偏好" />
+                  </Space>
+                </Card>
+
+                <Card size="small" title="提示词基线" style={{ borderRadius: 16 }}>
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <TextArea rows={2} value={sceneDraft.prompt_hint} onChange={(event) => handleDraftChange('prompt_hint', event.target.value)} placeholder="给模型的附加提示" />
+                    <TextArea rows={2} value={sceneDraft.llm_summary} onChange={(event) => handleDraftChange('llm_summary', event.target.value)} placeholder="场景摘要" />
+                    <TextArea rows={3} value={sceneDraft.image_prompt_base} onChange={(event) => handleDraftChange('image_prompt_base', event.target.value)} placeholder="图片生成基础提示词" />
+                    <TextArea rows={3} value={sceneDraft.video_prompt_base} onChange={(event) => handleDraftChange('video_prompt_base', event.target.value)} placeholder="视频生成基础提示词" />
+                    <TextArea rows={2} value={sceneDraft.negative_prompt} onChange={(event) => handleDraftChange('negative_prompt', event.target.value)} placeholder="负向提示词" />
+                  </Space>
+                </Card>
+              </Space>
             </Col>
-            <Col span={7}>
-              <Input
-                value={sceneDraft.category}
-                onChange={(event) => handleDraftChange('category', event.target.value)}
-                placeholder="场景分类"
-              />
-            </Col>
-            <Col span={8}>
-              <Input
-                value={sceneDraft.scene_type}
-                onChange={(event) => handleDraftChange('scene_type', event.target.value)}
-                placeholder="场景类型"
-              />
+
+            <Col xs={24} xl={10}>
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Card size="small" title="当前状态" style={{ borderRadius: 16, background: '#f7fffb' }}>
+                  <Descriptions column={1} size="small" colon={false}>
+                    <Descriptions.Item label="模式">{isEditMode ? '编辑已保存场景' : '新建场景档案'}</Descriptions.Item>
+                    <Descriptions.Item label="标签数量">{selectedTagCount} 个</Descriptions.Item>
+                    <Descriptions.Item label="参考图">{referenceImage ? '已上传' : '未上传'}</Descriptions.Item>
+                    <Descriptions.Item label="场景图">{sceneImage?.url ? '已生成或已绑定' : '未生成'}</Descriptions.Item>
+                    <Descriptions.Item label="地点 / 时间">
+                      {[sceneDraft.location.trim(), sceneDraft.time_setting.trim()].filter(Boolean).join(' / ') || '未填写'}
+                    </Descriptions.Item>
+                  </Descriptions>
+                </Card>
+
+                <Card
+                  size="small"
+                  title="参考图上传"
+                  style={{ borderRadius: 16, background: '#f7fffb' }}
+                  extra={referenceImage ? <Tag color="green">已上传</Tag> : <Tag>待上传</Tag>}
+                >
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Space wrap>
+                      <Upload
+                        accept="image/*"
+                        maxCount={1}
+                        customRequest={handleReferenceUpload}
+                        onRemove={handleReferenceRemove}
+                        fileList={referenceFileList}
+                      >
+                        <Button icon={<UploadOutlined />} loading={referenceUploading}>
+                          上传场景参考图
+                        </Button>
+                      </Upload>
+                      <Button loading={analyzingReference} onClick={handleAnalyzeReferenceImage}>
+                        分析图片并补全字段
+                      </Button>
+                    </Space>
+                    {referenceImage ? (
+                      <Image
+                        src={resolveAssetUrl(referenceImage.url)}
+                        alt="场景参考图"
+                        style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }}
+                      />
+                    ) : (
+                      <Text type="secondary">如果你已经有理想场景图，可以上传后直接保存，也可以先做图片分析，让系统按场景档案字段补充基础信息。</Text>
+                    )}
+                  </Space>
+                </Card>
+
+                <Card
+                  size="small"
+                  title="场景原型图生成与微调"
+                  style={{ borderRadius: 16, background: '#fffdf7' }}
+                  extra={sceneImage?.url ? <Tag color="gold">已有场景图</Tag> : <Tag>待生成</Tag>}
+                >
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <TextArea
+                      rows={3}
+                      value={refinePrompt}
+                      onChange={(event) => setRefinePrompt(event.target.value)}
+                      placeholder="可填写你的微调要求，例如：更温暖、更有层次、增加雾气、构图更紧凑"
+                    />
+                    <Button type="default" loading={prototypeGenerating} onClick={handleGenerateSceneImage}>
+                      {sceneImage?.url ? '基于当前图片重新生成 / 微调' : '生成场景原型图'}
+                    </Button>
+                    {sceneImage?.url ? (
+                      <>
+                        <Image
+                          src={resolveAssetUrl(sceneImage.url)}
+                          alt="场景原型图"
+                          style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }}
+                        />
+                        {sceneImagePrompt ? (
+                          <Alert type="success" showIcon message="本次场景图描述" description={sceneImagePrompt} />
+                        ) : null}
+                      </>
+                    ) : (
+                      <Text type="secondary">没有上传图片也可以直接生成场景原型图，生成后可继续微调，直到满意为止。</Text>
+                    )}
+                  </Space>
+                </Card>
+              </Space>
             </Col>
           </Row>
-
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <Input
-                value={sceneDraft.story_function}
-                onChange={(event) => handleDraftChange('story_function', event.target.value)}
-                placeholder="剧情功能"
-              />
-            </Col>
-            <Col span={12}>
-              <Input
-                value={sceneDraft.color_palette}
-                onChange={(event) => handleDraftChange('color_palette', event.target.value)}
-                placeholder="配色关键词"
-              />
-            </Col>
-          </Row>
-
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <Input
-                value={sceneDraft.location}
-                onChange={(event) => handleDraftChange('location', event.target.value)}
-                placeholder="地点"
-              />
-            </Col>
-            <Col span={12}>
-              <Input
-                value={sceneDraft.time_setting}
-                onChange={(event) => handleDraftChange('time_setting', event.target.value)}
-                placeholder="时间设定"
-              />
-            </Col>
-          </Row>
-
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <Input
-                value={sceneDraft.weather}
-                onChange={(event) => handleDraftChange('weather', event.target.value)}
-                placeholder="天气"
-              />
-            </Col>
-            <Col span={12}>
-              <Input
-                value={sceneDraft.lighting}
-                onChange={(event) => handleDraftChange('lighting', event.target.value)}
-                placeholder="灯光"
-              />
-            </Col>
-          </Row>
-
-          <Input
-            value={sceneDraft.tags}
-            onChange={(event) => handleDraftChange('tags', event.target.value)}
-            placeholder="标签，多个标签用逗号分隔"
-            suffix={<Text type="secondary">{selectedTagCount} 个</Text>}
-          />
-
-          <TextArea rows={4} value={sceneDraft.description} onChange={(event) => handleDraftChange('description', event.target.value)} placeholder="场景描述" />
-          <TextArea rows={3} value={sceneDraft.atmosphere} onChange={(event) => handleDraftChange('atmosphere', event.target.value)} placeholder="氛围描述" />
-          <TextArea rows={2} value={sceneDraft.scene_rules} onChange={(event) => handleDraftChange('scene_rules', event.target.value)} placeholder="场景规则" />
-          <TextArea rows={2} value={sceneDraft.architecture_style} onChange={(event) => handleDraftChange('architecture_style', event.target.value)} placeholder="建筑风格" />
-          <TextArea rows={2} value={sceneDraft.allowed_characters} onChange={(event) => handleDraftChange('allowed_characters', event.target.value)} placeholder="允许角色，多个条目用逗号或换行分隔" />
-          <TextArea rows={2} value={sceneDraft.props_must_have} onChange={(event) => handleDraftChange('props_must_have', event.target.value)} placeholder="必备道具" />
-          <TextArea rows={2} value={sceneDraft.props_forbidden} onChange={(event) => handleDraftChange('props_forbidden', event.target.value)} placeholder="禁用道具" />
-          <TextArea rows={2} value={sceneDraft.must_have_elements} onChange={(event) => handleDraftChange('must_have_elements', event.target.value)} placeholder="必须元素" />
-          <TextArea rows={2} value={sceneDraft.forbidden_elements} onChange={(event) => handleDraftChange('forbidden_elements', event.target.value)} placeholder="禁止元素" />
-          <TextArea rows={2} value={sceneDraft.camera_preferences} onChange={(event) => handleDraftChange('camera_preferences', event.target.value)} placeholder="镜头偏好" />
-
-          <Card
-            size="small"
-            title="1. 上传参考图（可选）"
-            style={{ borderRadius: 16, background: '#f7fffb' }}
-            extra={referenceImage ? <Tag color="green">已上传</Tag> : <Tag>待上传</Tag>}
-          >
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <Upload
-                accept="image/*"
-                maxCount={1}
-                customRequest={handleReferenceUpload}
-                onRemove={handleReferenceRemove}
-                fileList={referenceFileList}
-              >
-                <Button icon={<UploadOutlined />} loading={referenceUploading}>
-                  上传场景参考图
-                </Button>
-              </Upload>
-              {referenceImage ? (
-                <Image
-                  src={resolveAssetUrl(referenceImage.url)}
-                  alt="场景参考图"
-                  style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }}
-                />
-              ) : (
-                <Text type="secondary">如果你已经有理想场景图，可以上传后直接保存，或者基于它继续微调生成更满意的场景图。</Text>
-              )}
-            </Space>
-          </Card>
-
-          <Card
-            size="small"
-            title="2. 场景原型图生成与微调"
-            style={{ borderRadius: 16, background: '#fffdf7' }}
-            extra={sceneImage?.url ? <Tag color="gold">已有场景图</Tag> : <Tag>待生成</Tag>}
-          >
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <TextArea
-                rows={3}
-                value={refinePrompt}
-                onChange={(event) => setRefinePrompt(event.target.value)}
-                placeholder="可填写你的微调要求，例如：更温暖、更有层次、增加雾气、让光线更柔和、构图更紧凑"
-              />
-              <Button type="default" loading={prototypeGenerating} onClick={handleGenerateSceneImage}>
-                {sceneImage?.url ? '基于当前图片重新生成 / 微调' : '生成场景原型图'}
-              </Button>
-              {sceneImage?.url ? (
-                <>
-                  <Image
-                    src={resolveAssetUrl(sceneImage.url)}
-                    alt="场景原型图"
-                    style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }}
-                  />
-                  {sceneImagePrompt ? (
-                    <Alert type="success" showIcon message="本次场景图生成 Prompt" description={sceneImagePrompt} />
-                  ) : null}
-                </>
-              ) : (
-                <Text type="secondary">没有上传图片也可以直接生成场景原型图，生成后可继续微调，直到满意为止。</Text>
-              )}
-            </Space>
-          </Card>
 
           <Space wrap>
             <Button

@@ -16,10 +16,11 @@ class Settings(BaseSettings):
     """应用配置类"""
     
     # 应用基础配置
-    APP_NAME: str = "三角洲视频生成系统"
+    APP_NAME: str = "future of video"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = Field(default=True, validation_alias=AliasChoices("DEBUG"))
     ENV: str = Field(default="development", validation_alias=AliasChoices("ENV", "ENVIRONMENT"))
+    PIPELINE_RUNTIME_MODE: str = "full"
     
     # 服务器配置
     HOST: str = "0.0.0.0"
@@ -69,7 +70,7 @@ class Settings(BaseSettings):
     DOUBAO_TTS_APP_ID: Optional[str] = None
     DOUBAO_TTS_ACCESS_TOKEN: Optional[str] = None
     DOUBAO_TTS_CLUSTER: str = "volcano_tts"
-    DOUBAO_TTS_DEFAULT_VOICE_TYPE: str = ""
+    DOUBAO_TTS_DEFAULT_VOICE_TYPE: str = "zh_female_shaoergushi_mars_bigtts"
     DOUBAO_CONNECT_TIMEOUT: float = 20.0
     DOUBAO_READ_TIMEOUT: float = 240.0
     DOUBAO_WRITE_TIMEOUT: float = 60.0
@@ -88,13 +89,14 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL: str = "gpt-4"
+    OPENAI_VISION_MODEL: str = "gpt-4o-mini"
 
     # 项目级音频链路配置
     AUDIO_PIPELINE_ENABLED: bool = True
     AUDIO_TTS_PROVIDER: str = "doubao-tts"
-    AUDIO_SFX_PROVIDER: str = "mock-silent"
-    AUDIO_AMBIENCE_PROVIDER: str = "mock-silent"
-    AUDIO_MUSIC_PROVIDER: str = "mock-silent"
+    AUDIO_SFX_PROVIDER: str = "local-library"
+    AUDIO_AMBIENCE_PROVIDER: str = "local-library"
+    AUDIO_MUSIC_PROVIDER: str = "local-library"
     AUDIO_LIBRARY_ROOT: str = "uploads/generated/pipeline/audio_library"
     AUDIO_LIBRARY_MANIFEST: str = ""
     AUDIO_SAMPLE_RATE: int = 48000
@@ -186,6 +188,32 @@ class Settings(BaseSettings):
             host = f"{host}:{parsed.port}"
         netloc = f"{auth}@{host}" if auth else host
         return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+    @field_validator("PIPELINE_RUNTIME_MODE", mode="before")
+    @classmethod
+    def normalize_pipeline_runtime_mode(cls, value):
+        normalized = str(value or "full").strip().lower()
+        aliases = {
+            "full": "full",
+            "complete": "full",
+            "celery": "full",
+            "minimal": "minimal",
+            "local": "minimal",
+            "standalone": "minimal",
+            "single-process": "minimal",
+            "single_process": "minimal",
+        }
+        if normalized not in aliases:
+            raise ValueError("PIPELINE_RUNTIME_MODE must be one of: full, minimal")
+        return aliases[normalized]
+
+    @property
+    def pipeline_uses_local_render_dispatch(self) -> bool:
+        return self.PIPELINE_RUNTIME_MODE == "minimal"
+
+    @property
+    def pipeline_render_dispatch_mode(self) -> str:
+        return "local" if self.pipeline_uses_local_render_dispatch else "celery"
 
 
 # 全局配置实例

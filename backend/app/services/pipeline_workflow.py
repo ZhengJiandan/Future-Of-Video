@@ -60,6 +60,7 @@ CLAIMABLE_QUEUED_STEPS = set(RECOVERABLE_QUEUED_STEPS)
 DISPATCHING_STATUS = "dispatching"
 DISPATCHING_STEP = "正在提交到队列"
 SUBMITTED_TO_QUEUE_STEP = "已提交到队列，等待 worker 处理"
+SUBMITTED_TO_LOCAL_STEP = "已在当前服务进程启动"
 
 
 class RenderTaskCancelledError(RuntimeError):
@@ -181,12 +182,16 @@ class PipelineWorkflowService:
     def __init__(self) -> None:
         self.generator = ScriptGenerator()
         self.tasks: Dict[str, RenderTaskState] = {}
+        self.local_render_jobs: Dict[str, asyncio.Task[Any]] = {}
         self.output_root = Path(settings.UPLOAD_DIR) / "generated" / "pipeline"
         self.reference_root = Path(settings.UPLOAD_DIR) / "generated" / "references"
         self.identity_board_root = self.output_root / "identity_boards"
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.reference_root.mkdir(parents=True, exist_ok=True)
         self.identity_board_root.mkdir(parents=True, exist_ok=True)
+
+    def uses_local_render_dispatch(self) -> bool:
+        return settings.pipeline_uses_local_render_dispatch
 
     async def save_reference_upload(
         self,
@@ -298,6 +303,12 @@ class PipelineWorkflowService:
         target_total_duration: Optional[float] = None,
     ) -> Dict[str, Any]:
         """将审核后的完整剧本拆分成片段。"""
+        logger.info(
+            "Split script request received. max_segment_duration=%s target_total_duration=%s\n-----SCRIPT START-----\n%s\n-----SCRIPT END-----",
+            max_segment_duration,
+            target_total_duration,
+            script_text,
+        )
         splitter = ScriptSplitter(
             SplitConfig(
                 max_segment_duration=min(float(max_segment_duration), MAX_VIDEO_SEGMENT_DURATION),
@@ -494,7 +505,7 @@ class PipelineWorkflowService:
         if state.status == "completed":
             return
         if state.status in {"processing", DISPATCHING_STATUS}:
-            logger.info("Render task already processing in worker: %s", task_id)
+            logger.info("Render task already processing: %s", task_id)
             return
 
         claimed_state = await self._claim_render_task_for_dispatch(task_id)
@@ -504,6 +515,14 @@ class PipelineWorkflowService:
             logger.info("Render task already claimed or submitted elsewhere: %s (%s)", task_id, latest_status)
             return
         state = claimed_state
+
+        if self.uses_local_render_dispatch():
+            await self._start_render_task_locally(
+                task_id=task_id,
+                state=state,
+                mark_failed_on_enqueue_error=mark_failed_on_enqueue_error,
+            )
+            return
 
         try:
             from app.workers.render_tasks import enqueue_render_task
@@ -528,6 +547,59 @@ class PipelineWorkflowService:
             state.touch()
             await self._persist_render_task_state(state=state)
             raise
+
+    async def _start_render_task_locally(
+        self,
+        *,
+        task_id: str,
+        state: RenderTaskState,
+        mark_failed_on_enqueue_error: bool,
+    ) -> None:
+        existing_job = self.local_render_jobs.get(task_id)
+        if existing_job is not None and not existing_job.done():
+            logger.info("Render task already running locally: %s", task_id)
+            return
+
+        try:
+            await self._ensure_render_task_can_continue(task_id, state)
+            state.status = "queued"
+            state.current_step = SUBMITTED_TO_LOCAL_STEP
+            state.error = ""
+            state.touch()
+            await self._persist_render_task_state(state=state)
+            self.local_render_jobs[task_id] = asyncio.create_task(
+                self._run_render_task_in_local_process(task_id),
+                name=f"pipeline-render-{task_id}",
+            )
+        except (RenderTaskCancelledError, RenderTaskPausedError):
+            return
+        except Exception as exc:
+            logger.error("Failed to start local render task %s: %s", task_id, exc, exc_info=True)
+            state.status = "failed" if mark_failed_on_enqueue_error else "queued"
+            state.current_step = "任务启动失败" if mark_failed_on_enqueue_error else "等待重新投递"
+            state.error = str(exc)
+            state.touch()
+            await self._persist_render_task_state(state=state)
+            raise
+
+    async def _run_render_task_in_local_process(self, task_id: str) -> None:
+        try:
+            await self.run_render_task(task_id)
+        except RenderTaskPausedError:
+            logger.info("Local render task paused before execution: %s", task_id)
+        except RenderTaskCancelledError:
+            logger.info("Local render task cancelled before execution: %s", task_id)
+        except asyncio.CancelledError:
+            logger.info("Local render coroutine cancelled: %s", task_id)
+            raise
+        except Exception as exc:
+            logger.error("Local render task crashed unexpectedly: %s", exc, exc_info=True)
+            try:
+                await self.mark_render_task_failed(task_id, error=str(exc), current_step="失败")
+            except Exception:
+                logger.error("Failed to persist local render crash state for %s", task_id, exc_info=True)
+        finally:
+            self.local_render_jobs.pop(task_id, None)
 
     async def run_render_task(self, task_id: str) -> None:
         """执行片段渲染与最终合成。"""
@@ -1238,6 +1310,7 @@ class PipelineWorkflowService:
             "start_frame_generation_reason": str(segment.get("start_frame_generation_reason") or ""),
             "prefer_primary_character_end_frame": bool(segment.get("prefer_primary_character_end_frame", False)),
             "new_character_profile_ids": list(segment.get("new_character_profile_ids") or []),
+            "late_entry_character_profile_ids": list(segment.get("late_entry_character_profile_ids") or []),
             "handoff_character_profile_ids": list(segment.get("handoff_character_profile_ids") or []),
             "ending_contains_handoff_characters": bool(segment.get("ending_contains_handoff_characters", False)),
             "prefer_character_handoff_end_frame": bool(segment.get("prefer_character_handoff_end_frame", False)),

@@ -17,6 +17,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Union
 
+import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,8 @@ from app.services.auth_service import get_current_user
 from app.services.pipeline_character_library import pipeline_character_library_service
 from app.services.pipeline_scene_library import pipeline_scene_library_service
 from app.services.pipeline_workflow import pipeline_workflow_service
+from app.services.profile_image_analyzer import profile_image_analyzer_service
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +258,16 @@ class GenerateScenePrototypeRequest(BaseModel):
     refine_prompt: str = Field(default="", description="用户微调要求")
 
 
+class AnalyzeCharacterImageRequest(BaseModel):
+    reference_image_url: str = Field(..., min_length=1, description="角色参考图 URL")
+    reference_image_original_name: str = Field(default="", description="角色参考图原始文件名")
+
+
+class AnalyzeSceneImageRequest(BaseModel):
+    reference_image_url: str = Field(..., min_length=1, description="场景参考图 URL")
+    reference_image_original_name: str = Field(default="", description="场景参考图原始文件名")
+
+
 class GenerateScriptRequest(BaseModel):
     """完整剧本生成请求。"""
 
@@ -322,6 +335,7 @@ class SegmentPayload(BaseModel):
     start_frame_generation_reason: str = ""
     prefer_primary_character_end_frame: bool = False
     new_character_profile_ids: List[str] = Field(default_factory=list)
+    late_entry_character_profile_ids: List[str] = Field(default_factory=list)
     handoff_character_profile_ids: List[str] = Field(default_factory=list)
     ending_contains_handoff_characters: bool = False
     prefer_character_handoff_end_frame: bool = False
@@ -426,7 +440,7 @@ async def create_character(request: CreateCharacterRequest, db: AsyncSession = D
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Create character failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"角色档案保存失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="角色档案保存失败，请稍后重试") from exc
 
 
 @router.put("/characters/{character_id}")
@@ -454,7 +468,7 @@ async def update_character(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Update character failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"角色档案更新失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="角色档案更新失败，请稍后重试") from exc
 
 
 @router.post("/characters/upload-reference")
@@ -479,7 +493,7 @@ async def upload_character_reference(file: UploadFile = File(...)):
         }
     except Exception as exc:
         logger.error("Upload character reference failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"角色参考图上传失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="角色参考图上传失败，请稍后重试") from exc
 
 
 @router.post("/characters/generate-three-view")
@@ -495,7 +509,7 @@ async def generate_character_three_view(request: GenerateCharacterThreeViewReque
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Generate character three view failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"角色三视图生成失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="角色三视图生成失败，请稍后重试") from exc
 
 
 @router.post("/characters/generate-prototype")
@@ -511,7 +525,7 @@ async def generate_character_prototype(request: GenerateCharacterPrototypeReques
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Generate character prototype failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"角色原型图生成失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="角色原型图生成失败，请稍后重试") from exc
 
 
 @router.post("/characters/generate-voice-preview")
@@ -527,7 +541,32 @@ async def generate_character_voice_preview(request: GenerateCharacterVoicePrevie
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Generate character voice preview failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"角色试音生成失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="角色试音生成失败，请稍后重试") from exc
+
+
+@router.post("/characters/analyze-reference")
+async def analyze_character_reference(request: AnalyzeCharacterImageRequest):
+    image_path = pipeline_character_library_service._asset_url_to_path(request.reference_image_url)
+    if not image_path:
+        raise HTTPException(status_code=400, detail="参考图地址无效")
+    try:
+        fields = await profile_image_analyzer_service.analyze_character_image(
+            image_path=image_path,
+            filename=request.reference_image_original_name,
+        )
+        return {
+            "success": True,
+            "message": "角色图片分析完成",
+            "fields": fields,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        logger.error("Analyze character reference failed with upstream status: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="角色图片分析服务暂时不可用，请稍后重试") from exc
+    except Exception as exc:
+        logger.error("Analyze character reference failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="角色图片分析失败，请稍后重试") from exc
 
 
 @router.post("/scenes/generate-prototype")
@@ -543,7 +582,32 @@ async def generate_scene_prototype(request: GenerateScenePrototypeRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Generate scene prototype failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"场景原型图生成失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="场景图片生成失败，请稍后重试") from exc
+
+
+@router.post("/scenes/analyze-reference")
+async def analyze_scene_reference(request: AnalyzeSceneImageRequest):
+    image_path = pipeline_scene_library_service._asset_url_to_path(request.reference_image_url)
+    if not image_path:
+        raise HTTPException(status_code=400, detail="参考图地址无效")
+    try:
+        fields = await profile_image_analyzer_service.analyze_scene_image(
+            image_path=image_path,
+            filename=request.reference_image_original_name,
+        )
+        return {
+            "success": True,
+            "message": "场景图片分析完成",
+            "fields": fields,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        logger.error("Analyze scene reference failed with upstream status: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="场景图片分析服务暂时不可用，请稍后重试") from exc
+    except Exception as exc:
+        logger.error("Analyze scene reference failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="场景图片分析失败，请稍后重试") from exc
 
 
 @router.get("/scenes")
@@ -578,7 +642,7 @@ async def create_scene(request: CreateSceneRequest, db: AsyncSession = Depends(g
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Create scene failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"场景档案保存失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="场景档案保存失败，请稍后重试") from exc
 
 
 @router.put("/scenes/{scene_id}")
@@ -606,7 +670,7 @@ async def update_scene(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Update scene failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"场景档案更新失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="场景档案更新失败，请稍后重试") from exc
 
 
 @router.post("/scenes/upload-reference")
@@ -631,7 +695,7 @@ async def upload_scene_reference(file: UploadFile = File(...)):
         }
     except Exception as exc:
         logger.error("Upload scene reference failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"场景参考图上传失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="场景参考图上传失败，请稍后重试") from exc
 
 
 @router.delete("/scenes/{scene_id}")
@@ -702,7 +766,7 @@ async def upload_reference(file: UploadFile = File(...)):
         }
     except Exception as exc:
         logger.error("Upload reference failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"参考图上传失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="参考图上传失败，请稍后重试") from exc
 
 
 @router.post("/generate-script")
@@ -743,7 +807,7 @@ async def generate_script(request: GenerateScriptRequest, db: AsyncSession = Dep
         }
     except Exception as exc:
         logger.error("Generate script failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"剧本生成失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="剧本生成失败，请稍后重试") from exc
 
 
 @router.post("/prepare-characters")
@@ -772,7 +836,7 @@ async def prepare_characters(request: PrepareCharactersRequest, db: AsyncSession
         }
     except Exception as exc:
         logger.error("Prepare characters failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"角色确认准备失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="角色准备失败，请稍后重试") from exc
 
 
 @router.post("/split-script")
@@ -794,7 +858,7 @@ async def split_script(request: SplitScriptRequest):
         }
     except Exception as exc:
         logger.error("Split script failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"剧本拆分失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="剧本拆分失败，请稍后重试") from exc
 
 
 @router.post("/generate-keyframes")
@@ -829,7 +893,7 @@ async def generate_keyframes(request: GenerateKeyframesRequest, db: AsyncSession
         }
     except Exception as exc:
         logger.error("Generate keyframes failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"首尾帧生成失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="关键帧生成失败，请稍后重试") from exc
 
 
 @router.post("/render")
@@ -874,7 +938,11 @@ async def render_project(
         await pipeline_workflow_service.start_render_task(task_state.task_id)
         return {
             "success": True,
-            "message": "渲染任务已提交到队列",
+            "message": (
+                "渲染任务已在当前服务进程启动"
+                if settings.pipeline_uses_local_render_dispatch
+                else "渲染任务已提交到队列"
+            ),
             "task_id": task_state.task_id,
             "status": task_state.status,
             "current_step": task_state.current_step,
@@ -882,7 +950,7 @@ async def render_project(
         }
     except Exception as exc:
         logger.error("Render project failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"渲染任务创建失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="渲染任务创建失败，请稍后重试") from exc
 
 
 @router.get("/render/{task_id}")
@@ -912,7 +980,7 @@ async def cancel_render_task(
         raise
     except Exception as exc:
         logger.error("Cancel render task failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"取消渲染任务失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="取消渲染任务失败，请稍后重试") from exc
 
 
 @router.post("/render/{task_id}/pause")
@@ -930,7 +998,7 @@ async def pause_render_task(
         raise
     except Exception as exc:
         logger.error("Pause render task failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"暂停渲染任务失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="暂停渲染任务失败，请稍后重试") from exc
 
 
 @router.post("/render/{task_id}/resume")
@@ -950,7 +1018,7 @@ async def resume_render_task(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Resume render task failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"继续渲染任务失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="继续渲染任务失败，请稍后重试") from exc
 
 
 @router.post("/render/{task_id}/clips/{clip_number}/retry")
@@ -975,7 +1043,7 @@ async def retry_render_clip(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Retry render clip failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"片段重生成失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="片段重生成失败，请稍后重试") from exc
 
 
 @router.post("/render/{task_id}/retry")
@@ -990,7 +1058,11 @@ async def retry_render_task(
             raise HTTPException(status_code=404, detail="任务不存在")
         return {
             "success": True,
-            "message": "渲染任务已重新提交到队列",
+            "message": (
+                "渲染任务已在当前服务进程重新启动"
+                if settings.pipeline_uses_local_render_dispatch
+                else "渲染任务已重新提交到队列"
+            ),
             "task_id": task_state.task_id,
             "status": task_state.status,
             "current_step": task_state.current_step,
@@ -1002,7 +1074,7 @@ async def retry_render_task(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Retry render task failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"重试渲染任务失败: {exc}") from exc
+        raise HTTPException(status_code=500, detail="重试渲染任务失败，请稍后重试") from exc
 
 
 @router.get("/health")
@@ -1011,4 +1083,6 @@ async def health_check():
         "status": "healthy",
         "service": "script-pipeline",
         "mode": "stepwise-e2e-workflow",
+        "runtime_mode": settings.PIPELINE_RUNTIME_MODE,
+        "render_dispatch_mode": settings.pipeline_render_dispatch_mode,
     }

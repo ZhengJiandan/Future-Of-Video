@@ -137,7 +137,7 @@ export const CharacterLibraryListPage: React.FC = () => {
               <Button icon={<AudioOutlined />} onClick={() => navigate('/voices')}>
                 音色目录
               </Button>
-              <Button icon={<PlusOutlined />} type="primary" onClick={() => navigate('/characters')}>
+              <Button icon={<PlusOutlined />} type="primary" onClick={() => navigate('/characters/new')}>
                 新建角色
               </Button>
             </Space>
@@ -151,7 +151,7 @@ export const CharacterLibraryListPage: React.FC = () => {
             type="info"
             showIcon
             message="使用方式"
-            description="先在角色创建工作台打磨角色原型图和设定，保存后再回到这里筛选、查看和删除。列表主图仍展示用户确认的角色图，但每个角色卡片下方会标明内部身份锚点是否齐全。"
+            description="先在角色编辑页完善设定和参考图，保存后再回到这里筛选、查看和管理。列表主图会展示当前确认的角色形象。"
           />
 
           <Row gutter={[12, 12]}>
@@ -217,11 +217,11 @@ export const CharacterLibraryListPage: React.FC = () => {
                     key="edit"
                     type="link"
                     icon={<EditOutlined />}
-                    onClick={() => navigate(`/characters?characterId=${character.id}`)}
+                    onClick={() => navigate(`/characters/edit?characterId=${character.id}`)}
                   >
                     编辑
                   </Button>,
-                  <Button key="create" type="link" icon={<PlusOutlined />} onClick={() => navigate('/characters')}>
+                  <Button key="create" type="link" icon={<PlusOutlined />} onClick={() => navigate('/characters/new')}>
                     继续创建
                   </Button>,
                   <Button
@@ -303,7 +303,7 @@ export const CharacterLibraryListPage: React.FC = () => {
               <Button icon={<FolderOpenOutlined />} onClick={() => void loadCharacters()}>
                 刷新
               </Button>
-              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/characters')}>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/characters/new')}>
                 去创建角色
               </Button>
             </Space>

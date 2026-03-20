@@ -72,6 +72,7 @@ class VideoSegment:
     start_frame_generation_reason: str = ""
     prefer_primary_character_end_frame: bool = False
     new_character_profile_ids: List[str] = field(default_factory=list)
+    late_entry_character_profile_ids: List[str] = field(default_factory=list)
     handoff_character_profile_ids: List[str] = field(default_factory=list)
     ending_contains_handoff_characters: bool = False
     prefer_character_handoff_end_frame: bool = False
@@ -223,6 +224,11 @@ class ScriptSplitter:
             target_duration=effective_target_duration,
         )
         split_points = self._optimize_split_points_for_character_continuity(
+            split_points=split_points,
+            parsed_shots=analysis.get("parsed_shots", []) or [],
+            target_duration=effective_target_duration,
+        )
+        split_points = self._optimize_split_points_for_first_frame_character_stability(
             split_points=split_points,
             parsed_shots=analysis.get("parsed_shots", []) or [],
             target_duration=effective_target_duration,
@@ -1124,6 +1130,20 @@ class ScriptSplitter:
             return False
         return bool(set(character_ids).intersection(set(segment_shots[-1].character_profile_ids or [])))
 
+    def _collect_late_entry_character_ids(self, segment_shots: List[ParsedShot]) -> List[str]:
+        if len(segment_shots) <= 1:
+            return []
+
+        first_shot_character_ids = set(self._first_shot_character_ids(segment_shots))
+        late_entry_character_ids: List[str] = []
+        for shot in segment_shots[1:]:
+            for profile_id in shot.character_profile_ids or []:
+                normalized = str(profile_id or "").strip()
+                if not normalized or normalized in first_shot_character_ids or normalized in late_entry_character_ids:
+                    continue
+                late_entry_character_ids.append(normalized)
+        return late_entry_character_ids
+
     def _rebuild_split_points_from_boundaries(
         self,
         *,
@@ -1244,6 +1264,85 @@ class ScriptSplitter:
         )
         return rebuilt or split_points
 
+    def _optimize_split_points_for_first_frame_character_stability(
+        self,
+        *,
+        split_points: List[Dict[str, Any]],
+        parsed_shots: List[ParsedShot],
+        target_duration: float,
+    ) -> List[Dict[str, Any]]:
+        if not split_points or not parsed_shots:
+            return split_points
+
+        min_duration = float(self.config.min_segment_duration)
+        boundaries = sorted({round(float(point.get("end_time") or 0.0), 2) for point in split_points})
+        changed = False
+
+        for _ in range(max(len(parsed_shots), 1)):
+            rebuilt = self._rebuild_split_points_from_boundaries(
+                boundaries=boundaries,
+                parsed_shots=parsed_shots,
+                target_duration=target_duration,
+                split_reason="character_first_frame_stability_split",
+                enforce_duration_limits=False,
+            )
+            if not rebuilt:
+                break
+
+            added_boundary = False
+            for point in rebuilt:
+                segment_shots: List[ParsedShot] = point.get("shots", []) or []
+                if len(segment_shots) <= 1:
+                    continue
+
+                segment_start = round(float(point.get("start_time") or 0.0), 2)
+                segment_end = round(float(point.get("end_time") or 0.0), 2)
+                first_shot_character_ids = set(self._first_shot_character_ids(segment_shots))
+
+                for shot in segment_shots[1:]:
+                    shot_start_time = round(float(shot.start_time), 2)
+                    shot_character_ids = {
+                        str(profile_id or "").strip()
+                        for profile_id in (shot.character_profile_ids or [])
+                        if str(profile_id or "").strip()
+                    }
+                    introduced_character_ids = sorted(shot_character_ids - first_shot_character_ids)
+                    if not introduced_character_ids or shot_start_time in boundaries:
+                        continue
+                    if shot_start_time - segment_start < min_duration - 0.01:
+                        continue
+                    if segment_end - shot_start_time < min_duration - 0.01:
+                        continue
+
+                    boundaries.append(shot_start_time)
+                    boundaries.sort()
+                    changed = True
+                    added_boundary = True
+                    logger.info(
+                        "Added split at %.2fs to keep first-frame characters stable. Later-entering characters: %s",
+                        shot_start_time,
+                        ", ".join(introduced_character_ids),
+                    )
+                    break
+
+                if added_boundary:
+                    break
+
+            if not added_boundary:
+                break
+
+        if not changed:
+            return split_points
+
+        rebuilt = self._rebuild_split_points_from_boundaries(
+            boundaries=boundaries,
+            parsed_shots=parsed_shots,
+            target_duration=target_duration,
+            split_reason="character_first_frame_stability_split",
+            enforce_duration_limits=False,
+        )
+        return rebuilt or split_points
+
     def _annotate_segments_for_video_generation(
         self,
         *,
@@ -1266,6 +1365,7 @@ class ScriptSplitter:
             )
             character_ids = self._collect_segment_character_ids(segment_shots)
             first_shot_character_ids = self._first_shot_character_ids(segment_shots)
+            late_entry_character_ids = self._collect_late_entry_character_ids(segment_shots)
             new_character_ids = [profile_id for profile_id in character_ids if profile_id not in seen_character_ids]
             contains_primary = self._shots_contain_primary_characters(segment_shots, primary_character_ids)
             ending_contains_primary = self._ending_shot_contains_primary_characters(segment_shots, primary_character_ids)
@@ -1273,6 +1373,7 @@ class ScriptSplitter:
             segment.contains_primary_character = contains_primary
             segment.ending_contains_primary_character = ending_contains_primary
             segment.new_character_profile_ids = new_character_ids
+            segment.late_entry_character_profile_ids = late_entry_character_ids
             segment.pre_generate_start_frame = index == 0
             segment.start_frame_generation_reason = "opening_segment" if index == 0 else ""
             segment.prefer_primary_character_end_frame = index < len(segments) - 1 and contains_primary
@@ -1450,6 +1551,7 @@ class ScriptSplitter:
 8. 如果总时长有余量，优先让前面的片段更接近 10 秒，最后一个片段再承担剩余的 3-9 秒
 9. 任何新角色首次正式登场时，优先从该角色出镜镜头开始新起一段，让该段首帧可以清楚承载角色造型
 10. 除最后一个片段外，若下一段继续使用同一批角色，尽量让本段结尾仍保留这些角色在画面内，方便下一段延续角色一致性
+11. 尽量不要让首镜头里没有出现的角色在同一段中途入场；如果某角色会在段内首次出镜，优先从该角色出镜镜头开始新起一段
 
 输出必须是合法 JSON，格式：
 {{
@@ -2058,6 +2160,7 @@ class ScriptSplitter:
 5. 输出要指出问题最严重的片段，并给出明确修改建议
 6. 如果有新角色首次正式登场，审核时要判断该角色是否被单独起段，是否适合额外生成角色锚定首帧
 7. 除最后一段外，优先检查每段结尾是否仍保留下一段会继续出现的角色，避免下一段角色漂移
+8. 优先检查每一段是否存在“首镜头未出现的角色在段内中途入场”，如有则应建议在该角色首次出镜处切段
 
 输出必须是合法 JSON，格式：
 {{
@@ -2169,6 +2272,13 @@ class ScriptSplitter:
                 status = "warning"
                 content_check_status = "warning" if content_check_status == "pass" else content_check_status
                 segment_issues.append("该段结尾镜头未保留下一段仍会继续出现的角色，下一段角色连续性存在漂移风险。")
+            if segment.late_entry_character_profile_ids:
+                status = "warning"
+                content_check_status = "warning" if content_check_status == "pass" else content_check_status
+                segment_issues.append(
+                    "该段存在首镜头未出现的角色在段内中途入场，建议从这些角色首次出镜的镜头开始新起一段："
+                    + "、".join(segment.late_entry_character_profile_ids)
+                )
             if index > 0 and segment.pre_generate_start_frame and segment.start_frame_generation_reason == "new_character_entry":
                 summary = "该段被识别为新角色正式登场段，已建议额外预生成首帧稳定角色造型。"
             segment_reviews.append(
@@ -2187,6 +2297,11 @@ class ScriptSplitter:
                     + (
                         ["把该段结尾调整为下一段仍会继续出现的角色仍在画面内的镜头，方便下一段承接。"]
                         if segment.prefer_character_handoff_end_frame and not segment.ending_contains_handoff_characters
+                        else []
+                    )
+                    + (
+                        ["将该段中途入场的角色改为从新片段首镜头开始出镜，避免首帧未出现角色在段内突然进入。"]
+                        if segment.late_entry_character_profile_ids
                         else []
                     )
                     + (

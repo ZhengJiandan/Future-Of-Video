@@ -53,7 +53,7 @@ const buildVoiceHighlights = (voice: DoubaoVoiceCatalogItem): string[] => {
   if (voice.language.includes('Accent')) {
     highlights.push('带口音或地域风格，更容易建立角色记忆点，但不适合作为所有角色的默认声线。')
   } else if (voice.language.includes('Chinese')) {
-    highlights.push('中文表达稳定，适合主链路里的中文对白场景。')
+    highlights.push('中文表达稳定，适合中文对白场景。')
   } else if (voice.language.includes('English')) {
     highlights.push('适合英文对白、双语角色或外语场景。')
   } else if (voice.language.includes('Japanese') || voice.language.includes('Spanish')) {
@@ -65,7 +65,7 @@ const buildVoiceHighlights = (voice: DoubaoVoiceCatalogItem): string[] => {
 const buildSuggestedUse = (voice: DoubaoVoiceCatalogItem): string => {
   const parts = [voice.gender, voice.style, voice.scenario].filter(Boolean)
   if (!parts.length) {
-    return '适合先做试听，再决定是否绑定到正式角色。'
+    return '适合先做试听，再决定是否绑定到角色。'
   }
   return `推荐优先用于：${parts.join(' / ')} 类型的角色。`
 }
@@ -184,8 +184,7 @@ export const VoiceCatalogPage: React.FC = () => {
                 豆包音色目录
               </Title>
               <Paragraph style={{ margin: 0, color: 'rgba(255,255,255,0.76)' }}>
-                这里集中介绍当前接入的豆包 TTS 预置音色。角色档案页会直接复用这份目录做选择，
-                先在这里看特点，再回角色档案绑定，会更稳。
+                这里集中展示可用的豆包预置音色。可以先了解特点，再回到角色档案中绑定常用声线。
               </Paragraph>
             </Space>
           </Col>
@@ -194,7 +193,7 @@ export const VoiceCatalogPage: React.FC = () => {
               <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadCatalog()}>
                 刷新目录
               </Button>
-              <Button icon={<TeamOutlined />} type="primary" onClick={() => navigate('/characters')}>
+              <Button icon={<TeamOutlined />} type="primary" onClick={() => navigate('/characters/new')}>
                 去绑定角色声线
               </Button>
             </Space>
@@ -207,8 +206,8 @@ export const VoiceCatalogPage: React.FC = () => {
           <Alert
             type="info"
             showIcon
-            message="使用建议"
-            description="真正稳定的字段是 `voice_type`。页面里的中文介绍和风格建议用于快速筛选，但最终仍建议先做单句试听，再绑定到正式角色。"
+            message="选择建议"
+            description="建议先根据语言、风格和适用场景筛选，再做单句试听，确认后再绑定到角色。"
           />
           <Row gutter={[12, 12]}>
             <Col xs={24} lg={10}>
@@ -298,11 +297,11 @@ export const VoiceCatalogPage: React.FC = () => {
                           <Alert
                             type="warning"
                             showIcon
-                            message="元数据提示"
+                            message="使用提醒"
                             description={voice.metadata_warning}
                           />
                         ) : null}
-                        <Button type="link" style={{ padding: 0 }} onClick={() => navigate(`/characters?voiceType=${voice.voice_type}`)}>
+                        <Button type="link" style={{ padding: 0 }} onClick={() => navigate(`/characters/new?voiceType=${voice.voice_type}`)}>
                           用这个音色去创建角色
                         </Button>
                       </Space>

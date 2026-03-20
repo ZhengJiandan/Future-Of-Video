@@ -131,7 +131,7 @@ export const SceneLibraryListPage: React.FC = () => {
               <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadScenes()}>
                 刷新列表
               </Button>
-              <Button icon={<PlusOutlined />} type="primary" onClick={() => navigate('/scenes')}>
+              <Button icon={<PlusOutlined />} type="primary" onClick={() => navigate('/scenes/new')}>
                 新建场景
               </Button>
             </Space>
@@ -208,11 +208,11 @@ export const SceneLibraryListPage: React.FC = () => {
                     key="edit"
                     type="link"
                     icon={<EditOutlined />}
-                    onClick={() => navigate(`/scenes?sceneId=${scene.id}`)}
+                    onClick={() => navigate(`/scenes/edit?sceneId=${scene.id}`)}
                   >
                     编辑
                   </Button>,
-                  <Button key="create" type="link" icon={<PlusOutlined />} onClick={() => navigate('/scenes')}>
+                  <Button key="create" type="link" icon={<PlusOutlined />} onClick={() => navigate('/scenes/new')}>
                     继续创建
                   </Button>,
                   <Button
@@ -274,7 +274,7 @@ export const SceneLibraryListPage: React.FC = () => {
               <Button icon={<ReloadOutlined />} onClick={() => void loadScenes()}>
                 刷新
               </Button>
-              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/scenes')}>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/scenes/new')}>
                 去创建场景
               </Button>
             </Space>

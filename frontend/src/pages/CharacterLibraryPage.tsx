@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Col,
+  Descriptions,
   Image,
   Input,
   Row,
@@ -27,6 +28,7 @@ import {
 } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
+  CharacterImageAnalysisFields,
   CharacterProfile,
   DoubaoVoiceCatalogItem,
   ReferenceImageAsset,
@@ -87,6 +89,7 @@ export const CharacterLibraryPage: React.FC = () => {
   const [initializing, setInitializing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [referenceUploading, setReferenceUploading] = useState(false)
+  const [analyzingReference, setAnalyzingReference] = useState(false)
   const [prototypeGenerating, setPrototypeGenerating] = useState(false)
   const [voicePreviewGenerating, setVoicePreviewGenerating] = useState(false)
   const [characterDraft, setCharacterDraft] = useState(emptyCharacterDraft)
@@ -179,7 +182,7 @@ export const CharacterLibraryPage: React.FC = () => {
 
   const exitEditMode = () => {
     resetDraft()
-    setSearchParams({})
+    navigate('/characters/new')
   }
 
   useEffect(() => {
@@ -238,7 +241,7 @@ export const CharacterLibraryPage: React.FC = () => {
       } catch (requestError: unknown) {
         const responseError = requestError as { response?: { data?: { detail?: string } } }
         message.error(responseError.response?.data?.detail || '角色档案加载失败')
-        setSearchParams({})
+        navigate('/characters/library')
       } finally {
         setInitializing(false)
       }
@@ -249,6 +252,113 @@ export const CharacterLibraryPage: React.FC = () => {
 
   const handleDraftChange = (field: keyof typeof emptyCharacterDraft, value: string) => {
     setCharacterDraft((previous) => ({ ...previous, [field]: value }))
+  }
+
+  const mergeTextList = (currentValue: string, nextValues: string[]) => {
+    const merged = new Set(
+      currentValue
+        .split(/[，,\n]/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    )
+    nextValues.forEach((item) => {
+      const normalized = item.trim()
+      if (normalized) {
+        merged.add(normalized)
+      }
+    })
+    return Array.from(merged).join(', ')
+  }
+
+  const applyCharacterAnalysisFields = (fields: CharacterImageAnalysisFields) => {
+    let filledCount = 0
+    setCharacterDraft((previous) => {
+      const next = { ...previous }
+      const textKeys = [
+        'name',
+        'category',
+        'role',
+        'archetype',
+        'age_range',
+        'gender_presentation',
+        'description',
+        'appearance',
+        'personality',
+        'core_appearance',
+        'hair',
+        'face_features',
+        'body_shape',
+        'outfit',
+        'gear',
+        'color_palette',
+        'visual_do_not_change',
+        'speaking_style',
+        'common_actions',
+        'emotion_baseline',
+        'forbidden_behaviors',
+        'prompt_hint',
+        'llm_summary',
+        'image_prompt_base',
+        'video_prompt_base',
+        'negative_prompt',
+      ] as const
+
+      textKeys.forEach((key) => {
+        const incoming = String(fields[key] || '').trim()
+        if (!incoming || String(previous[key] || '').trim()) {
+          return
+        }
+        next[key] = incoming
+        filledCount += 1
+      })
+
+      const listMappings = [
+        ['tags', fields.tags || []],
+        ['must_keep', fields.must_keep || []],
+        ['forbidden_traits', fields.forbidden_traits || []],
+        ['aliases', fields.aliases || []],
+      ] as const
+      listMappings.forEach(([key, values]) => {
+        if (!values.length) {
+          return
+        }
+        const mergedValue = mergeTextList(String(previous[key] || ''), values)
+        if (mergedValue !== String(previous[key] || '')) {
+          next[key] = mergedValue
+          filledCount += 1
+        }
+      })
+
+      return next
+    })
+    return filledCount
+  }
+
+  const handleAnalyzeReferenceImage = async () => {
+    const targetAsset = referenceImage || characterImage
+    if (!targetAsset?.url) {
+      message.warning('请先上传参考图，再进行图片分析')
+      return
+    }
+
+    setAnalyzingReference(true)
+    try {
+      const response = await scriptPipelineApi.analyzeCharacterReference({
+        reference_image_url: targetAsset.url,
+        reference_image_original_name: targetAsset.original_filename || targetAsset.filename,
+      })
+      const filledCount = applyCharacterAnalysisFields(response.data.fields)
+      if (filledCount > 0) {
+        message.success(`图片分析完成，已补充 ${filledCount} 项角色信息`)
+      } else {
+        message.info('图片分析完成，但当前表单已有内容较完整，未自动覆盖现有信息')
+      }
+    } catch (requestError: unknown) {
+      const responseError = requestError as { response?: { data?: { detail?: string } } }
+      message.error(responseError.response?.data?.detail || '角色图片分析失败')
+    } finally {
+      setAnalyzingReference(false)
+    }
   }
 
   const handleReferenceUpload: UploadProps['customRequest'] = async (options) => {
@@ -332,7 +442,7 @@ export const CharacterLibraryPage: React.FC = () => {
   const handleGenerateVoicePreview = async () => {
     const voiceProvider = characterDraft.voice_provider.trim() || 'doubao-tts'
     if (!voiceProvider) {
-      message.warning('请先配置 voice provider')
+      message.warning('请先选择语音服务')
       return
     }
 
@@ -516,27 +626,27 @@ export const CharacterLibraryPage: React.FC = () => {
       </Card>
 
       <Card title={isEditMode ? '编辑角色档案' : '新建角色档案'} style={{ borderRadius: 20 }}>
-        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+        <Space direction="vertical" size={18} style={{ width: '100%' }}>
           {isEditMode ? (
             <Alert
               type="warning"
               showIcon
-              message="编辑模式"
-              description="这个页面已经回填当前角色数据。修改角色图后，保存时会重新生成内部三视图约束，但不会展示给用户。"
+              message="正在编辑角色档案"
+              description="当前角色资料已载入，可以继续调整设定、参考图和声音配置后保存。"
             />
           ) : null}
 
           <Alert
             type="info"
             showIcon
-            message="推荐流程"
-            description="先写角色设定。可以上传图片直接作为角色图，也可以先生成角色原型图，再不断微调，满意后保存。保存后系统会为角色自动补齐主参考图、三视图和面部特写这套身份锚点。"
+            message="建议步骤"
+            description="先完善角色设定，再上传参考图或生成角色图进行微调。保存后，系统会同步整理角色参考素材，方便后续持续复用。"
           />
           <Alert
             type="success"
             showIcon
-            message="音色目录已接入"
-            description="现在可以先去独立音色目录页查看每个音色的特点，再回到这里绑定角色声线。角色页里的下拉已经按使用场景分组。"
+            message="可选音色目录"
+            description="你可以先在音色目录中试听和筛选，再回到这里为角色绑定常用声线。"
             action={
               <Button size="small" onClick={() => navigate('/voices')}>
                 打开音色目录
@@ -548,328 +658,313 @@ export const CharacterLibraryPage: React.FC = () => {
             <Alert type="info" showIcon message="正在加载角色档案..." />
           ) : null}
 
-          <Row gutter={[12, 12]}>
-            <Col span={9}>
-              <Input
-                value={characterDraft.name}
-                onChange={(event) => handleDraftChange('name', event.target.value)}
-                placeholder="角色名称"
-                prefix={<UserOutlined />}
-              />
-            </Col>
-            <Col span={7}>
-              <Input
-                value={characterDraft.category}
-                onChange={(event) => handleDraftChange('category', event.target.value)}
-                placeholder="角色分类"
-              />
-            </Col>
-            <Col span={8}>
-              <Input
-                value={characterDraft.role}
-                onChange={(event) => handleDraftChange('role', event.target.value)}
-                placeholder="角色定位"
-              />
-            </Col>
-          </Row>
+          <Row gutter={[20, 20]} align="top">
+            <Col xs={24} xl={14}>
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Card
+                  size="small"
+                  title="基础信息"
+                  extra={<Tag color={isEditMode ? 'gold' : 'blue'}>{isEditMode ? '编辑中' : '新建中'}</Tag>}
+                  style={{ borderRadius: 16 }}
+                >
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={10}>
+                        <Input
+                          value={characterDraft.name}
+                          onChange={(event) => handleDraftChange('name', event.target.value)}
+                          placeholder="角色名称"
+                          prefix={<UserOutlined />}
+                        />
+                      </Col>
+                      <Col xs={24} md={7}>
+                        <Input
+                          value={characterDraft.category}
+                          onChange={(event) => handleDraftChange('category', event.target.value)}
+                          placeholder="角色分类"
+                        />
+                      </Col>
+                      <Col xs={24} md={7}>
+                        <Input
+                          value={characterDraft.role}
+                          onChange={(event) => handleDraftChange('role', event.target.value)}
+                          placeholder="角色定位"
+                        />
+                      </Col>
+                    </Row>
 
-          <Row gutter={[12, 12]}>
-            <Col span={8}>
-              <Input value={characterDraft.archetype} onChange={(event) => handleDraftChange('archetype', event.target.value)} placeholder="角色原型" />
-            </Col>
-            <Col span={8}>
-              <Input value={characterDraft.age_range} onChange={(event) => handleDraftChange('age_range', event.target.value)} placeholder="年龄范围" />
-            </Col>
-            <Col span={8}>
-              <Input
-                value={characterDraft.gender_presentation}
-                onChange={(event) => handleDraftChange('gender_presentation', event.target.value)}
-                placeholder="性别呈现"
-              />
-            </Col>
-          </Row>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={8}>
+                        <Input value={characterDraft.archetype} onChange={(event) => handleDraftChange('archetype', event.target.value)} placeholder="角色原型" />
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <Input value={characterDraft.age_range} onChange={(event) => handleDraftChange('age_range', event.target.value)} placeholder="年龄范围" />
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <Input
+                          value={characterDraft.gender_presentation}
+                          onChange={(event) => handleDraftChange('gender_presentation', event.target.value)}
+                          placeholder="性别呈现"
+                        />
+                      </Col>
+                    </Row>
 
-          <Input
-            value={characterDraft.tags}
-            onChange={(event) => handleDraftChange('tags', event.target.value)}
-            placeholder="标签，多个标签用逗号分隔"
-            suffix={<Text type="secondary">{selectedTagCount} 个</Text>}
-          />
-
-          <TextArea rows={4} value={characterDraft.description} onChange={(event) => handleDraftChange('description', event.target.value)} placeholder="角色设定" />
-          <TextArea rows={4} value={characterDraft.appearance} onChange={(event) => handleDraftChange('appearance', event.target.value)} placeholder="外观描述" />
-          <TextArea rows={3} value={characterDraft.personality} onChange={(event) => handleDraftChange('personality', event.target.value)} placeholder="性格描述" />
-
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <TextArea rows={3} value={characterDraft.core_appearance} onChange={(event) => handleDraftChange('core_appearance', event.target.value)} placeholder="核心外观" />
-            </Col>
-            <Col span={12}>
-              <TextArea rows={3} value={characterDraft.visual_do_not_change} onChange={(event) => handleDraftChange('visual_do_not_change', event.target.value)} placeholder="视觉不可变项" />
-            </Col>
-          </Row>
-
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <TextArea rows={2} value={characterDraft.hair} onChange={(event) => handleDraftChange('hair', event.target.value)} placeholder="发型" />
-            </Col>
-            <Col span={12}>
-              <TextArea rows={2} value={characterDraft.face_features} onChange={(event) => handleDraftChange('face_features', event.target.value)} placeholder="面部特征" />
-            </Col>
-          </Row>
-
-          <Row gutter={[12, 12]}>
-            <Col span={8}>
-              <TextArea rows={2} value={characterDraft.body_shape} onChange={(event) => handleDraftChange('body_shape', event.target.value)} placeholder="体态" />
-            </Col>
-            <Col span={8}>
-              <TextArea rows={2} value={characterDraft.outfit} onChange={(event) => handleDraftChange('outfit', event.target.value)} placeholder="服装" />
-            </Col>
-            <Col span={8}>
-              <TextArea rows={2} value={characterDraft.gear} onChange={(event) => handleDraftChange('gear', event.target.value)} placeholder="装备" />
-            </Col>
-          </Row>
-
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <TextArea rows={2} value={characterDraft.speaking_style} onChange={(event) => handleDraftChange('speaking_style', event.target.value)} placeholder="说话方式" />
-            </Col>
-            <Col span={12}>
-              <TextArea rows={2} value={characterDraft.common_actions} onChange={(event) => handleDraftChange('common_actions', event.target.value)} placeholder="常见动作" />
-            </Col>
-          </Row>
-
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <TextArea rows={2} value={characterDraft.emotion_baseline} onChange={(event) => handleDraftChange('emotion_baseline', event.target.value)} placeholder="情绪基线" />
-            </Col>
-            <Col span={12}>
-              <TextArea rows={2} value={characterDraft.forbidden_behaviors} onChange={(event) => handleDraftChange('forbidden_behaviors', event.target.value)} placeholder="禁止行为" />
-            </Col>
-          </Row>
-
-          <Card
-            size="small"
-            title="角色语音绑定"
-            style={{ borderRadius: 16, background: '#f7fbff' }}
-            extra={<Tag color="blue">Doubao TTS</Tag>}
-          >
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <Text type="secondary">这里配置的是角色固定声线，不是单次渲染临时参数。后续对白 TTS 会优先读取角色档案里的这组绑定。</Text>
-              <Row gutter={[12, 12]}>
-                <Col span={6}>
-                  <Input value={characterDraft.voice_provider} onChange={(event) => handleDraftChange('voice_provider', event.target.value)} placeholder="provider" />
-                </Col>
-                <Col span={10}>
-                  <Select
-                    showSearch
-                    allowClear
-                    loading={voiceCatalogLoading}
-                    value={characterDraft.voice_type || undefined}
-                    placeholder="选择官方音色 ID"
-                    optionFilterProp="label"
-                    options={voiceOptions}
-                    onChange={(value, option) => {
-                      const selectedValue = String(value || '')
-                      handleDraftChange('voice_type', selectedValue)
-                      const selectedItem = (option as { item?: DoubaoVoiceCatalogItem } | undefined)?.item
-                      if (selectedItem && !characterDraft.voice_name.trim()) {
-                        handleDraftChange('voice_name', selectedItem.voice_name)
-                      }
-                    }}
-                  />
-                </Col>
-                <Col span={8}>
-                  <Input value={characterDraft.voice_name} onChange={(event) => handleDraftChange('voice_name', event.target.value)} placeholder="音色备注名（可选）" />
-                </Col>
-              </Row>
-              <Input
-                value={characterDraft.voice_type}
-                onChange={(event) => handleDraftChange('voice_type', event.target.value)}
-                placeholder="也可以手动输入 voice_type，覆盖或补充目录外音色"
-              />
-              {selectedVoiceMeta ? (
-                <Alert
-                  type={selectedVoiceMeta.metadata_warning ? 'warning' : 'info'}
-                  showIcon
-                  message={`当前音色：${selectedVoiceMeta.voice_name}`}
-                  description={`${selectedVoiceMeta.language}｜${selectedVoiceMeta.gender}｜${selectedVoiceMeta.style}｜${selectedVoiceMeta.scenario}${
-                    selectedVoiceMeta.metadata_warning ? `｜${selectedVoiceMeta.metadata_warning}` : ''
-                  }`}
-                />
-              ) : null}
-              <Row gutter={[12, 12]}>
-                <Col span={8}>
-                  <Input value={characterDraft.voice_emotion} onChange={(event) => handleDraftChange('voice_emotion', event.target.value)} placeholder="emotion，例如 happy / serious" />
-                </Col>
-                <Col span={8}>
-                  <Input value={characterDraft.voice_language} onChange={(event) => handleDraftChange('voice_language', event.target.value)} placeholder="language，例如 zh" />
-                </Col>
-                <Col span={8}>
-                  <Text type="secondary">如果 `voice_type` 为空，Doubao TTS 会回退到全局默认音色；目录里目前保存了官方文档整理出的 33 个预置音色。</Text>
-                </Col>
-              </Row>
-              <Row gutter={[12, 12]}>
-                <Col span={8}>
-                  <Input value={characterDraft.voice_speed_ratio} onChange={(event) => handleDraftChange('voice_speed_ratio', event.target.value)} placeholder="speed_ratio，默认 1.0" />
-                </Col>
-                <Col span={8}>
-                  <Input value={characterDraft.voice_pitch_ratio} onChange={(event) => handleDraftChange('voice_pitch_ratio', event.target.value)} placeholder="pitch_ratio，默认 1.0" />
-                </Col>
-                <Col span={8}>
-                  <Input value={characterDraft.voice_volume_ratio} onChange={(event) => handleDraftChange('voice_volume_ratio', event.target.value)} placeholder="volume_ratio，默认 1.0" />
-                </Col>
-              </Row>
-              <Card
-                size="small"
-                title="单句试音"
-                style={{ borderRadius: 12, background: '#fff' }}
-                extra={voicePreviewProvider ? <Tag color="cyan">{voicePreviewProvider}</Tag> : null}
-              >
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  <TextArea
-                    rows={3}
-                    value={voicePreviewText}
-                    onChange={(event) => setVoicePreviewText(event.target.value)}
-                    placeholder="输入一段角色试听文本"
-                  />
-                  <Space wrap>
-                    <Button
-                      type="primary"
-                      icon={<PlayCircleOutlined />}
-                      loading={voicePreviewGenerating}
-                      onClick={handleGenerateVoicePreview}
-                    >
-                      生成试听
-                    </Button>
-                    <Text type="secondary">建议用角色常说的话来验证音色、语速和情绪是否贴合。</Text>
-                  </Space>
-                  {voicePreviewUrl ? (
-                    <audio
-                      key={voicePreviewUrl}
-                      controls
-                      src={voicePreviewUrl}
-                      style={{ width: '100%' }}
+                    <Input
+                      value={characterDraft.tags}
+                      onChange={(event) => handleDraftChange('tags', event.target.value)}
+                      placeholder="标签，多个标签用逗号分隔"
+                      suffix={<Text type="secondary">{selectedTagCount} 个</Text>}
                     />
-                  ) : (
-                    <Text type="secondary">生成后会在这里直接播放试听音频。</Text>
-                  )}
-                </Space>
-              </Card>
-            </Space>
-          </Card>
 
-          <Input value={characterDraft.color_palette} onChange={(event) => handleDraftChange('color_palette', event.target.value)} placeholder="配色关键词" />
-          <TextArea rows={2} value={characterDraft.must_keep} onChange={(event) => handleDraftChange('must_keep', event.target.value)} placeholder="必须保持，多个条目用逗号或换行分隔" />
-          <TextArea rows={2} value={characterDraft.forbidden_traits} onChange={(event) => handleDraftChange('forbidden_traits', event.target.value)} placeholder="禁止特征，多个条目用逗号或换行分隔" />
-          <Input value={characterDraft.aliases} onChange={(event) => handleDraftChange('aliases', event.target.value)} placeholder="别名，多个条目用逗号分隔" />
+                    <TextArea rows={4} value={characterDraft.description} onChange={(event) => handleDraftChange('description', event.target.value)} placeholder="角色设定" />
+                    <TextArea rows={4} value={characterDraft.appearance} onChange={(event) => handleDraftChange('appearance', event.target.value)} placeholder="外观描述" />
+                    <TextArea rows={3} value={characterDraft.personality} onChange={(event) => handleDraftChange('personality', event.target.value)} placeholder="性格描述" />
+                  </Space>
+                </Card>
 
-          <Card
-            size="small"
-            title="1. 上传参考图（可选）"
-            style={{ borderRadius: 16, background: '#fafcff' }}
-            extra={referenceImage ? <Tag color="green">已上传</Tag> : <Tag>待上传</Tag>}
-          >
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <Upload accept="image/*" maxCount={1} customRequest={handleReferenceUpload} onRemove={handleReferenceRemove} fileList={referenceFileList}>
-                <Button icon={<UploadOutlined />} loading={referenceUploading}>
-                  上传角色参考图
-                </Button>
-              </Upload>
-              {referenceImage ? (
-                <Image src={resolveAssetUrl(referenceImage.url)} alt="角色参考图" style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }} />
-              ) : (
-                <Text type="secondary">如果你已经有角色形象，可以上传后直接保存，或者基于它继续微调生成更满意的角色图。</Text>
-              )}
-            </Space>
-          </Card>
+                <Card size="small" title="视觉锚点" style={{ borderRadius: 16 }}>
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={3} value={characterDraft.core_appearance} onChange={(event) => handleDraftChange('core_appearance', event.target.value)} placeholder="核心外观" />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={3} value={characterDraft.visual_do_not_change} onChange={(event) => handleDraftChange('visual_do_not_change', event.target.value)} placeholder="视觉不可变项" />
+                      </Col>
+                    </Row>
 
-          <Card
-            size="small"
-            title="2. 角色原型图生成与微调"
-            style={{ borderRadius: 16, background: '#fffdf7' }}
-            extra={characterImage?.url ? <Tag color="gold">已有角色图</Tag> : <Tag>待生成</Tag>}
-          >
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <TextArea
-                rows={3}
-                value={refinePrompt}
-                onChange={(event) => setRefinePrompt(event.target.value)}
-                placeholder="可填写你的微调要求，例如：更冷峻、更像特战队员、服装改成黑灰战术风、脸更干练"
-              />
-              <Button type="default" loading={prototypeGenerating} onClick={handleGenerateCharacterImage}>
-                {characterImage?.url ? '基于当前图片重新生成 / 微调' : '生成角色原型图'}
-              </Button>
-              {characterImage?.url ? (
-                <>
-                  <Image src={resolveAssetUrl(characterImage.url)} alt="角色原型图" style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }} />
-                  {characterImagePrompt ? <Alert type="success" showIcon message="本次角色图生成 Prompt" description={characterImagePrompt} /> : null}
-                </>
-              ) : (
-                <Text type="secondary">没有上传图片也可以直接生成角色原型图，生成后可继续微调，直到满意为止。</Text>
-              )}
-            </Space>
-          </Card>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={2} value={characterDraft.hair} onChange={(event) => handleDraftChange('hair', event.target.value)} placeholder="发型" />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={2} value={characterDraft.face_features} onChange={(event) => handleDraftChange('face_features', event.target.value)} placeholder="面部特征" />
+                      </Col>
+                    </Row>
 
-          {loadedProfile?.identity_reference_images?.length ? (
-            <Card
-              size="small"
-              title="3. 当前身份锚点包"
-              style={{ borderRadius: 16, background: '#f7fbff' }}
-              extra={<Tag color="blue">{loadedProfile.identity_reference_images.length} 个锚点</Tag>}
-            >
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                <Alert
-                  type="info"
-                  showIcon
-                  message="这里展示的是内部角色视觉包"
-                  description="不是只有三视图。当前档案如果已生成，会同时包含主参考图、三视图、面部特写，以及结构化身份卡。"
-                />
-                <Space wrap size={[16, 16]} style={{ width: '100%' }}>
-                  {loadedProfile.identity_reference_images.map((item) => (
-                    <Card
-                      key={`${loadedProfile.id}-${item.type}`}
-                      size="small"
-                      title={item.label}
-                      style={{ width: 220, borderRadius: 12 }}
-                    >
-                      <Image
-                        src={resolveAssetUrl(item.url)}
-                        alt={item.label}
-                        style={{ width: '100%', borderRadius: 10, objectFit: 'cover' }}
-                      />
-                    </Card>
-                  ))}
-                </Space>
-                <Space wrap>
-                  {loadedProfile.must_keep?.map((item) => (
-                    <Tag key={`keep-${item}`} color="blue">
-                      必须保持: {item}
-                    </Tag>
-                  ))}
-                  {loadedProfile.forbidden_traits?.map((item) => (
-                    <Tag key={`forbid-${item}`} color="red">
-                      禁止: {item}
-                    </Tag>
-                  ))}
-                </Space>
-                {loadedProfile.identity_anchor_pack ? (
-                  <Alert
-                    type="success"
-                    showIcon
-                    message="稳定 Prompt 基底"
-                    description={
-                      <Space direction="vertical" size={4}>
-                        <Text>llm_summary: {loadedProfile.llm_summary || '未设置'}</Text>
-                        <Text>image_prompt_base: {loadedProfile.image_prompt_base || '未设置'}</Text>
-                        <Text>video_prompt_base: {loadedProfile.video_prompt_base || '未设置'}</Text>
-                      </Space>
-                    }
-                  />
-                ) : null}
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={8}>
+                        <TextArea rows={2} value={characterDraft.body_shape} onChange={(event) => handleDraftChange('body_shape', event.target.value)} placeholder="体态" />
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <TextArea rows={2} value={characterDraft.outfit} onChange={(event) => handleDraftChange('outfit', event.target.value)} placeholder="服装" />
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <TextArea rows={2} value={characterDraft.gear} onChange={(event) => handleDraftChange('gear', event.target.value)} placeholder="装备" />
+                      </Col>
+                    </Row>
+
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={2} value={characterDraft.speaking_style} onChange={(event) => handleDraftChange('speaking_style', event.target.value)} placeholder="说话方式" />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={2} value={characterDraft.common_actions} onChange={(event) => handleDraftChange('common_actions', event.target.value)} placeholder="常见动作" />
+                      </Col>
+                    </Row>
+
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={2} value={characterDraft.emotion_baseline} onChange={(event) => handleDraftChange('emotion_baseline', event.target.value)} placeholder="情绪基线" />
+                      </Col>
+                      <Col xs={24} md={12}>
+                        <TextArea rows={2} value={characterDraft.forbidden_behaviors} onChange={(event) => handleDraftChange('forbidden_behaviors', event.target.value)} placeholder="禁止行为" />
+                      </Col>
+                    </Row>
+                  </Space>
+                </Card>
+
+                <Card size="small" title="提示词与约束" style={{ borderRadius: 16 }}>
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Input value={characterDraft.color_palette} onChange={(event) => handleDraftChange('color_palette', event.target.value)} placeholder="配色关键词" />
+                    <Input value={characterDraft.aliases} onChange={(event) => handleDraftChange('aliases', event.target.value)} placeholder="别名，多个条目用逗号分隔" />
+                    <TextArea rows={2} value={characterDraft.must_keep} onChange={(event) => handleDraftChange('must_keep', event.target.value)} placeholder="必须保持，多个条目用逗号或换行分隔" />
+                    <TextArea rows={2} value={characterDraft.forbidden_traits} onChange={(event) => handleDraftChange('forbidden_traits', event.target.value)} placeholder="禁止特征，多个条目用逗号或换行分隔" />
+                    <TextArea rows={2} value={characterDraft.prompt_hint} onChange={(event) => handleDraftChange('prompt_hint', event.target.value)} placeholder="给模型的附加提示" />
+                    <TextArea rows={2} value={characterDraft.llm_summary} onChange={(event) => handleDraftChange('llm_summary', event.target.value)} placeholder="角色摘要" />
+                    <TextArea rows={3} value={characterDraft.image_prompt_base} onChange={(event) => handleDraftChange('image_prompt_base', event.target.value)} placeholder="图片生成基础提示词" />
+                    <TextArea rows={3} value={characterDraft.video_prompt_base} onChange={(event) => handleDraftChange('video_prompt_base', event.target.value)} placeholder="视频生成基础提示词" />
+                    <TextArea rows={2} value={characterDraft.negative_prompt} onChange={(event) => handleDraftChange('negative_prompt', event.target.value)} placeholder="负向提示词" />
+                  </Space>
+                </Card>
               </Space>
-            </Card>
-          ) : null}
+            </Col>
+
+            <Col xs={24} xl={10}>
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Card size="small" title="当前状态" style={{ borderRadius: 16, background: '#fafcff' }}>
+                  <Descriptions column={1} size="small" colon={false}>
+                    <Descriptions.Item label="模式">{isEditMode ? '编辑已保存角色' : '新建角色档案'}</Descriptions.Item>
+                    <Descriptions.Item label="标签数量">{selectedTagCount} 个</Descriptions.Item>
+                    <Descriptions.Item label="参考图">{referenceImage ? '已上传' : '未上传'}</Descriptions.Item>
+                    <Descriptions.Item label="角色图">{characterImage?.url ? '已生成或已绑定' : '未生成'}</Descriptions.Item>
+                    <Descriptions.Item label="音色">{characterDraft.voice_type.trim() || '未指定，保存后走默认音色'}</Descriptions.Item>
+                  </Descriptions>
+                </Card>
+
+                <Card
+                  size="small"
+                  title="角色语音绑定"
+                  style={{ borderRadius: 16, background: '#f7fbff' }}
+                  extra={<Tag color="blue">Doubao TTS</Tag>}
+                >
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Text type="secondary">在这里为角色设置常用声线，后续对白会优先使用这组配置。</Text>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={8} xl={24}>
+                        <Input value={characterDraft.voice_provider} onChange={(event) => handleDraftChange('voice_provider', event.target.value)} placeholder="语音服务" />
+                      </Col>
+                      <Col xs={24} md={16} xl={24}>
+                        <Select
+                          showSearch
+                          allowClear
+                          loading={voiceCatalogLoading}
+                          value={characterDraft.voice_type || undefined}
+                          placeholder="选择音色"
+                          optionFilterProp="label"
+                          options={voiceOptions}
+                          onChange={(value, option) => {
+                            const selectedValue = String(value || '')
+                            handleDraftChange('voice_type', selectedValue)
+                            const selectedItem = (option as { item?: DoubaoVoiceCatalogItem } | undefined)?.item
+                            if (selectedItem && !characterDraft.voice_name.trim()) {
+                              handleDraftChange('voice_name', selectedItem.voice_name)
+                            }
+                          }}
+                        />
+                      </Col>
+                    </Row>
+                    <Input value={characterDraft.voice_name} onChange={(event) => handleDraftChange('voice_name', event.target.value)} placeholder="音色备注名（可选）" />
+                    <Input
+                      value={characterDraft.voice_type}
+                      onChange={(event) => handleDraftChange('voice_type', event.target.value)}
+                      placeholder="也可以手动输入音色 ID"
+                    />
+                    {selectedVoiceMeta ? (
+                      <Alert
+                        type={selectedVoiceMeta.metadata_warning ? 'warning' : 'info'}
+                        showIcon
+                        message={`当前音色：${selectedVoiceMeta.voice_name}`}
+                        description={`${selectedVoiceMeta.language}｜${selectedVoiceMeta.gender}｜${selectedVoiceMeta.style}｜${selectedVoiceMeta.scenario}${
+                          selectedVoiceMeta.metadata_warning ? `｜${selectedVoiceMeta.metadata_warning}` : ''
+                        }`}
+                      />
+                    ) : null}
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={8} xl={24}>
+                        <Input value={characterDraft.voice_emotion} onChange={(event) => handleDraftChange('voice_emotion', event.target.value)} placeholder="情绪风格，例如 happy / serious" />
+                      </Col>
+                      <Col xs={24} md={8} xl={24}>
+                        <Input value={characterDraft.voice_language} onChange={(event) => handleDraftChange('voice_language', event.target.value)} placeholder="语言，例如 zh" />
+                      </Col>
+                      <Col xs={24}>
+                        <Text type="secondary">留空时会自动使用默认音色。建议先试听，再保存到角色档案。</Text>
+                      </Col>
+                    </Row>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={24} md={8}>
+                        <Input value={characterDraft.voice_speed_ratio} onChange={(event) => handleDraftChange('voice_speed_ratio', event.target.value)} placeholder="语速，默认 1.0" />
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <Input value={characterDraft.voice_pitch_ratio} onChange={(event) => handleDraftChange('voice_pitch_ratio', event.target.value)} placeholder="音高，默认 1.0" />
+                      </Col>
+                      <Col xs={24} md={8}>
+                        <Input value={characterDraft.voice_volume_ratio} onChange={(event) => handleDraftChange('voice_volume_ratio', event.target.value)} placeholder="音量，默认 1.0" />
+                      </Col>
+                    </Row>
+                    <Card
+                      size="small"
+                      title="单句试音"
+                      style={{ borderRadius: 12, background: '#fff' }}
+                      extra={voicePreviewProvider ? <Tag color="cyan">{voicePreviewProvider}</Tag> : null}
+                    >
+                      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                        <TextArea
+                          rows={3}
+                          value={voicePreviewText}
+                          onChange={(event) => setVoicePreviewText(event.target.value)}
+                          placeholder="输入一段角色试听文本"
+                        />
+                        <Space wrap>
+                          <Button
+                            type="primary"
+                            icon={<PlayCircleOutlined />}
+                            loading={voicePreviewGenerating}
+                            onClick={handleGenerateVoicePreview}
+                          >
+                            生成试听
+                          </Button>
+                          <Text type="secondary">建议用角色常说的话来验证音色、语速和情绪是否贴合。</Text>
+                        </Space>
+                        {voicePreviewUrl ? (
+                          <audio
+                            key={voicePreviewUrl}
+                            controls
+                            src={voicePreviewUrl}
+                            style={{ width: '100%' }}
+                          />
+                        ) : (
+                          <Text type="secondary">生成后会在这里直接播放试听音频。</Text>
+                        )}
+                      </Space>
+                    </Card>
+                  </Space>
+                </Card>
+
+                <Card
+                  size="small"
+                  title="参考图上传"
+                  style={{ borderRadius: 16, background: '#fafcff' }}
+                  extra={referenceImage ? <Tag color="green">已上传</Tag> : <Tag>待上传</Tag>}
+                >
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Space wrap>
+                      <Upload accept="image/*" maxCount={1} customRequest={handleReferenceUpload} onRemove={handleReferenceRemove} fileList={referenceFileList}>
+                        <Button icon={<UploadOutlined />} loading={referenceUploading}>
+                          上传角色参考图
+                        </Button>
+                      </Upload>
+                      <Button loading={analyzingReference} onClick={handleAnalyzeReferenceImage}>
+                        分析图片并补全字段
+                      </Button>
+                    </Space>
+                    {referenceImage ? (
+                      <Image src={resolveAssetUrl(referenceImage.url)} alt="角色参考图" style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }} />
+                    ) : (
+                      <Text type="secondary">如果你已经有角色形象，可以上传后直接保存，也可以先做图片分析，让系统按角色档案字段补充基础信息。</Text>
+                    )}
+                  </Space>
+                </Card>
+
+                <Card
+                  size="small"
+                  title="角色原型图生成与微调"
+                  style={{ borderRadius: 16, background: '#fffdf7' }}
+                  extra={characterImage?.url ? <Tag color="gold">已有角色图</Tag> : <Tag>待生成</Tag>}
+                >
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <TextArea
+                      rows={3}
+                      value={refinePrompt}
+                      onChange={(event) => setRefinePrompt(event.target.value)}
+                      placeholder="可填写你的微调要求，例如：更冷峻、服装更利落、表情更克制"
+                    />
+                    <Button type="default" loading={prototypeGenerating} onClick={handleGenerateCharacterImage}>
+                      {characterImage?.url ? '基于当前图片重新生成 / 微调' : '生成角色原型图'}
+                    </Button>
+                    {characterImage?.url ? (
+                      <>
+                        <Image src={resolveAssetUrl(characterImage.url)} alt="角色原型图" style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }} />
+                        {characterImagePrompt ? <Alert type="success" showIcon message="本次角色图描述" description={characterImagePrompt} /> : null}
+                      </>
+                    ) : (
+                      <Text type="secondary">没有上传图片也可以直接生成角色原型图，生成后可继续微调，直到满意为止。</Text>
+                    )}
+                  </Space>
+                </Card>
+              </Space>
+            </Col>
+          </Row>
 
           <Space wrap>
             <Button

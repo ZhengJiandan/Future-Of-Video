@@ -31,7 +31,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时执行
-    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(
+        "Starting %s v%s (pipeline_runtime_mode=%s render_dispatch=%s)",
+        settings.APP_NAME,
+        settings.APP_VERSION,
+        settings.PIPELINE_RUNTIME_MODE,
+        settings.pipeline_render_dispatch_mode,
+    )
     
     # 初始化数据库
     try:
@@ -46,7 +52,7 @@ async def lifespan(app: FastAPI):
         try:
             await pipeline_workflow_service.start_render_task(task_id, mark_failed_on_enqueue_error=False)
         except Exception as exc:
-            logger.error("Failed to re-enqueue recovered render task %s: %s", task_id, exc, exc_info=True)
+            logger.error("Failed to restart recovered render task %s: %s", task_id, exc, exc_info=True)
     if (
         recovered.get("requeued")
         or recovered.get("reset_processing")
@@ -83,7 +89,7 @@ async def lifespan(app: FastAPI):
 # 创建FastAPI应用
 app = FastAPI(
     title=settings.APP_NAME,
-    description="为腾讯游戏《三角洲行动》打造的专属视频生成系统",
+    description="future of video，面向完整创作链路的 AI 视频生成系统。",
     version=settings.APP_VERSION,
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None,
@@ -160,6 +166,8 @@ async def health_check():
         "app_name": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "environment": settings.ENV,
+        "pipeline_runtime_mode": settings.PIPELINE_RUNTIME_MODE,
+        "pipeline_render_dispatch_mode": settings.pipeline_render_dispatch_mode,
         "timestamp": time.time()
     }
 
@@ -171,9 +179,11 @@ async def root():
     return {
         "app_name": settings.APP_NAME,
         "version": settings.APP_VERSION,
-        "description": "为腾讯游戏《三角洲行动》打造的专属视频生成系统",
+        "description": "future of video，面向完整创作链路的 AI 视频生成系统。",
         "docs_url": "/docs",
-        "health_check": "/health"
+        "health_check": "/health",
+        "pipeline_runtime_mode": settings.PIPELINE_RUNTIME_MODE,
+        "pipeline_render_dispatch_mode": settings.pipeline_render_dispatch_mode,
     }
 
 

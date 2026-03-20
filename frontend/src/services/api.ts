@@ -407,6 +407,79 @@ export interface SceneMutationResponse extends SceneProfile {
   message: string
 }
 
+export interface CharacterImageAnalysisFields {
+  name: string
+  category: string
+  role: string
+  archetype: string
+  age_range: string
+  gender_presentation: string
+  description: string
+  appearance: string
+  personality: string
+  core_appearance: string
+  hair: string
+  face_features: string
+  body_shape: string
+  outfit: string
+  gear: string
+  color_palette: string
+  visual_do_not_change: string
+  speaking_style: string
+  common_actions: string
+  emotion_baseline: string
+  forbidden_behaviors: string
+  prompt_hint: string
+  llm_summary: string
+  image_prompt_base: string
+  video_prompt_base: string
+  negative_prompt: string
+  tags: string[]
+  must_keep: string[]
+  forbidden_traits: string[]
+  aliases: string[]
+}
+
+export interface SceneImageAnalysisFields {
+  name: string
+  category: string
+  scene_type: string
+  description: string
+  story_function: string
+  location: string
+  scene_rules: string
+  time_setting: string
+  weather: string
+  lighting: string
+  atmosphere: string
+  architecture_style: string
+  color_palette: string
+  prompt_hint: string
+  llm_summary: string
+  image_prompt_base: string
+  video_prompt_base: string
+  negative_prompt: string
+  tags: string[]
+  allowed_characters: string[]
+  props_must_have: string[]
+  props_forbidden: string[]
+  must_have_elements: string[]
+  forbidden_elements: string[]
+  camera_preferences: string[]
+}
+
+export interface CharacterImageAnalysisResponse {
+  success: boolean
+  message: string
+  fields: CharacterImageAnalysisFields
+}
+
+export interface SceneImageAnalysisResponse {
+  success: boolean
+  message: string
+  fields: SceneImageAnalysisFields
+}
+
 export interface CharacterThreeViewResponse {
   success: boolean
   message: string
@@ -641,6 +714,11 @@ export const scriptPipelineApi = {
     )
   },
 
+  analyzeCharacterReference: (data: {
+    reference_image_url: string
+    reference_image_original_name?: string
+  }) => apiClient.post<CharacterImageAnalysisResponse>('/pipeline/characters/analyze-reference', data),
+
   createCharacter: (data: {
     name: string
     category?: string
@@ -745,6 +823,11 @@ export const scriptPipelineApi = {
       },
     )
   },
+
+  analyzeSceneReference: (data: {
+    reference_image_url: string
+    reference_image_original_name?: string
+  }) => apiClient.post<SceneImageAnalysisResponse>('/pipeline/scenes/analyze-reference', data),
 
   createScene: (data: {
     name: string

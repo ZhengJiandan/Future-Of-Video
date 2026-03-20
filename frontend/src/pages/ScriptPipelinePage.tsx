@@ -65,10 +65,10 @@ const { TextArea } = Input
 
 const stepItems = [
   { title: '输入需求', subtitle: '创意、角色、参考图', icon: <FileTextOutlined /> },
-  { title: '审核剧本', subtitle: '查看并编辑完整剧本', icon: <EditOutlined /> },
-  { title: '审核片段', subtitle: '确认拆分和 Prompt', icon: <CheckCircleOutlined /> },
+  { title: '确认剧本', subtitle: '查看概要并继续拆分', icon: <EditOutlined /> },
+  { title: '审核片段', subtitle: '确认拆分和画面描述', icon: <CheckCircleOutlined /> },
   { title: '审核首尾帧', subtitle: '确认关键帧连续性', icon: <FileImageOutlined /> },
-  { title: '生成视频', subtitle: '调用 provider 并轮询', icon: <VideoCameraOutlined /> },
+  { title: '生成视频', subtitle: '开始渲染并查看进度', icon: <VideoCameraOutlined /> },
   { title: '查看结果', subtitle: '成片与片段结果', icon: <EyeOutlined /> },
 ]
 
@@ -1324,7 +1324,7 @@ export const ScriptPipelinePage: React.FC = () => {
       setRenderTaskId(response.data.task_id)
       setRenderStatus(null)
       setCurrentStep(4)
-      message.success('渲染任务已重新提交到队列')
+      message.success(response.data.message || '渲染任务已重新启动')
     } catch (requestError: unknown) {
       message.error(extractApiErrorMessage(requestError, '重试渲染任务失败'))
     } finally {
@@ -1609,7 +1609,7 @@ export const ScriptPipelinePage: React.FC = () => {
     if (currentStep === 1) {
       return (
         <Space direction="vertical" size={20} style={{ width: '100%' }}>
-          <Card title="完整剧本审核">
+          <Card title="剧本确认">
             {scriptLoading ? (
               <div style={{ padding: '72px 0', textAlign: 'center' }}>
                 <Spin size="large" />
@@ -1656,7 +1656,7 @@ export const ScriptPipelinePage: React.FC = () => {
                         <Text>{characterResolution.message}</Text>
                         {characterResolution.needs_user_action ? (
                           <Space wrap>
-                            <Button size="small" onClick={() => navigate('/characters')}>
+                            <Button size="small" onClick={() => navigate('/characters/new')}>
                               去创建角色档案
                             </Button>
                             <Text type="secondary">如果继续生成，当前流程会缺少稳定角色模板，后续图像和视频一致性会更弱。</Text>
@@ -1670,8 +1670,8 @@ export const ScriptPipelinePage: React.FC = () => {
                 {temporaryCharacters.length ? (
                   <Card
                     size="small"
-                    title="AI 临时角色草稿"
-                    extra={<Text type="secondary">当前项目可直接使用，也可以保存为正式角色档案</Text>}
+                    title="自动生成角色建议"
+                    extra={<Text type="secondary">可直接用于本次创作，也可以保存到角色库</Text>}
                   >
                     <Space direction="vertical" size={12} style={{ width: '100%' }}>
                       {temporaryCharacters.map((profile) => (
@@ -1682,7 +1682,7 @@ export const ScriptPipelinePage: React.FC = () => {
                           title={
                             <Space wrap>
                               <Tag color="gold">{profile.name}</Tag>
-                              <Tag>临时角色</Tag>
+                              <Tag>建议角色</Tag>
                               {profile.role ? <Tag color="processing">{profile.role}</Tag> : null}
                             </Space>
                           }
@@ -1714,11 +1714,11 @@ export const ScriptPipelinePage: React.FC = () => {
                   </Card>
                 ) : null}
 
-                <TextArea
-                  rows={24}
-                  value={scriptDraft}
-                  onChange={(event) => setScriptDraft(event.target.value)}
-                  placeholder="生成后的完整剧本会展示在这里，您可以修改后再进入下一步。"
+                <Alert
+                  type="success"
+                  showIcon
+                  message="剧本内容已准备完成"
+                  description="当前剧本将直接用于下一步片段拆分。为避免页面信息过载，这里不再展示完整文本。"
                 />
               </Space>
             )}
@@ -1736,7 +1736,7 @@ export const ScriptPipelinePage: React.FC = () => {
                 disabled={!scriptDraft.trim()}
                 onClick={handleSplitScript}
               >
-                {isManualScriptMode ? '确认角色并拆分片段' : '通过剧本并拆分片段'}
+                {isManualScriptMode ? '确认角色并拆分片段' : '继续拆分片段'}
               </Button>
             </Space>
           </div>
@@ -1906,7 +1906,7 @@ export const ScriptPipelinePage: React.FC = () => {
                         rows={6}
                         value={segment.video_prompt}
                         onChange={(event) => handleSegmentChange(index, { video_prompt: event.target.value })}
-                        placeholder="视频 Prompt"
+                        placeholder="视频画面描述"
                       />
                       <Row gutter={[12, 12]}>
                         <Col xs={24} md={12}>
@@ -2103,7 +2103,7 @@ export const ScriptPipelinePage: React.FC = () => {
           <Card title="渲染参数">
             <Row gutter={[16, 16]}>
               <Col xs={24} md={8}>
-                <Text>视频 provider</Text>
+                <Text>视频引擎</Text>
                 <Select
                   style={{ width: '100%', marginTop: 8 }}
                   value={provider}
@@ -2111,7 +2111,7 @@ export const ScriptPipelinePage: React.FC = () => {
                   options={[
                     { value: 'auto', label: '自动选择' },
                     { value: 'doubao', label: '豆包 Seedance' },
-                    { value: 'local', label: '本地占位预览' },
+                    { value: 'local', label: '本地快速预览' },
                   ]}
                 />
               </Col>
@@ -2196,7 +2196,7 @@ export const ScriptPipelinePage: React.FC = () => {
                   </Space>
                 </Space>
                 <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  当前不会调用 provider 原生音频。开启后只会生成项目级外部音频规划，用于后续统一配音、音效和配乐混音。
+                  开启后会在视频完成后统一准备对白、音效和配乐，并在最终成片中合成输出。
                 </Paragraph>
               </Col>
             </Row>
@@ -2228,12 +2228,11 @@ export const ScriptPipelinePage: React.FC = () => {
                 <Space wrap>
                   <Tag color={statusColorMap[renderStatus.status] || 'default'}>{renderStatus.status}</Tag>
                   <Tag>{renderStatus.current_step}</Tag>
-                  <Tag>渲染器: {renderStatus.renderer || 'pending'}</Tag>
-                  <Tag>任务 ID: {renderStatus.task_id}</Tag>
+                  <Tag>任务编号: {renderStatus.task_id}</Tag>
                 </Space>
                 <Progress percent={renderStatus.progress} status={renderStatus.status === 'failed' ? 'exception' : undefined} />
                 <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  当前已启用严格模式。`auto` 或 `doubao` 只接受真实视频结果；只有显式选择 `local` 时才会生成本地预览。
+                  当前会优先输出正式视频结果；只有选择“本地快速预览”时，才会生成预览版画面。
                 </Paragraph>
                 <Alert
                   type="info"
@@ -2241,15 +2240,15 @@ export const ScriptPipelinePage: React.FC = () => {
                   message="音频策略"
                   description={
                     audioPlan?.summary ||
-                    '当前渲染链路只生成画面，provider 原生音频已关闭；如需声音，将走外部统一音频链路。'
+                    '当前会在视频完成后统一补充对白、音效和配乐。'
                   }
                 />
                 {renderStatus.fallback_used ? (
                   <Alert
                     type="warning"
                     showIcon
-                    message="本次任务发生了生成降级。"
-                    description={(renderStatus.warnings || []).join('；') || '请检查 provider 配置、账号权限和关键帧输入。'}
+                    message="本次任务已自动调整生成方式。"
+                    description={(renderStatus.warnings || []).join('；') || '请检查渲染设置、账号权限和关键帧输入。'}
                   />
                 ) : null}
                 {renderStatus.status === 'failed' && renderStatus.error ? (
@@ -2301,12 +2300,9 @@ export const ScriptPipelinePage: React.FC = () => {
             <Card title="音频规划">
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
                 <Space wrap>
-                  <Tag color="blue">{audioPlan.strategy || 'external_audio_pipeline'}</Tag>
-                  <Tag color={audioPlan.provider_audio_disabled ? 'red' : 'default'}>
-                    豆包原生音频: {audioPlan.provider_audio_disabled ? '关闭' : '开启'}
-                  </Tag>
+                  <Tag color="blue">统一音频</Tag>
                   <Tag color={audioPlan.requested_generate_audio === false ? 'default' : 'green'}>
-                    用户音频请求: {audioPlan.requested_generate_audio === false ? '关闭' : '开启'}
+                    音频生成: {audioPlan.requested_generate_audio === false ? '关闭' : '开启'}
                   </Tag>
                 </Space>
 
@@ -2415,7 +2411,6 @@ export const ScriptPipelinePage: React.FC = () => {
                       <Text>{clip.title}</Text>
                       <Tag>{clip.duration} 秒</Tag>
                       <Tag color={statusColorMap[clip.status] || 'default'}>{clip.status}</Tag>
-                      {clip.provider ? <Tag>{clip.provider}</Tag> : null}
                     </Space>
                   ),
                   children: (
@@ -2476,8 +2471,7 @@ export const ScriptPipelinePage: React.FC = () => {
             <PreviewAsset assetUrl={finalPreviewUrl} assetType={finalPreviewType} title={`${projectTitle} 最终合成`} />
             <Text type="secondary">合成文件：{renderStatus?.final_output?.asset_filename || '尚未生成'}</Text>
             <Text type="secondary">
-              输出模式：{renderStatus?.final_output?.output_mode === 'video' ? '真实视频合成' : '本地预览合成（仅 local 模式）'}
-              {renderStatus?.final_output?.provider ? ` | Provider: ${renderStatus.final_output.provider}` : ''}
+              输出类型：{renderStatus?.final_output?.output_mode === 'video' ? '正式成片' : '快速预览'}
             </Text>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <Button
@@ -2507,7 +2501,6 @@ export const ScriptPipelinePage: React.FC = () => {
                   <Space wrap>
                     <Tag color="processing">片段 {clip.clip_number}</Tag>
                     <Text>{clip.title}</Text>
-                    {clip.provider ? <Tag>{clip.provider}</Tag> : null}
                   </Space>
                 ),
                 children: (
@@ -2646,12 +2639,12 @@ export const ScriptPipelinePage: React.FC = () => {
 
           <Card
             size="small"
-            title={`正式角色档案 (${characterPrepareResult?.library_character_profiles?.length || 0})`}
+            title={`已保存角色 (${characterPrepareResult?.library_character_profiles?.length || 0})`}
             extra={
               <Text type="secondary">
                 {characterConfirmMode === 'generate_script'
-                  ? '勾选后作为正式角色约束进入剧本生成'
-                  : '勾选后作为正式角色约束进入后续拆片、首帧和视频生成'}
+                  ? '勾选后会参与本次剧本生成'
+                  : '勾选后会参与后续分段、关键帧和视频生成'}
               </Text>
             }
           >
@@ -2680,14 +2673,14 @@ export const ScriptPipelinePage: React.FC = () => {
                 </Space>
               </Checkbox.Group>
             ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未匹配到正式角色档案" />
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂未匹配到已保存角色" />
             )}
           </Card>
 
           <Card
             size="small"
-            title={`AI 临时角色草稿 (${characterPrepareResult?.temporary_character_profiles?.length || 0})`}
-            extra={<Text type="secondary">可直接用于本次生成，也可转存为正式档案</Text>}
+            title={`自动生成角色建议 (${characterPrepareResult?.temporary_character_profiles?.length || 0})`}
+            extra={<Text type="secondary">可直接用于本次创作，也可保存到角色库</Text>}
           >
             {characterPrepareResult?.temporary_character_profiles?.length ? (
               <Checkbox.Group
@@ -2716,7 +2709,7 @@ export const ScriptPipelinePage: React.FC = () => {
                           <Space wrap>
                             <Text strong>{profile.name}</Text>
                             {profile.role ? <Tag color="processing">{profile.role}</Tag> : null}
-                            <Tag color="gold">临时草稿</Tag>
+                            <Tag color="gold">建议角色</Tag>
                           </Space>
                         </Checkbox>
                         {profile.llm_summary ? <Text type="secondary">{profile.llm_summary}</Text> : null}
@@ -2727,7 +2720,7 @@ export const ScriptPipelinePage: React.FC = () => {
                 </Space>
               </Checkbox.Group>
             ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未生成临时角色草稿" />
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂未生成角色建议" />
             )}
           </Card>
 
@@ -2737,8 +2730,8 @@ export const ScriptPipelinePage: React.FC = () => {
             message="确认说明"
             description={
               characterConfirmMode === 'generate_script'
-                ? '你勾选的正式角色和临时角色会一起进入本次剧本生成。未勾选的角色不会参与生成。'
-                : '你勾选的正式角色和临时角色会作为后续拆片、首帧和视频生成时的角色约束。未勾选的角色不会参与后续流程。'
+                ? '你勾选的已保存角色和角色建议会一起进入本次剧本生成。未勾选的角色不会参与生成。'
+                : '你勾选的已保存角色和角色建议会进入后续分段、关键帧和视频生成。未勾选的角色不会参与后续流程。'
             }
           />
         </Space>
