@@ -58,6 +58,41 @@
       "gain": 0.64
     },
     {
+      "kind": "ambience",
+      "path": "ambience/interior_shop_fridge_hum_cc0.wav",
+      "label": "室内冰柜嗡鸣",
+      "tags": ["室内", "便利店", "商店", "冰柜", "电流", "fridge", "hum", "shop"],
+      "gain": 0.58
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/interior_shop_fridge_hum_alt_cc0.wav",
+      "label": "室内冰柜嗡鸣二",
+      "tags": ["室内", "便利店", "商店", "冰柜", "电流", "fridge", "hum", "shop", "alt"],
+      "gain": 0.58
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/interior_dark_tension_pulse_cc0.wav",
+      "label": "室内紧张脉冲底噪",
+      "tags": ["室内", "悬疑", "紧张", "暗场", "脉冲", "dark", "tension", "pulse"],
+      "gain": 0.6
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/interior_dark_tick_cc0.wav",
+      "label": "室内紧张滴答",
+      "tags": ["室内", "悬疑", "紧张", "滴答", "暗场", "dark", "tick", "clock"],
+      "gain": 0.58
+    },
+    {
+      "kind": "ambience",
+      "path": "ambience/interior_dark_swirl_cc0.wav",
+      "label": "室内暗流旋涌",
+      "tags": ["室内", "悬疑", "暗流", "压迫", "dark", "swirl", "tension"],
+      "gain": 0.62
+    },
+    {
       "kind": "music",
       "path": "music/space_graveyard_cc0.mp3",
       "label": "太空墓场氛围铺底",
@@ -77,6 +112,20 @@
       "path": "music/sad_contemplation_cc0.mp3",
       "label": "悲伤沉思铺底",
       "tags": ["悲伤", "沉思", "抒情", "低落", "sad", "contemplation"],
+      "gain": 0.56
+    },
+    {
+      "kind": "music",
+      "path": "music/sad_long_winter_cc0.mp3",
+      "label": "寒冬悲伤铺底",
+      "tags": ["悲伤", "寒冷", "孤独", "压抑", "winter", "sad", "melancholy"],
+      "gain": 0.54
+    },
+    {
+      "kind": "music",
+      "path": "music/tension_abandoned_castle_cc0.ogg",
+      "label": "废弃城堡紧张铺底",
+      "tags": ["紧张", "悬疑", "城堡", "废弃", "压迫", "castle", "tension", "abandoned"],
       "gain": 0.56
     }
   ]

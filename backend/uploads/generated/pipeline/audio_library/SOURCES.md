@@ -54,3 +54,38 @@
   Source: https://opengameart.org/content/contemplation
   Download: https://opengameart.org/sites/default/files/Contemplation.mp3
   License: CC0 / Public Domain
+
+- `ambience/interior_shop_fridge_hum_cc0.wav`
+  Source: https://opengameart.org/content/the-shop-free-sfx-wav
+  Download: https://opengameart.org/sites/default/files/legit_audio_-_the_shop_free_sfx_wav.zip
+  License: CC0 / Public Domain
+
+- `ambience/interior_shop_fridge_hum_alt_cc0.wav`
+  Source: https://opengameart.org/content/the-shop-free-sfx-wav
+  Download: https://opengameart.org/sites/default/files/legit_audio_-_the_shop_free_sfx_wav.zip
+  License: CC0 / Public Domain
+
+- `ambience/interior_dark_tension_pulse_cc0.wav`
+  Source: https://opengameart.org/content/dark-ambiences
+  Download: https://opengameart.org/sites/default/files/dark_ambiences.zip
+  License: CC0 / Public Domain
+
+- `ambience/interior_dark_tick_cc0.wav`
+  Source: https://opengameart.org/content/dark-ambiences
+  Download: https://opengameart.org/sites/default/files/dark_ambiences.zip
+  License: CC0 / Public Domain
+
+- `ambience/interior_dark_swirl_cc0.wav`
+  Source: https://opengameart.org/content/dark-ambiences
+  Download: https://opengameart.org/sites/default/files/dark_ambiences.zip
+  License: CC0 / Public Domain
+
+- `music/sad_long_winter_cc0.mp3`
+  Source: https://opengameart.org/content/long-winter
+  Download: https://opengameart.org/sites/default/files/Long%20Winter.mp3
+  License: CC0 / Public Domain
+
+- `music/tension_abandoned_castle_cc0.ogg`
+  Source: https://opengameart.org/content/within-the-abandoned-castle-v2
+  Download: https://opengameart.org/sites/default/files/within%20the%20abandoned%20castle%20V2.ogg
+  License: CC0 / Public Domain
