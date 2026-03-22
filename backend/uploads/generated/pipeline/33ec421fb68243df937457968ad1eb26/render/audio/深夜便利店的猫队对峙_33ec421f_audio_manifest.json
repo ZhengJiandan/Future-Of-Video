@@ -1,0 +1,441 @@
+{
+  "project_title": "深夜便利店的猫队对峙",
+  "strategy": "external_audio_pipeline",
+  "status": "completed",
+  "duration": 15.125,
+  "sample_rate": 48000,
+  "channels": 2,
+  "providers": {
+    "dialogue": "mock-silent",
+    "sfx": "mock-silent",
+    "ambience": "mock-silent",
+    "music": "mock-silent"
+  },
+  "segments": [
+    {
+      "segment_number": 1,
+      "title": "狸花七深夜潜入废弃便利店",
+      "start_time": 0.0,
+      "duration": 3.0,
+      "cues": [
+        {
+          "kind": "sfx",
+          "segment_number": 1,
+          "start_time": 0.0,
+          "duration": 0.25,
+          "label": "狸花七四肢放低贴地潜行，每一步轻缓落地，尾巴绷紧，耳朵转动嗅探周围动静",
+          "provider": "mock-silent",
+          "prompt": "狸花七四肢放低贴地潜行，每一步轻缓落地，尾巴绷紧，耳朵转动嗅探周围动静",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 1,
+          "start_time": 0.55,
+          "duration": 0.25,
+          "label": "药炉",
+          "provider": "mock-silent",
+          "prompt": "药炉",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 1,
+          "start_time": 1.1,
+          "duration": 0.25,
+          "label": "银针卷",
+          "provider": "mock-silent",
+          "prompt": "银针卷",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 1,
+          "start_time": 1.65,
+          "duration": 0.25,
+          "label": "竹帘",
+          "provider": "mock-silent",
+          "prompt": "竹帘",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 1,
+          "start_time": 2.2,
+          "duration": 0.25,
+          "label": "石桌",
+          "provider": "mock-silent",
+          "prompt": "石桌",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 1,
+          "start_time": 2.75,
+          "duration": 0.25,
+          "label": "桌边近景",
+          "provider": "mock-silent",
+          "prompt": "桌边近景",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "ambience",
+          "segment_number": 1,
+          "start_time": 0.0,
+          "duration": 3.0,
+          "label": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散",
+          "provider": "mock-silent",
+          "prompt": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "music",
+          "segment_number": 1,
+          "start_time": 0.0,
+          "duration": 3.0,
+          "label": "安静、克制、危险暂歇但疑云未散；锚定狸花七的角色外形，突出昏暗悬疑的便利店氛围，表现狸花七的机警；主角存在感要稳定，不要被音效盖住；新角色登场时配乐先让位给声线辨识",
+          "provider": "mock-silent",
+          "prompt": "安静、克制、危险暂歇但疑云未散；锚定狸花七的角色外形，突出昏暗悬疑的便利店氛围，表现狸花七的机警；主角存在感要稳定，不要被音效盖住；新角色登场时配乐先让位给声线辨识",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        }
+      ],
+      "layer_assets": [
+        {
+          "kind": "dialogue",
+          "segment_number": 1,
+          "provider": "mock-silent",
+          "duration": 3.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_01/dialogue.wav",
+          "prompt": "狸花七｜语速快，有街头感，偶尔带调侃｜平时松弛，发现线索后眼神瞬间收紧｜zh_male_silang_mars_bigtts"
+        },
+        {
+          "kind": "ambience",
+          "segment_number": 1,
+          "provider": "mock-silent",
+          "duration": 3.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_01/ambience.wav",
+          "prompt": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散"
+        },
+        {
+          "kind": "music",
+          "segment_number": 1,
+          "provider": "mock-silent",
+          "duration": 3.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_01/music.wav",
+          "prompt": "安静、克制、危险暂歇但疑云未散；锚定狸花七的角色外形，突出昏暗悬疑的便利店氛围，表现狸花七的机警；主角存在感要稳定，不要被音效盖住；新角色登场时配乐先让位给声线辨识"
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 1,
+          "provider": "mock-silent",
+          "duration": 3.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_01/sfx.wav",
+          "prompt": "狸花七四肢放低贴地潜行，每一步轻缓落地，尾巴绷紧，耳朵转动嗅探周围动静；药炉；银针卷；竹帘；石桌；桌边近景"
+        }
+      ]
+    },
+    {
+      "segment_number": 2,
+      "title": "玄胡椒转身棉花扑出拦截",
+      "start_time": 3.0,
+      "duration": 4.0,
+      "cues": [
+        {
+          "kind": "sfx",
+          "segment_number": 2,
+          "start_time": 0.0,
+          "duration": 0.333,
+          "label": "玄胡椒听到脚步声猛地转身，四肢发力落地带动夜行披片晃动",
+          "provider": "mock-silent",
+          "prompt": "玄胡椒听到脚步声猛地转身，四肢发力落地带动夜行披片晃动",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 2,
+          "start_time": 0.733,
+          "duration": 0.333,
+          "label": "棉花蹲伏蓄力后猛地发力扑向店中央，浅青围巾随动作甩动",
+          "provider": "mock-silent",
+          "prompt": "棉花蹲伏蓄力后猛地发力扑向店中央，浅青围巾随动作甩动",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 2,
+          "start_time": 1.467,
+          "duration": 0.333,
+          "label": "药炉",
+          "provider": "mock-silent",
+          "prompt": "药炉",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 2,
+          "start_time": 2.2,
+          "duration": 0.333,
+          "label": "银针卷",
+          "provider": "mock-silent",
+          "prompt": "银针卷",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 2,
+          "start_time": 2.933,
+          "duration": 0.333,
+          "label": "竹帘",
+          "provider": "mock-silent",
+          "prompt": "竹帘",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 2,
+          "start_time": 3.667,
+          "duration": 0.333,
+          "label": "石桌",
+          "provider": "mock-silent",
+          "prompt": "石桌",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "ambience",
+          "segment_number": 2,
+          "start_time": 0.0,
+          "duration": 4.0,
+          "label": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散",
+          "provider": "mock-silent",
+          "prompt": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "music",
+          "segment_number": 2,
+          "start_time": 0.0,
+          "duration": 4.0,
+          "label": "安静、克制、危险暂歇但疑云未散；锚定玄胡椒和棉花的角色外形，突出动作爆发力，渲染逐步升级的紧张感；主角存在感要稳定，不要被音效盖住；新角色登场时配乐先让位给声线辨识",
+          "provider": "mock-silent",
+          "prompt": "安静、克制、危险暂歇但疑云未散；锚定玄胡椒和棉花的角色外形，突出动作爆发力，渲染逐步升级的紧张感；主角存在感要稳定，不要被音效盖住；新角色登场时配乐先让位给声线辨识",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        }
+      ],
+      "layer_assets": [
+        {
+          "kind": "dialogue",
+          "segment_number": 2,
+          "provider": "mock-silent",
+          "duration": 4.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_02/dialogue.wav",
+          "prompt": "棉花｜柔和缓慢，安抚式表达｜常态平静，危机时专注坚定｜zh_male_jieshuonansheng_mars_bigtts；玄胡椒｜低声、短句、明确指令｜常态冷静，警戒时目光更锐利｜zh_female_shaoergushi_mars_bigtts"
+        },
+        {
+          "kind": "ambience",
+          "segment_number": 2,
+          "provider": "mock-silent",
+          "duration": 4.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_02/ambience.wav",
+          "prompt": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散"
+        },
+        {
+          "kind": "music",
+          "segment_number": 2,
+          "provider": "mock-silent",
+          "duration": 4.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_02/music.wav",
+          "prompt": "安静、克制、危险暂歇但疑云未散；锚定玄胡椒和棉花的角色外形，突出动作爆发力，渲染逐步升级的紧张感；主角存在感要稳定，不要被音效盖住；新角色登场时配乐先让位给声线辨识"
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 2,
+          "provider": "mock-silent",
+          "duration": 4.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_02/sfx.wav",
+          "prompt": "玄胡椒听到脚步声猛地转身，四肢发力落地带动夜行披片晃动；棉花蹲伏蓄力后猛地发力扑向店中央，浅青围巾随动作甩动；药炉；银针卷；竹帘；石桌"
+        }
+      ]
+    },
+    {
+      "segment_number": 3,
+      "title": "打斗戛然而止全员警觉望门外",
+      "start_time": 7.0,
+      "duration": 5.0,
+      "cues": [
+        {
+          "kind": "sfx",
+          "segment_number": 3,
+          "start_time": 0.0,
+          "duration": 0.417,
+          "label": "三只猫快速交错碰撞，展开短促干净的对峙打斗",
+          "provider": "mock-silent",
+          "prompt": "三只猫快速交错碰撞，展开短促干净的对峙打斗",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 3,
+          "start_time": 0.917,
+          "duration": 0.417,
+          "label": "打斗突然停止，三只猫同步转头望向镜头外的店门口，浑身紧绷保持戒备",
+          "provider": "mock-silent",
+          "prompt": "打斗突然停止，三只猫同步转头望向镜头外的店门口，浑身紧绷保持戒备",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 3,
+          "start_time": 1.833,
+          "duration": 0.417,
+          "label": "药炉",
+          "provider": "mock-silent",
+          "prompt": "药炉",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 3,
+          "start_time": 2.75,
+          "duration": 0.417,
+          "label": "银针卷",
+          "provider": "mock-silent",
+          "prompt": "银针卷",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 3,
+          "start_time": 3.667,
+          "duration": 0.417,
+          "label": "竹帘",
+          "provider": "mock-silent",
+          "prompt": "竹帘",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 3,
+          "start_time": 4.583,
+          "duration": 0.417,
+          "label": "石桌",
+          "provider": "mock-silent",
+          "prompt": "石桌",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "ambience",
+          "segment_number": 3,
+          "start_time": 0.0,
+          "duration": 5.0,
+          "label": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散",
+          "provider": "mock-silent",
+          "prompt": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        },
+        {
+          "kind": "music",
+          "segment_number": 3,
+          "start_time": 0.0,
+          "duration": 5.0,
+          "label": "安静、克制、危险暂歇但疑云未散；突出打斗的干净利落和戛然而止的凝固紧张感，利用昏暗光影强化悬疑氛围；主角存在感要稳定，不要被音效盖住",
+          "provider": "mock-silent",
+          "prompt": "安静、克制、危险暂歇但疑云未散；突出打斗的干净利落和戛然而止的凝固紧张感，利用昏暗光影强化悬疑氛围；主角存在感要稳定，不要被音效盖住",
+          "text": "",
+          "character_name": "",
+          "voice_profile": {}
+        }
+      ],
+      "layer_assets": [
+        {
+          "kind": "dialogue",
+          "segment_number": 3,
+          "provider": "mock-silent",
+          "duration": 5.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_03/dialogue.wav",
+          "prompt": "棉花｜柔和缓慢，安抚式表达｜常态平静，危机时专注坚定｜zh_male_jieshuonansheng_mars_bigtts；狸花七｜语速快，有街头感，偶尔带调侃｜平时松弛，发现线索后眼神瞬间收紧｜zh_male_silang_mars_bigtts；玄胡椒｜低声、短句、明确指令｜常态冷静，警戒时目光更锐利｜zh_female_shaoergushi_mars_bigtts"
+        },
+        {
+          "kind": "ambience",
+          "segment_number": 3,
+          "provider": "mock-silent",
+          "duration": 5.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_03/ambience.wav",
+          "prompt": "雨后药铺后院；城南药铺后院；安静、克制、危险暂歇但疑云未散"
+        },
+        {
+          "kind": "music",
+          "segment_number": 3,
+          "provider": "mock-silent",
+          "duration": 5.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_03/music.wav",
+          "prompt": "安静、克制、危险暂歇但疑云未散；突出打斗的干净利落和戛然而止的凝固紧张感，利用昏暗光影强化悬疑氛围；主角存在感要稳定，不要被音效盖住"
+        },
+        {
+          "kind": "sfx",
+          "segment_number": 3,
+          "provider": "mock-silent",
+          "duration": 5.0,
+          "path": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/segments/segment_03/sfx.wav",
+          "prompt": "三只猫快速交错碰撞，展开短促干净的对峙打斗；打斗突然停止，三只猫同步转头望向镜头外的店门口，浑身紧绷保持戒备；药炉；银针卷；竹帘；石桌"
+        }
+      ]
+    }
+  ],
+  "layer_outputs": {
+    "dialogue": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/layers/深夜便利店的猫队对峙_33ec421f_dialogue.wav",
+    "ambience": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/layers/深夜便利店的猫队对峙_33ec421f_ambience.wav",
+    "music": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/layers/深夜便利店的猫队对峙_33ec421f_music.wav",
+    "sfx": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/layers/深夜便利店的猫队对峙_33ec421f_sfx.wav"
+  },
+  "master_audio": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/audio/深夜便利店的猫队对峙_33ec421f_master.m4a",
+  "muxed_video": "uploads/generated/pipeline/33ec421fb68243df937457968ad1eb26/render/深夜便利店的猫队对峙_33ec421f_with_audio.mp4",
+  "warnings": [
+    "对白 provider `doubao-tts` 缺少 DOUBAO_TTS_APP_ID / DOUBAO_TTS_ACCESS_TOKEN，已回退到 mock-silent。"
+  ]
+}
