@@ -1,0 +1,47 @@
+name: Bug Report
+description: Report a reproducible bug
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the problem clearly.
+      placeholder: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps To Reproduce
+      description: Provide minimal reproduction steps.
+      placeholder: |
+        1. Start backend with ...
+        2. Open ...
+        3. Click ...
+        4. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      placeholder: |
+        OS:
+        Python:
+        Node.js:
+        Database:
+        Runtime mode: minimal / full
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs Or Screenshots
+      description: Remove secrets before pasting.
