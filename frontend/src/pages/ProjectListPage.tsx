@@ -15,6 +15,7 @@ const formatTime = (value?: string) => {
 }
 
 export const ProjectListPage: React.FC = () => {
+  const [messageApi, contextHolder] = message.useMessage()
   const navigate = useNavigate()
   const setCurrentProjectId = useProjectStore((state) => state.setCurrentProjectId)
   const clearCurrentProjectId = useProjectStore((state) => state.clearCurrentProjectId)
@@ -31,7 +32,7 @@ export const ProjectListPage: React.FC = () => {
       const response = await scriptPipelineApi.listProjects()
       setItems(response.data.items || [])
     } catch {
-      message.error('项目列表加载失败')
+      messageApi.error('项目列表加载失败')
     } finally {
       setLoading(false)
     }
@@ -54,11 +55,11 @@ export const ProjectListPage: React.FC = () => {
       setCurrentProjectId(projectId)
       setCreateModalOpen(false)
       setNewProjectTitle('未命名项目')
-      message.success('项目已创建')
+      messageApi.success('项目已创建')
       navigate('/script-pipeline')
     } catch (requestError: unknown) {
       const responseError = requestError as { response?: { data?: { detail?: string } } }
-      message.error(responseError.response?.data?.detail || '项目创建失败')
+      messageApi.error(responseError.response?.data?.detail || '项目创建失败')
     } finally {
       setCreating(false)
     }
@@ -76,11 +77,11 @@ export const ProjectListPage: React.FC = () => {
       if (useProjectStore.getState().currentProjectId === projectId) {
         clearCurrentProjectId()
       }
-      message.success('项目已删除')
+      messageApi.success('项目已删除')
       await loadProjects()
     } catch (requestError: unknown) {
       const responseError = requestError as { response?: { data?: { detail?: string } } }
-      message.error(responseError.response?.data?.detail || '项目删除失败')
+      messageApi.error(responseError.response?.data?.detail || '项目删除失败')
     } finally {
       setDeleteLoadingId(null)
     }
@@ -88,12 +89,13 @@ export const ProjectListPage: React.FC = () => {
 
   return (
     <Space direction="vertical" size={20} style={{ width: '100%' }}>
+      {contextHolder}
       <Card
         style={{
           background: 'linear-gradient(135deg, #12233d 0%, #29588d 52%, #d7af58 100%)',
           border: 'none',
         }}
-        bodyStyle={{ padding: 28 }}
+        styles={{ body: { padding: 28 } }}
       >
         <Space direction="vertical" size={10} style={{ width: '100%' }}>
           <Title level={2} style={{ margin: 0, color: '#fff' }}>

@@ -8,7 +8,7 @@ COMMAND="${1:-}"
 case "$COMMAND" in
   backend)
     cd "$ROOT_DIR/backend"
-    exec uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
+    exec uvicorn app.main:app --reload --host 0.0.0.0 --port "${PORT:-8080}"
     ;;
   worker)
     cd "$ROOT_DIR/backend"

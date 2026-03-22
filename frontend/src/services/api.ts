@@ -86,42 +86,6 @@ export interface ReferenceImageAsset {
   source: string
 }
 
-export interface CharacterVoiceProfile {
-  provider?: string
-  voice_type?: string
-  voice_name?: string
-  emotion?: string
-  language?: string
-  speed_ratio?: number
-  pitch_ratio?: number
-  volume_ratio?: number
-}
-
-export interface DoubaoVoiceCatalogItem {
-  voice_type: string
-  voice_name: string
-  scenario: string
-  language: string
-  gender: string
-  style: string
-  provider: string
-  metadata_warning?: string
-}
-
-export interface DoubaoVoiceCatalogResponse {
-  success: boolean
-  provider: string
-  catalog_version: string
-  source?: {
-    primary_name?: string
-    primary_url?: string
-    secondary_name?: string
-    secondary_url?: string
-    note?: string
-  }
-  items: DoubaoVoiceCatalogItem[]
-}
-
 export interface CharacterProfile {
   id: string
   name: string
@@ -144,7 +108,7 @@ export interface CharacterProfile {
   speaking_style: string
   common_actions: string
   emotion_baseline: string
-  voice_profile?: CharacterVoiceProfile
+  voice_description: string
   forbidden_behaviors: string
   prompt_hint: string
   llm_summary: string
@@ -504,18 +468,6 @@ export interface CharacterPrototypeResponse {
   notes: string
 }
 
-export interface CharacterVoicePreviewResponse {
-  success: boolean
-  message: string
-  asset_url: string
-  asset_type: string
-  asset_filename: string
-  provider: string
-  text: string
-  character_name: string
-  voice_profile?: CharacterVoiceProfile
-}
-
 export interface ScenePrototypeResponse {
   success: boolean
   message: string
@@ -557,8 +509,8 @@ export interface RenderAudioPlanVoice {
   role?: string
   speaking_style?: string
   emotion_baseline?: string
+  voice_description?: string
   voice_direction?: string
-  voice_profile?: CharacterVoiceProfile
 }
 
 export interface RenderAudioPlanAmbience {
@@ -620,6 +572,9 @@ export interface RenderStatusResponse {
   }
   fallback_used?: boolean
   warnings?: string[]
+  awaiting_confirmation?: boolean
+  last_completed_clip_number?: number | null
+  next_clip_number?: number | null
   render_config?: {
     provider?: string
     resolution?: string
@@ -632,6 +587,7 @@ export interface RenderStatusResponse {
     audio_strategy?: string
     audio_plan?: RenderAudioPlan | null
     return_last_frame?: boolean
+    auto_continue_segments?: boolean
     service_tier?: string
     seed?: number | null
   }
@@ -643,7 +599,8 @@ export interface RenderStatusResponse {
 export const scriptPipelineApi = {
   register: (data: { email: string; password: string; name: string }) =>
     apiClient.post<AuthResponse>('/auth/register', data),
-  login: (data: { email: string; password: string }) => apiClient.post<AuthResponse>('/auth/login', data),
+  login: (data: { account?: string; email?: string; password: string }) =>
+    apiClient.post<AuthResponse>('/auth/login', data),
   me: () => apiClient.get<MeResponse>('/auth/me'),
 
   getCurrentProject: () => apiClient.get<CurrentProjectResponse>('/projects/current'),
@@ -695,7 +652,6 @@ export const scriptPipelineApi = {
   },
 
   listCharacters: () => apiClient.get<CharacterListResponse>('/pipeline/characters'),
-  listDoubaoTtsVoices: () => apiClient.get<DoubaoVoiceCatalogResponse>('/pipeline/tts/voices'),
   getCharacter: (characterId: string) => apiClient.get<CharacterDetailResponse>(`/pipeline/characters/${characterId}`),
   listScenes: () => apiClient.get<SceneListResponse>('/pipeline/scenes'),
   getScene: (sceneId: string) => apiClient.get<SceneDetailResponse>(`/pipeline/scenes/${sceneId}`),
@@ -740,7 +696,7 @@ export const scriptPipelineApi = {
     speaking_style?: string
     common_actions?: string
     emotion_baseline?: string
-    voice_profile?: CharacterVoiceProfile
+    voice_description?: string
     forbidden_behaviors?: string
     prompt_hint?: string
     llm_summary?: string
@@ -758,6 +714,7 @@ export const scriptPipelineApi = {
     three_view_image_url?: string
     three_view_prompt?: string
     face_closeup_image_url?: string
+    auto_generate_identity_assets?: boolean
   }) => apiClient.post<CharacterMutationResponse>('/pipeline/characters', data),
 
   updateCharacter: (
@@ -783,7 +740,7 @@ export const scriptPipelineApi = {
       speaking_style?: string
       common_actions?: string
       emotion_baseline?: string
-      voice_profile?: CharacterVoiceProfile
+      voice_description?: string
       forbidden_behaviors?: string
       prompt_hint?: string
       llm_summary?: string
@@ -801,14 +758,9 @@ export const scriptPipelineApi = {
       three_view_image_url?: string
       three_view_prompt?: string
       face_closeup_image_url?: string
+      auto_generate_identity_assets?: boolean
     },
   ) => apiClient.put<CharacterMutationResponse>(`/pipeline/characters/${characterId}`, data),
-
-  generateCharacterVoicePreview: (data: {
-    text?: string
-    character_name?: string
-    voice_profile?: CharacterVoiceProfile
-  }) => apiClient.post<CharacterVoicePreviewResponse>('/pipeline/characters/generate-voice-preview', data),
 
   uploadSceneReference: async (file: File) => {
     const formData = new FormData()
@@ -989,6 +941,7 @@ export const scriptPipelineApi = {
     camera_fixed?: boolean
     generate_audio?: boolean
     return_last_frame?: boolean
+    auto_continue_segments?: boolean
     service_tier?: string
     seed?: number
     selected_character_ids?: string[]
@@ -1002,7 +955,8 @@ export const scriptPipelineApi = {
   getRenderStatus: (taskId: string) => apiClient.get<RenderStatusResponse>(`/pipeline/render/${taskId}`),
   cancelRenderTask: (taskId: string) => apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/cancel`),
   pauseRenderTask: (taskId: string) => apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/pause`),
-  resumeRenderTask: (taskId: string) => apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/resume`),
+  resumeRenderTask: (taskId: string, data?: { auto_continue_segments?: boolean | null }) =>
+    apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/resume`, data || {}),
   retryRenderClip: (taskId: string, clipNumber: number) =>
     apiClient.post<RenderStatusResponse>(`/pipeline/render/${taskId}/clips/${clipNumber}/retry`),
   retryRenderTask: (taskId: string) => apiClient.post<RenderStartResponse>(`/pipeline/render/${taskId}/retry`),

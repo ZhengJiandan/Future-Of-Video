@@ -27,6 +27,17 @@ class AuthService:
         result = await db.execute(select(User).where(User.email == normalized_email))
         return result.scalar_one_or_none()
 
+    async def get_users_by_name(self, db: AsyncSession, name: str) -> list[User]:
+        normalized_name = name.strip()
+        if not normalized_name:
+            return []
+        result = await db.execute(select(User).where(User.name == normalized_name))
+        return list(result.scalars().all())
+
+    async def get_user_by_name(self, db: AsyncSession, name: str) -> Optional[User]:
+        users = await self.get_users_by_name(db, name)
+        return users[0] if users else None
+
     async def register_user(
         self,
         db: AsyncSession,
@@ -46,6 +57,9 @@ class AuthService:
         existing_user = await self.get_user_by_email(db, normalized_email)
         if existing_user:
             raise ValueError("该邮箱已注册")
+        existing_name_user = await self.get_user_by_name(db, name)
+        if existing_name_user:
+            raise ValueError("该用户昵称已被使用")
 
         now = datetime.utcnow()
         user = User(
@@ -71,12 +85,22 @@ class AuthService:
         self,
         db: AsyncSession,
         *,
-        email: str,
+        identifier: str,
         password: str,
     ) -> Dict[str, Any]:
-        user = await self.get_user_by_email(db, email)
+        normalized_identifier = str(identifier or "").strip()
+        if not normalized_identifier:
+            raise ValueError("请输入邮箱或用户昵称")
+
+        user = await self.get_user_by_email(db, normalized_identifier)
+        if not user:
+            matched_users = await self.get_users_by_name(db, normalized_identifier)
+            if len(matched_users) > 1:
+                raise ValueError("该用户昵称对应多个账号，请改用邮箱登录")
+            user = matched_users[0] if matched_users else None
+
         if not user or not verify_password(password, user.password_hash):
-            raise ValueError("邮箱或密码错误")
+            raise ValueError("邮箱、用户昵称或密码错误")
         if not user.is_active:
             raise ValueError("用户已被禁用")
 

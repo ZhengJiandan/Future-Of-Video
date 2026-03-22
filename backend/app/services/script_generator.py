@@ -475,6 +475,7 @@ class ScriptGenerator:
       "speaking_style": "",
       "common_actions": "",
       "emotion_baseline": "",
+      "voice_description": "",
       "forbidden_behaviors": "",
       "llm_summary": "",
       "image_prompt_base": "",
@@ -647,7 +648,7 @@ class ScriptGenerator:
 2. 只能在 selected_characters 和 selected_scenes 的约束范围内创作
 3. 新增细节不得违背 must_keep / must_have / forbidden
 4. 每个角色、每个场景都必须尽量绑定档案 ID 和版本
-5. 剧本阶段没有角色图片可用，角色恒定身份只能依赖 selected_characters 里的 llm_summary / must_keep / forbidden / speaking_style / common_actions
+5. 剧本阶段没有角色图片可用，角色恒定身份只能依赖 selected_characters 里的 llm_summary / must_keep / forbidden / speaking_style / voice_description / common_actions
 
 【输出要求】
 1. 输出必须是合法 JSON
@@ -1109,6 +1110,7 @@ class ScriptGenerator:
                         profile.get("core_appearance"),
                         profile.get("personality"),
                         profile.get("speaking_style"),
+                        profile.get("voice_description"),
                     ]
                     if part
                 ),
@@ -1118,6 +1120,7 @@ class ScriptGenerator:
             "outfit": str(profile.get("outfit") or "").strip(),
             "color_palette": str(profile.get("color_palette") or "").strip(),
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
+            "voice_description": str(profile.get("voice_description") or "").strip(),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "must_keep": self._normalize_list(
                 profile.get("must_keep")
@@ -1129,7 +1132,7 @@ class ScriptGenerator:
                 ]
             ),
             "forbidden": self._normalize_list(profile.get("forbidden_traits") or profile.get("forbidden_behaviors") or []),
-            "script_stage_rule": "Use llm_summary + must_keep + forbidden as the source of truth. Do not infer conflicting visual changes from free-form story text.",
+            "script_stage_rule": "Use llm_summary + must_keep + forbidden + voice_description as the source of truth. Do not infer conflicting visual or vocal changes from free-form story text.",
         }
 
     def _build_scene_constraint_card(self, profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -1213,6 +1216,7 @@ class ScriptGenerator:
         normalized["aliases"] = self._normalize_list(normalized.get("aliases") or [])
         normalized["must_keep"] = self._normalize_list(normalized.get("must_keep") or [])
         normalized["forbidden_traits"] = self._normalize_list(normalized.get("forbidden_traits") or [])
+        normalized["voice_description"] = str(normalized.get("voice_description") or "").strip()
         normalized["profile_version"] = self._safe_int(normalized.get("profile_version"), default=1)
         return normalized
 

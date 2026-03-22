@@ -40,6 +40,7 @@ from app.db.base import AsyncSessionLocal
 from app.models.pipeline_project import PipelineProject
 from app.models.pipeline_render_task import PipelineRenderTask
 from app.services.audio_renderer import ProjectAudioRenderer
+from app.services.preferred_image_generation import PreferredImageGenerationClient
 from app.services.script_generator import FullScript, ScriptGenerator
 from app.services.script_splitter import ScriptSplitter, SplitConfig
 from app.services.video_merger import MergeOptions, VideoMergerService, VideoSegment as MergedVideoSegment
@@ -155,6 +156,15 @@ class RenderTaskState:
         self.updated_at = datetime.now().isoformat()
 
     def to_dict(self) -> Dict[str, Any]:
+        last_completed_clip_number: Optional[int] = None
+        next_clip_number: Optional[int] = None
+        for clip in self.clips:
+            if clip.status == "completed" and clip.asset_url:
+                last_completed_clip_number = int(clip.clip_number)
+                continue
+            if clip.status not in {"completed", "failed", "cancelled"}:
+                next_clip_number = int(clip.clip_number)
+                break
         return {
             "task_id": self.task_id,
             "project_id": self.project_id,
@@ -170,6 +180,9 @@ class RenderTaskState:
             "fallback_used": self.fallback_used,
             "warnings": self.warnings,
             "render_config": self.render_config,
+            "awaiting_confirmation": self.status == "paused" and self.current_step.startswith("等待确认继续生成片段"),
+            "last_completed_clip_number": last_completed_clip_number,
+            "next_clip_number": next_clip_number,
             "error": self.error,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -186,6 +199,7 @@ class PipelineWorkflowService:
         self.output_root = Path(settings.UPLOAD_DIR) / "generated" / "pipeline"
         self.reference_root = Path(settings.UPLOAD_DIR) / "generated" / "references"
         self.identity_board_root = self.output_root / "identity_boards"
+        self.image_generator = PreferredImageGenerationClient()
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.reference_root.mkdir(parents=True, exist_ok=True)
         self.identity_board_root.mkdir(parents=True, exist_ok=True)
@@ -496,6 +510,38 @@ class PipelineWorkflowService:
         await self._persist_render_task_state(user_id=user_id, state=state)
         return state
 
+    async def find_active_render_task_for_project(
+        self,
+        *,
+        user_id: str,
+        project_id: str,
+    ) -> Optional[RenderTaskState]:
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            return None
+
+        active_statuses = {"queued", DISPATCHING_STATUS, "processing", "paused"}
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PipelineRenderTask.id)
+                .where(
+                    PipelineRenderTask.user_id == user_id,
+                    PipelineRenderTask.project_id == normalized_project_id,
+                    PipelineRenderTask.status.in_(tuple(active_statuses)),
+                )
+                .order_by(PipelineRenderTask.updated_at.desc(), PipelineRenderTask.created_at.desc())
+                .limit(1)
+            )
+            task_id = result.scalar_one_or_none()
+
+        if not task_id:
+            return None
+
+        state = self.tasks.get(task_id)
+        if state is not None:
+            return state
+        return await self._load_render_task_state(task_id)
+
     async def start_render_task(self, task_id: str, *, mark_failed_on_enqueue_error: bool = True) -> None:
         state = self.tasks.get(task_id)
         if state is None:
@@ -709,6 +755,20 @@ class PipelineWorkflowService:
                 state.touch()
                 await self._persist_render_task_state(state=state)
 
+                if self._should_wait_for_clip_confirmation(
+                    state=state,
+                    completed_index=index,
+                    total_segments=total_segments,
+                ):
+                    next_clip_number = state.segments[index + 1]["segment_number"]
+                    state.status = "paused"
+                    state.current_step = f"等待确认继续生成片段 {next_clip_number}/{total_segments}"
+                    state.progress = 5.0 + ((index + 1) / max(total_segments, 1)) * 75.0
+                    state.error = ""
+                    state.touch()
+                    await self._persist_render_task_state(state=state)
+                    return
+
             await self._ensure_render_task_can_continue(task_id, state)
             state.current_step = "合并最终成片"
             state.progress = 85.0
@@ -734,12 +794,20 @@ class PipelineWorkflowService:
                     raise RuntimeError("存在未生成成功的视频片段，已停止最终合成")
 
             await self._ensure_render_task_can_continue(task_id, state)
-            final_output = await self._finalize_project_audio(
-                task_id=task_id,
-                task_dir=task_dir,
-                state=state,
-                final_output=final_output,
-            )
+            # External project audio rendering is temporarily disabled.
+            # Keep the provider-native audio behavior from the video model itself.
+            if bool(state.render_config.get("generate_audio", True)):
+                final_output["audio"] = {
+                    "status": "provider-native",
+                    "strategy": "provider_native",
+                    "message": "当前已跳过项目级音频后处理，保留视频模型自带的音频能力。",
+                }
+            else:
+                final_output["audio"] = {
+                    "status": "disabled",
+                    "strategy": "mute",
+                    "message": "已关闭音频生成，本次仅输出纯视频。",
+                }
             await self._ensure_render_task_can_continue(task_id, state)
             state.final_output = final_output
             state.status = "completed"
@@ -819,7 +887,13 @@ class PipelineWorkflowService:
             logger.warning("Failed to pause render task %s: %s", task_id, exc)
         return state
 
-    async def resume_render_task(self, task_id: str, *, user_id: str) -> Optional[RenderTaskState]:
+    async def resume_render_task(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        auto_continue_segments: Optional[bool] = None,
+    ) -> Optional[RenderTaskState]:
         state = self.tasks.get(task_id)
         if state is None:
             state = await self._load_render_task_state(task_id)
@@ -828,6 +902,8 @@ class PipelineWorkflowService:
         if state.status != "paused":
             raise RuntimeError("只有已暂停的任务才可以继续")
 
+        if auto_continue_segments is not None:
+            state.render_config["auto_continue_segments"] = bool(auto_continue_segments)
         state.status = "queued"
         state.current_step = "等待重新投递"
         state.error = ""
@@ -836,6 +912,17 @@ class PipelineWorkflowService:
         await self._persist_render_task_state(state=state)
         await self.start_render_task(task_id)
         return self.tasks.get(task_id) or await self._load_render_task_state(task_id)
+
+    def _should_wait_for_clip_confirmation(
+        self,
+        *,
+        state: RenderTaskState,
+        completed_index: int,
+        total_segments: int,
+    ) -> bool:
+        if bool(state.render_config.get("auto_continue_segments", False)):
+            return False
+        return completed_index < max(total_segments - 1, 0)
 
     async def retry_render_clip(
         self,
@@ -1667,47 +1754,39 @@ class PipelineWorkflowService:
             reference_images=keyframe_reference_images,
         )
 
-        nanobanana_api_key = getattr(settings, "NANOBANANA_API_KEY", None) or os.getenv("NANOBANANA_API_KEY")
-        if nanobanana_api_key:
-            segment_characters, _ = self._get_segment_profile_context(
-                segment=segment,
-                character_profiles=character_profiles,
-                scene_profiles=scene_profiles,
-            )
-            logger.info(
-                "NanoBanana keyframe prompt for segment %s frame=%s characters=%s:\n%s",
-                segment.get("segment_number"),
-                frame_kind,
-                ", ".join(
-                    str(item.get("name") or item.get("id") or "").strip()
-                    for item in segment_characters
-                    if str(item.get("name") or item.get("id") or "").strip()
-                ) or "none",
-                prompt,
-            )
-            generated = await asyncio.to_thread(
-                self._generate_keyframe_with_nanobanana,
-                task_dir,
-                segment,
-                frame_kind,
-                prompt,
-                keyframe_reference_images,
-                base_asset,
-            )
-            if generated:
-                return generated
+        segment_characters, _ = self._get_segment_profile_context(
+            segment=segment,
+            character_profiles=character_profiles,
+            scene_profiles=scene_profiles,
+        )
+        logger.info(
+            "Image keyframe prompt for segment %s frame=%s characters=%s:\n%s",
+            segment.get("segment_number"),
+            frame_kind,
+            ", ".join(
+                str(item.get("name") or item.get("id") or "").strip()
+                for item in segment_characters
+                if str(item.get("name") or item.get("id") or "").strip()
+            ) or "none",
+            prompt,
+        )
+        generated = await asyncio.to_thread(
+            self._generate_keyframe_with_preferred_provider,
+            task_dir,
+            segment,
+            frame_kind,
+            prompt,
+            keyframe_reference_images,
+            base_asset,
+        )
+        if generated:
+            return generated
 
-            logger.warning(
-                "NanoBanana keyframe generation returned no asset for segment=%s frame=%s, fallback to placeholder",
-                segment["segment_number"],
-                frame_kind,
-            )
-        else:
-            logger.warning(
-                "NANOBANANA_API_KEY not configured, fallback to placeholder keyframe for segment=%s frame=%s",
-                segment["segment_number"],
-                frame_kind,
-            )
+        logger.warning(
+            "Image keyframe generation returned no asset for segment=%s frame=%s, fallback to placeholder",
+            segment["segment_number"],
+            frame_kind,
+        )
 
         return self._generate_keyframe_placeholder(
             task_dir=task_dir,
@@ -1717,7 +1796,7 @@ class PipelineWorkflowService:
             base_asset=base_asset,
         )
 
-    def _generate_keyframe_with_nanobanana(
+    def _generate_keyframe_with_preferred_provider(
         self,
         task_dir: Path,
         segment: Dict[str, Any],
@@ -1727,54 +1806,63 @@ class PipelineWorkflowService:
         base_asset: Optional[KeyframeAsset],
     ) -> Optional[KeyframeAsset]:
         try:
-            from app.services.nanobanana_pro import NanoBananaProClient
-
-            client = NanoBananaProClient(
-                api_key=getattr(settings, "NANOBANANA_API_KEY", None) or os.getenv("NANOBANANA_API_KEY"),
-                api_url=getattr(settings, "NANOBANANA_BASE_URL", None),
-            )
             reference_paths = self._existing_reference_paths(reference_images)
             base_path = self._asset_url_to_path(base_asset.asset_url) if base_asset else None
 
             if base_path and base_path.exists():
                 logger.info(
-                    "NanoBanana keyframe mode=image_to_image segment=%s frame=%s base=%s references=%s",
+                    "Preferred image keyframe mode=image_to_image segment=%s frame=%s base=%s references=%s",
                     segment.get("segment_number"),
                     frame_kind,
                     base_path.name,
                     len(reference_paths),
                 )
-                result = client.generate_image_to_image(str(base_path), prompt, aspect_ratio="16:9", image_size="2k")
-                source = "nanobanana-image-to-image"
+                result = self.image_generator.generate_image_to_image(
+                    str(base_path),
+                    prompt,
+                    aspect_ratio="16:9",
+                    image_size="2k",
+                )
             elif len(reference_paths) > 1:
                 logger.info(
-                    "NanoBanana keyframe mode=multi_image_mix segment=%s frame=%s references=%s",
+                    "Preferred image keyframe mode=multi_image_mix segment=%s frame=%s references=%s",
                     segment.get("segment_number"),
                     frame_kind,
                     ", ".join(path.name for path in reference_paths),
                 )
-                result = client.generate_multi_image_mix([str(path) for path in reference_paths], prompt, aspect_ratio="16:9", image_size="2k")
-                source = "nanobanana-multi-image-mix"
+                result = self.image_generator.generate_multi_image_mix(
+                    [str(path) for path in reference_paths],
+                    prompt,
+                    aspect_ratio="16:9",
+                    image_size="2k",
+                )
             elif len(reference_paths) == 1:
                 logger.info(
-                    "NanoBanana keyframe mode=image_to_image segment=%s frame=%s reference=%s",
+                    "Preferred image keyframe mode=image_to_image segment=%s frame=%s reference=%s",
                     segment.get("segment_number"),
                     frame_kind,
                     reference_paths[0].name,
                 )
-                result = client.generate_image_to_image(str(reference_paths[0]), prompt, aspect_ratio="16:9", image_size="2k")
-                source = "nanobanana-image-to-image"
+                result = self.image_generator.generate_image_to_image(
+                    str(reference_paths[0]),
+                    prompt,
+                    aspect_ratio="16:9",
+                    image_size="2k",
+                )
             else:
                 logger.info(
-                    "NanoBanana keyframe mode=text_to_image segment=%s frame=%s",
+                    "Preferred image keyframe mode=text_to_image segment=%s frame=%s",
                     segment.get("segment_number"),
                     frame_kind,
                 )
-                result = client.generate_text_to_image(prompt, aspect_ratio="16:9", image_size="2k")
-                source = "nanobanana-text-to-image"
+                result = self.image_generator.generate_text_to_image(
+                    prompt,
+                    aspect_ratio="16:9",
+                    image_size="2k",
+                )
 
             if not result.get("success") or not result.get("image_data"):
-                logger.warning("NanoBanana keyframe generation failed: %s", result.get("error"))
+                logger.warning("Preferred image keyframe generation failed: %s", result.get("error"))
                 return None
 
             return self._store_binary_image(
@@ -1782,10 +1870,10 @@ class PipelineWorkflowService:
                 filename=f"segment_{segment['segment_number']:02d}_{frame_kind}.png",
                 content=result["image_data"],
                 prompt=prompt,
-                source=source,
+                source=str(result.get("source") or "image-provider-keyframe"),
             )
         except Exception as exc:
-            logger.warning("NanoBanana unavailable, fallback to placeholder: %s", exc)
+            logger.warning("Preferred image generation unavailable, fallback to placeholder: %s", exc)
             return None
 
     def _generate_keyframe_placeholder(
@@ -2007,7 +2095,7 @@ class PipelineWorkflowService:
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
-            "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
+            "voice_description": self._normalize_voice_description(profile.get("voice_description") or ""),
             "forbidden_behaviors": str(profile.get("forbidden_behaviors") or "").strip(),
             "prompt_hint": str(profile.get("prompt_hint") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
@@ -2795,8 +2883,24 @@ class PipelineWorkflowService:
         scene_profiles: List[Dict[str, Any]],
         render_config: Dict[str, Any],
     ) -> Dict[str, Any]:
+        provider_generate_audio = bool(render_config.get("generate_audio", True))
         requested_generate_audio = bool(render_config.get("requested_generate_audio", True))
         if not requested_generate_audio:
+            if provider_generate_audio:
+                return {
+                    "strategy": "provider_native",
+                    "provider_audio_disabled": False,
+                    "requested_generate_audio": False,
+                    "summary": "当前不执行项目级音频后处理，交由视频模型自身生成音频特效。",
+                    "mix_principles": [],
+                    "character_voice_bible": [],
+                    "music_bible": {
+                        "global_direction": "",
+                        "avoid": [],
+                    },
+                    "ambience_bible": [],
+                    "segment_audio_plan": [],
+                }
             return {
                 "strategy": "mute",
                 "provider_audio_disabled": True,
@@ -2844,7 +2948,7 @@ class PipelineWorkflowService:
             personality = str(profile.get("personality") or "").strip()
             role = str(profile.get("role") or "").strip()
             must_keep = self._ensure_text_list(profile.get("must_keep") or [])
-            voice_profile = self._normalize_voice_profile(profile.get("voice_profile") or {})
+            voice_description = self._normalize_voice_description(profile.get("voice_description") or "")
             character_voice_bible.append(
                 {
                     "character_id": str(profile.get("id") or "").strip(),
@@ -2852,14 +2956,14 @@ class PipelineWorkflowService:
                     "role": role,
                     "speaking_style": speaking_style,
                     "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
-                    "voice_profile": voice_profile,
+                    "voice_description": voice_description,
                     "voice_direction": self._join_audio_parts(
                         [
                             role,
                             speaking_style,
                             personality,
                             f"角色识别点：{'、'.join(must_keep[:3])}" if must_keep else "",
-                            self._describe_voice_profile(voice_profile),
+                            f"音色设定：{voice_description}" if voice_description else "",
                         ]
                     ),
                 }
@@ -2959,7 +3063,9 @@ class PipelineWorkflowService:
                     "name": str(profile.get("name") or "").strip(),
                     "speaking_style": str(profile.get("speaking_style") or "").strip(),
                     "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
-                    "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
+                    "voice_description": self._normalize_voice_description(
+                        profile.get("voice_description") or ""
+                    ),
                 }
             )
 
@@ -3034,50 +3140,11 @@ class PipelineWorkflowService:
         normalized = self._unique_preserve_order(parts)
         return "；".join(normalized[:4])
 
-    def _normalize_voice_profile(self, value: Any) -> Dict[str, Any]:
-        if not isinstance(value, dict):
-            return {}
-
-        normalized: Dict[str, Any] = {}
-        for key in ["provider", "voice_type", "voice_name", "emotion", "language"]:
-            text = str(value.get(key) or "").strip()
-            if text:
-                normalized[key] = text
-
-        for key in ["speed_ratio", "pitch_ratio", "volume_ratio"]:
-            raw = value.get(key)
-            if raw in (None, "", "null"):
-                continue
-            try:
-                normalized[key] = round(float(raw), 3)
-            except (TypeError, ValueError):
-                continue
-
-        return normalized
-
-    def _describe_voice_profile(self, voice_profile: Dict[str, Any]) -> str:
-        if not isinstance(voice_profile, dict) or not voice_profile:
-            return ""
-
-        parts: List[str] = []
-        provider = str(voice_profile.get("provider") or "").strip()
-        voice_type = str(voice_profile.get("voice_type") or "").strip()
-        emotion = str(voice_profile.get("emotion") or "").strip()
-        if provider:
-            parts.append(f"provider={provider}")
-        if voice_type:
-            parts.append(f"voice={voice_type}")
-        if emotion:
-            parts.append(f"emotion={emotion}")
-        return "语音绑定：" + " / ".join(parts) if parts else ""
+    def _normalize_voice_description(self, value: Any) -> str:
+        return str(value or "").strip()
 
     def _normalize_render_config(self, render_config: Dict[str, Any]) -> Dict[str, Any]:
-        requested_generate_audio = bool(
-            render_config.get(
-                "requested_generate_audio",
-                render_config.get("generate_audio", True),
-            )
-        )
+        provider_generate_audio = bool(render_config.get("generate_audio", True))
         return {
             "provider": str(render_config.get("provider") or "auto"),
             "resolution": self._normalize_doubao_resolution(str(render_config.get("resolution") or "720p")),
@@ -3085,11 +3152,12 @@ class PipelineWorkflowService:
             "watermark": bool(render_config.get("watermark", False)),
             "provider_model": str(render_config.get("provider_model") or settings.DOUBAO_VIDEO_MODEL),
             "camera_fixed": bool(render_config.get("camera_fixed", False)),
-            "generate_audio": False,
-            "requested_generate_audio": requested_generate_audio,
-            "audio_strategy": "external_audio_pipeline" if requested_generate_audio else "mute",
-            "audio_plan": render_config.get("audio_plan") if isinstance(render_config.get("audio_plan"), dict) else None,
+            "generate_audio": provider_generate_audio,
+            "requested_generate_audio": False,
+            "audio_strategy": "provider_native" if provider_generate_audio else "mute",
+            "audio_plan": None,
             "return_last_frame": True,
+            "auto_continue_segments": bool(render_config.get("auto_continue_segments", False)),
             "service_tier": self._normalize_service_tier(str(render_config.get("service_tier") or "default")),
             "seed": self._normalize_provider_seed(render_config.get("seed")),
         }
@@ -3546,7 +3614,7 @@ class PipelineWorkflowService:
             "outfit": str(profile.get("outfit") or "").strip(),
             "color_palette": str(profile.get("color_palette") or "").strip(),
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
-            "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
+            "voice_description": self._normalize_voice_description(profile.get("voice_description") or ""),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
             "image_prompt_base": str(profile.get("image_prompt_base") or "").strip(),
@@ -3627,6 +3695,7 @@ class PipelineWorkflowService:
         )
 
     def _build_character_video_base(self, profile: Dict[str, Any]) -> str:
+        voice_anchor = self._build_character_voice_anchor(profile)
         return "；".join(
             part
             for part in [
@@ -3634,10 +3703,55 @@ class PipelineWorkflowService:
                 str(profile.get("video_prompt_base") or "").strip(),
                 str(profile.get("core_appearance") or "").strip(),
                 str(profile.get("speaking_style") or "").strip(),
+                voice_anchor,
                 str(profile.get("common_actions") or "").strip(),
                 f"must keep: {', '.join(profile.get('must_keep') or [])}" if profile.get("must_keep") else "",
             ]
             if part
+        )
+
+    def _build_character_voice_anchor(self, profile: Dict[str, Any]) -> str:
+        parts: List[str] = []
+
+        speaking_style = str(profile.get("speaking_style") or "").strip()
+        if speaking_style:
+            parts.append(f"说话方式:{speaking_style}")
+
+        emotion_baseline = str(profile.get("emotion_baseline") or "").strip()
+        if emotion_baseline:
+            parts.append(f"常态情绪:{emotion_baseline}")
+
+        voice_description = self._normalize_voice_description(profile.get("voice_description") or "")
+        if voice_description:
+            parts.append(f"音色设定:{voice_description}")
+
+        if not parts:
+            return ""
+
+        return "voice anchor: " + "；".join(parts)
+
+    def _build_segment_voice_continuity_instruction(
+        self,
+        character_profiles: List[Dict[str, Any]],
+    ) -> str:
+        anchors: List[str] = []
+        for profile in character_profiles:
+            name = str(profile.get("name") or "").strip()
+            voice_anchor = self._build_character_voice_anchor(profile)
+            if name and voice_anchor:
+                anchors.append(f"{name}: {voice_anchor}")
+            elif voice_anchor:
+                anchors.append(voice_anchor)
+
+        if not anchors:
+            return ""
+
+        return (
+            "Voice continuity anchors: "
+            + " | ".join(anchors)
+            + ". If this clip contains spoken lines, breathing, laughter, cries, shouts, or any vocal reaction, "
+              "keep each character's timbre, delivery style, and emotional baseline stable across the whole clip, "
+              "and do not let different characters drift into the same voice."
         )
 
     def _build_scene_video_base(self, profile: Dict[str, Any]) -> str:
@@ -3696,6 +3810,9 @@ class PipelineWorkflowService:
         stable_video_base = self._build_segment_video_prompt_base(segment_characters, segment_scene)
         if stable_video_base:
             parts.append(f"Stable video base: {stable_video_base}")
+        voice_continuity = self._build_segment_voice_continuity_instruction(segment_characters)
+        if voice_continuity:
+            parts.append(voice_continuity)
         if segment.get("prompt_focus"):
             parts.append(f"Current clip focus: {segment['prompt_focus']}")
         if segment.get("shots_summary"):

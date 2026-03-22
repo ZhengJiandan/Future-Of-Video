@@ -9,7 +9,6 @@ import { ProjectListPage } from './pages/ProjectListPage'
 import { SceneLibraryListPage } from './pages/SceneLibraryListPage'
 import { SceneLibraryPage } from './pages/SceneLibraryPage'
 import { ScriptPipelinePage } from './pages/ScriptPipelinePage'
-import { VoiceCatalogPage } from './pages/VoiceCatalogPage'
 
 export const router = createBrowserRouter([
   {
@@ -66,10 +65,6 @@ export const router = createBrowserRouter([
           {
             path: 'scenes/library',
             element: <SceneLibraryListPage />,
-          },
-          {
-            path: 'voices',
-            element: <VoiceCatalogPage />,
           },
         ],
       },

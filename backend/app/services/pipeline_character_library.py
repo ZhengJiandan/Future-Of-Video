@@ -18,8 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.pipeline_character_profile import PipelineCharacterProfile
-from app.services.audio_renderer import build_doubao_tts_provider_from_settings
-from app.services.nanobanana_pro import NanoBananaProClient
+from app.services.preferred_image_generation import PreferredImageGenerationClient
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +30,11 @@ class PipelineCharacterLibraryService:
         self.prototype_root = self.library_root / "prototypes"
         self.three_view_root = self.library_root / "three_views"
         self.face_closeup_root = self.library_root / "face_closeups"
-        self.voice_preview_root = self.library_root / "voice_previews"
         self.reference_root.mkdir(parents=True, exist_ok=True)
         self.prototype_root.mkdir(parents=True, exist_ok=True)
         self.three_view_root.mkdir(parents=True, exist_ok=True)
         self.face_closeup_root.mkdir(parents=True, exist_ok=True)
-        self.voice_preview_root.mkdir(parents=True, exist_ok=True)
-        self.nanobanana = NanoBananaProClient()
+        self.image_generator = PreferredImageGenerationClient()
 
     async def list_profiles(self, db: AsyncSession) -> List[Dict[str, Any]]:
         result = await db.execute(
@@ -81,11 +78,12 @@ class PipelineCharacterLibraryService:
         if not name:
             raise ValueError("角色名称不能为空")
 
+        auto_generate_identity_assets = payload.get("auto_generate_identity_assets", True) is not False
         final_reference_image_url = str(payload.get("reference_image_url") or "").strip()
         generated_three_view_url = str(payload.get("three_view_image_url") or "").strip()
         generated_three_view_prompt = str(payload.get("three_view_prompt") or "").strip()
         generated_face_closeup_url = str(payload.get("face_closeup_image_url") or "").strip()
-        if final_reference_image_url and not generated_three_view_url:
+        if auto_generate_identity_assets and final_reference_image_url and not generated_three_view_url:
             try:
                 generated_three_view = await self.generate_three_view_asset(
                     reference_image_url=final_reference_image_url,
@@ -102,7 +100,7 @@ class PipelineCharacterLibraryService:
                 generated_three_view_url = ""
                 generated_three_view_prompt = ""
 
-        if final_reference_image_url and not generated_face_closeup_url:
+        if auto_generate_identity_assets and final_reference_image_url and not generated_face_closeup_url:
             try:
                 generated_face_closeup_url = await asyncio.to_thread(
                     self._generate_face_closeup_asset,
@@ -140,7 +138,7 @@ class PipelineCharacterLibraryService:
             speaking_style=str(payload.get("speaking_style") or "").strip(),
             common_actions=str(payload.get("common_actions") or "").strip(),
             emotion_baseline=str(payload.get("emotion_baseline") or "").strip(),
-            voice_profile=self._normalize_voice_profile(payload.get("voice_profile") or {}),
+            voice_description=str(payload.get("voice_description") or "").strip(),
             forbidden_behaviors=str(payload.get("forbidden_behaviors") or "").strip(),
             prompt_hint=str(payload.get("prompt_hint") or "").strip(),
             llm_summary=str(payload.get("llm_summary") or "").strip(),
@@ -195,6 +193,7 @@ class PipelineCharacterLibraryService:
         original_three_view_image_path = profile.three_view_image_path or ""
         original_face_closeup_image_path = profile.face_closeup_image_path or ""
 
+        auto_generate_identity_assets = payload.get("auto_generate_identity_assets", True) is not False
         final_reference_image_url = str(payload.get("reference_image_url") or "").strip()
         generated_three_view_url = str(payload.get("three_view_image_url") or "").strip()
         generated_three_view_prompt = str(payload.get("three_view_prompt") or "").strip()
@@ -202,7 +201,11 @@ class PipelineCharacterLibraryService:
 
         reference_image_changed = final_reference_image_url != original_reference_image_url
 
-        if final_reference_image_url and (reference_image_changed or not (profile.three_view_image_url or "").strip()):
+        if (
+            auto_generate_identity_assets
+            and final_reference_image_url
+            and (reference_image_changed or not (profile.three_view_image_url or "").strip())
+        ):
             try:
                 generated_three_view = await self.generate_three_view_asset(
                     reference_image_url=final_reference_image_url,
@@ -225,7 +228,7 @@ class PipelineCharacterLibraryService:
             generated_three_view_url = generated_three_view_url or (profile.three_view_image_url or "")
             generated_three_view_prompt = generated_three_view_prompt or (profile.three_view_prompt or "")
 
-        if final_reference_image_url and (
+        if auto_generate_identity_assets and final_reference_image_url and (
             reference_image_changed or not (profile.face_closeup_image_url or "").strip()
         ):
             try:
@@ -267,7 +270,7 @@ class PipelineCharacterLibraryService:
         profile.speaking_style = str(payload.get("speaking_style") or "").strip()
         profile.common_actions = str(payload.get("common_actions") or "").strip()
         profile.emotion_baseline = str(payload.get("emotion_baseline") or "").strip()
-        profile.voice_profile = self._normalize_voice_profile(payload.get("voice_profile") or {})
+        profile.voice_description = str(payload.get("voice_description") or "").strip()
         profile.forbidden_behaviors = str(payload.get("forbidden_behaviors") or "").strip()
         profile.prompt_hint = str(payload.get("prompt_hint") or "").strip()
         profile.llm_summary = str(payload.get("llm_summary") or "").strip()
@@ -303,47 +306,6 @@ class PipelineCharacterLibraryService:
             self._delete_local_asset(original_face_closeup_image_path)
 
         return profile.to_dict()
-
-    async def generate_voice_preview(
-        self,
-        *,
-        text: str,
-        character_name: str,
-        voice_profile: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        preview_text = str(text or "").strip() or f"我是{str(character_name or '这个角色').strip() or '这个角色'}，现在开始试音。"
-        normalized_name = str(character_name or "").strip() or "角色"
-        normalized_voice_profile = self._normalize_voice_profile(voice_profile or {})
-        provider_name = str(normalized_voice_profile.get("provider") or "doubao-tts").strip().lower()
-
-        if provider_name not in {"", "doubao", "doubao-tts", "volcengine", "bytedance"}:
-            raise ValueError(f"当前试音只支持豆包 TTS，收到 provider: {provider_name}")
-
-        provider = build_doubao_tts_provider_from_settings(
-            sample_rate=settings.AUDIO_SAMPLE_RATE,
-            channels=1,
-        )
-        asset_id = uuid.uuid4().hex
-        output_dir = self.voice_preview_root / datetime.utcnow().strftime("%Y%m%d")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{asset_id}_voice_preview.wav"
-
-        await provider.synthesize_text_to_wav(
-            text=preview_text,
-            character_name=normalized_name,
-            voice_profile=normalized_voice_profile,
-            output_path=output_path,
-        )
-
-        return {
-            "asset_url": self._build_asset_url(output_path),
-            "asset_type": "audio/wav",
-            "asset_filename": output_path.name,
-            "provider": provider.name,
-            "text": preview_text,
-            "character_name": normalized_name,
-            "voice_profile": normalized_voice_profile,
-        }
 
     async def delete_profile(self, db: AsyncSession, profile_id: str) -> bool:
         result = await db.execute(
@@ -408,18 +370,18 @@ class PipelineCharacterLibraryService:
         )
 
         result = await asyncio.to_thread(
-            self.nanobanana.generate_image_to_image,
+            self.image_generator.generate_image_to_image,
             str(reference_path),
             prompt,
             "16:9",
             "2k",
         )
         if not result.get("success"):
-            raise RuntimeError(result.get("error") or "NanoBanana 三视图生成失败")
+            raise RuntimeError(result.get("error") or "角色三视图生成失败")
 
         image_data = result.get("image_data")
         if not image_data:
-            raise RuntimeError("NanoBanana 未返回图片数据")
+            raise RuntimeError("图片生成服务未返回三视图图片数据")
 
         asset_id = uuid.uuid4().hex
         safe_name = f"{asset_id}_three_view.png"
@@ -431,7 +393,7 @@ class PipelineCharacterLibraryService:
             "asset_type": "image/png",
             "asset_filename": safe_name,
             "prompt": prompt,
-            "source": "nanobanana-three-view",
+            "source": str(result.get("source") or "image-provider-three-view"),
             "status": "completed",
             "notes": "单张画布三视图：正面、侧面、背面。",
         }
@@ -466,28 +428,26 @@ class PipelineCharacterLibraryService:
 
         if base_path and base_path.exists():
             result = await asyncio.to_thread(
-                self.nanobanana.generate_image_to_image,
+                self.image_generator.generate_image_to_image,
                 str(base_path),
                 prompt,
                 "16:9",
                 "2k",
             )
-            source = "nanobanana-image-refine"
         else:
             result = await asyncio.to_thread(
-                self.nanobanana.generate_text_to_image,
+                self.image_generator.generate_text_to_image,
                 prompt,
                 "16:9",
                 "2k",
             )
-            source = "nanobanana-text-prototype"
 
         if not result.get("success"):
-            raise RuntimeError(result.get("error") or "NanoBanana 角色图生成失败")
+            raise RuntimeError(result.get("error") or "角色图生成失败")
 
         image_data = result.get("image_data")
         if not image_data:
-            raise RuntimeError("NanoBanana 未返回角色图片数据")
+            raise RuntimeError("图片生成服务未返回角色图片数据")
 
         asset_id = uuid.uuid4().hex
         safe_name = f"{asset_id}_character.png"
@@ -499,7 +459,7 @@ class PipelineCharacterLibraryService:
             "asset_type": "image/png",
             "asset_filename": safe_name,
             "prompt": prompt,
-            "source": source,
+            "source": str(result.get("source") or "image-provider-character"),
             "status": "completed",
             "notes": "用户可见角色原型图，可继续微调后保存。",
         }
@@ -546,7 +506,7 @@ class PipelineCharacterLibraryService:
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
-            "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
+            "voice_description": str(profile.get("voice_description") or "").strip(),
             "forbidden_behaviors": str(profile.get("forbidden_behaviors") or "").strip(),
             "prompt_hint": str(profile.get("prompt_hint") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
@@ -597,45 +557,12 @@ class PipelineCharacterLibraryService:
             "outfit": str(profile.get("outfit") or "").strip(),
             "color_palette": str(profile.get("color_palette") or "").strip(),
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
-            "voice_profile": self._normalize_voice_profile(profile.get("voice_profile") or {}),
+            "voice_description": str(profile.get("voice_description") or "").strip(),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
             "image_prompt_base": str(profile.get("image_prompt_base") or "").strip(),
             "video_prompt_base": str(profile.get("video_prompt_base") or "").strip(),
         }
-
-    def _normalize_voice_profile(self, value: Any) -> Dict[str, Any]:
-        if not isinstance(value, dict):
-            return {}
-
-        provider = str(value.get("provider") or "").strip()
-        voice_type = str(value.get("voice_type") or "").strip()
-        voice_name = str(value.get("voice_name") or "").strip()
-        emotion = str(value.get("emotion") or "").strip()
-        language = str(value.get("language") or "").strip()
-
-        normalized: Dict[str, Any] = {}
-        if provider:
-            normalized["provider"] = provider
-        if voice_type:
-            normalized["voice_type"] = voice_type
-        if voice_name:
-            normalized["voice_name"] = voice_name
-        if emotion:
-            normalized["emotion"] = emotion
-        if language:
-            normalized["language"] = language
-
-        for key in ["speed_ratio", "pitch_ratio", "volume_ratio"]:
-            raw = value.get(key)
-            if raw in (None, "", "null"):
-                continue
-            try:
-                normalized[key] = round(float(raw), 3)
-            except (TypeError, ValueError):
-                continue
-
-        return normalized
 
     def _build_three_view_prompt(
         self,

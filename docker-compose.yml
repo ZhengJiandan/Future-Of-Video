@@ -3,11 +3,12 @@ version: '3.8'
 
 services:
   mysql:
+    profiles: ["full"]
     image: mysql:8.0
     container_name: future-of-video-mysql
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-delta_force_video}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-future_of_video}
       MYSQL_USER: ${MYSQL_USER:-fov}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me-db}
     ports:
@@ -43,26 +44,28 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     container_name: future-of-video-backend
+    env_file:
+      - ./backend/.env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-mysql+aiomysql://fov:change-me-db@mysql:3306/delta_force_video}
+      DATABASE_URL: ${DATABASE_URL:-sqlite+aiosqlite:///./uploads/future_of_video.db}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
       PIPELINE_RUNTIME_MODE: ${PIPELINE_RUNTIME_MODE:-minimal}
-      DEBUG: ${DEBUG:-true}
+      DEBUG: ${DEBUG:-false}
+      MODEL_DEBUG_LOGGING: ${MODEL_DEBUG_LOGGING:-false}
+      PORT: 8080
+      AUDIO_PIPELINE_ENABLED: ${AUDIO_PIPELINE_ENABLED:-false}
     ports:
-      - "8000:8000"
+      - "8080:8080"
     volumes:
       - ./backend/app:/app/app
       - ./backend/uploads:/app/uploads
-    depends_on:
-      mysql:
-        condition: service_healthy
     networks:
       - future-of-video-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -75,13 +78,17 @@ services:
       dockerfile: Dockerfile.backend
     container_name: future-of-video-worker
     command: celery -A app.celery_app:celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - ./backend/.env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-mysql+aiomysql://fov:change-me-db@mysql:3306/delta_force_video}
+      DATABASE_URL: ${DATABASE_URL:-mysql+aiomysql://fov:change-me-db@mysql:3306/future_of_video}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
       PIPELINE_RUNTIME_MODE: full
-      DEBUG: ${DEBUG:-true}
+      DEBUG: ${DEBUG:-false}
+      MODEL_DEBUG_LOGGING: ${MODEL_DEBUG_LOGGING:-false}
+      AUDIO_PIPELINE_ENABLED: ${AUDIO_PIPELINE_ENABLED:-false}
     volumes:
       - ./backend/app:/app/app
       - ./backend/uploads:/app/uploads
@@ -104,7 +111,8 @@ services:
     volumes:
       - ./frontend/src:/app/src
     environment:
-      VITE_DEV_PROXY_TARGET: http://backend:8000
+      VITE_DEV_PROXY_TARGET: http://backend:8080
+      VITE_API_BASE_URL: /api/v1
     depends_on:
       - backend
     networks:

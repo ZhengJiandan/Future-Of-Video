@@ -1,7 +1,7 @@
 -- Upgrade script for environments that already have a legacy `users` table.
 -- This script aligns the table with the current auth model used by the project.
 
-USE `delta_force_video`;
+USE `future_of_video`;
 
 ALTER TABLE `users`
   ADD COLUMN IF NOT EXISTS `name` VARCHAR(100) NULL AFTER `email`,

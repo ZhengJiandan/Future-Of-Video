@@ -8,7 +8,6 @@ import {
   Image,
   Input,
   Row,
-  Select,
   Space,
   Tag,
   Typography,
@@ -18,11 +17,9 @@ import {
   message,
 } from 'antd'
 import {
-  AudioOutlined,
   EditOutlined,
   FolderOpenOutlined,
   PlusOutlined,
-  PlayCircleOutlined,
   UploadOutlined,
   UserOutlined,
 } from '@ant-design/icons'
@@ -30,7 +27,6 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   CharacterImageAnalysisFields,
   CharacterProfile,
-  DoubaoVoiceCatalogItem,
   ReferenceImageAsset,
   resolveAssetUrl,
   scriptPipelineApi,
@@ -60,14 +56,7 @@ const emptyCharacterDraft = {
   speaking_style: '',
   common_actions: '',
   emotion_baseline: '',
-  voice_provider: 'doubao-tts',
-  voice_type: '',
-  voice_name: '',
-  voice_emotion: '',
-  voice_language: 'zh',
-  voice_speed_ratio: '1.0',
-  voice_pitch_ratio: '1.0',
-  voice_volume_ratio: '1.0',
+  voice_description: '',
   forbidden_behaviors: '',
   prompt_hint: '',
   llm_summary: '',
@@ -84,26 +73,19 @@ export const CharacterLibraryPage: React.FC = () => {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const editingCharacterId = searchParams.get('characterId')?.trim() || ''
-  const presetVoiceType = searchParams.get('voiceType')?.trim() || ''
   const isEditMode = Boolean(editingCharacterId)
+
   const [initializing, setInitializing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [referenceUploading, setReferenceUploading] = useState(false)
   const [analyzingReference, setAnalyzingReference] = useState(false)
   const [prototypeGenerating, setPrototypeGenerating] = useState(false)
-  const [voicePreviewGenerating, setVoicePreviewGenerating] = useState(false)
   const [characterDraft, setCharacterDraft] = useState(emptyCharacterDraft)
   const [referenceImage, setReferenceImage] = useState<ReferenceImageAsset | null>(null)
   const [referenceFileList, setReferenceFileList] = useState<UploadFile[]>([])
   const [characterImage, setCharacterImage] = useState<ReferenceImageAsset | null>(null)
   const [characterImagePrompt, setCharacterImagePrompt] = useState('')
   const [refinePrompt, setRefinePrompt] = useState('')
-  const [voicePreviewText, setVoicePreviewText] = useState('这是角色声线试听。请确认音色、语速、语气和角色是否匹配。')
-  const [voicePreviewUrl, setVoicePreviewUrl] = useState('')
-  const [voicePreviewProvider, setVoicePreviewProvider] = useState('')
-  const [voiceCatalogLoading, setVoiceCatalogLoading] = useState(false)
-  const [voiceCatalog, setVoiceCatalog] = useState<DoubaoVoiceCatalogItem[]>([])
-  const [loadedProfile, setLoadedProfile] = useState<CharacterProfile | null>(null)
 
   const profileToDraft = (profile: CharacterProfile) => ({
     name: profile.name || '',
@@ -126,14 +108,7 @@ export const CharacterLibraryPage: React.FC = () => {
     speaking_style: profile.speaking_style || '',
     common_actions: profile.common_actions || '',
     emotion_baseline: profile.emotion_baseline || '',
-    voice_provider: profile.voice_profile?.provider || 'doubao-tts',
-    voice_type: profile.voice_profile?.voice_type || '',
-    voice_name: profile.voice_profile?.voice_name || '',
-    voice_emotion: profile.voice_profile?.emotion || '',
-    voice_language: profile.voice_profile?.language || 'zh',
-    voice_speed_ratio: String(profile.voice_profile?.speed_ratio ?? 1.0),
-    voice_pitch_ratio: String(profile.voice_profile?.pitch_ratio ?? 1.0),
-    voice_volume_ratio: String(profile.voice_profile?.volume_ratio ?? 1.0),
+    voice_description: profile.voice_description || '',
     forbidden_behaviors: profile.forbidden_behaviors || '',
     prompt_hint: profile.prompt_hint || '',
     llm_summary: profile.llm_summary || '',
@@ -174,42 +149,12 @@ export const CharacterLibraryPage: React.FC = () => {
     setCharacterImage(null)
     setCharacterImagePrompt('')
     setRefinePrompt('')
-    setVoicePreviewText('这是角色声线试听。请确认音色、语速、语气和角色是否匹配。')
-    setVoicePreviewUrl('')
-    setVoicePreviewProvider('')
-    setLoadedProfile(null)
   }
 
   const exitEditMode = () => {
     resetDraft()
     navigate('/characters/new')
   }
-
-  useEffect(() => {
-    const loadVoiceCatalog = async () => {
-      setVoiceCatalogLoading(true)
-      try {
-        const response = await scriptPipelineApi.listDoubaoTtsVoices()
-        setVoiceCatalog(response.data.items || [])
-      } catch {
-        message.error('豆包音色目录加载失败')
-      } finally {
-        setVoiceCatalogLoading(false)
-      }
-    }
-
-    void loadVoiceCatalog()
-  }, [])
-
-  useEffect(() => {
-    if (!presetVoiceType || isEditMode) {
-      return
-    }
-    setCharacterDraft((previous) => ({
-      ...previous,
-      voice_type: previous.voice_type || presetVoiceType,
-    }))
-  }, [isEditMode, presetVoiceType])
 
   useEffect(() => {
     if (!editingCharacterId) {
@@ -221,7 +166,6 @@ export const CharacterLibraryPage: React.FC = () => {
       try {
         const response = await scriptPipelineApi.getCharacter(editingCharacterId)
         const profile = response.data.item
-        setLoadedProfile(profile)
         setCharacterDraft(profileToDraft(profile))
 
         const imageAsset = assetFromProfileImage(
@@ -236,8 +180,6 @@ export const CharacterLibraryPage: React.FC = () => {
         setReferenceFileList([])
         setCharacterImagePrompt('')
         setRefinePrompt('')
-        setVoicePreviewUrl('')
-        setVoicePreviewProvider('')
       } catch (requestError: unknown) {
         const responseError = requestError as { response?: { data?: { detail?: string } } }
         message.error(responseError.response?.data?.detail || '角色档案加载失败')
@@ -248,7 +190,7 @@ export const CharacterLibraryPage: React.FC = () => {
     }
 
     void loadCharacter()
-  }, [editingCharacterId, setSearchParams])
+  }, [editingCharacterId, navigate])
 
   const handleDraftChange = (field: keyof typeof emptyCharacterDraft, value: string) => {
     setCharacterDraft((previous) => ({ ...previous, [field]: value }))
@@ -318,6 +260,7 @@ export const CharacterLibraryPage: React.FC = () => {
         ['forbidden_traits', fields.forbidden_traits || []],
         ['aliases', fields.aliases || []],
       ] as const
+
       listMappings.forEach(([key, values]) => {
         if (!values.length) {
           return
@@ -439,41 +382,6 @@ export const CharacterLibraryPage: React.FC = () => {
     }
   }
 
-  const handleGenerateVoicePreview = async () => {
-    const voiceProvider = characterDraft.voice_provider.trim() || 'doubao-tts'
-    if (!voiceProvider) {
-      message.warning('请先选择语音服务')
-      return
-    }
-
-    setVoicePreviewGenerating(true)
-    try {
-      const response = await scriptPipelineApi.generateCharacterVoicePreview({
-        text: voicePreviewText.trim(),
-        character_name: characterDraft.name.trim() || loadedProfile?.name || '角色',
-        voice_profile: {
-          provider: voiceProvider,
-          voice_type: characterDraft.voice_type.trim(),
-          voice_name: characterDraft.voice_name.trim(),
-          emotion: characterDraft.voice_emotion.trim(),
-          language: characterDraft.voice_language.trim(),
-          speed_ratio: Number(characterDraft.voice_speed_ratio || '1') || 1,
-          pitch_ratio: Number(characterDraft.voice_pitch_ratio || '1') || 1,
-          volume_ratio: Number(characterDraft.voice_volume_ratio || '1') || 1,
-        },
-      })
-      setVoicePreviewUrl(resolveAssetUrl(response.data.asset_url))
-      setVoicePreviewProvider(response.data.provider || '')
-      setVoicePreviewText(response.data.text || voicePreviewText)
-      message.success('角色试音生成完成')
-    } catch (requestError: unknown) {
-      const responseError = requestError as { response?: { data?: { detail?: string } } }
-      message.error(responseError.response?.data?.detail || '角色试音生成失败')
-    } finally {
-      setVoicePreviewGenerating(false)
-    }
-  }
-
   const handleCreateCharacter = async () => {
     if (!characterDraft.name.trim()) {
       message.warning('请先填写角色名称')
@@ -501,16 +409,7 @@ export const CharacterLibraryPage: React.FC = () => {
       speaking_style: characterDraft.speaking_style.trim(),
       common_actions: characterDraft.common_actions.trim(),
       emotion_baseline: characterDraft.emotion_baseline.trim(),
-      voice_profile: {
-        provider: characterDraft.voice_provider.trim() || 'doubao-tts',
-        voice_type: characterDraft.voice_type.trim(),
-        voice_name: characterDraft.voice_name.trim(),
-        emotion: characterDraft.voice_emotion.trim(),
-        language: characterDraft.voice_language.trim(),
-        speed_ratio: Number(characterDraft.voice_speed_ratio || '1') || 1,
-        pitch_ratio: Number(characterDraft.voice_pitch_ratio || '1') || 1,
-        volume_ratio: Number(characterDraft.voice_volume_ratio || '1') || 1,
-      },
+      voice_description: characterDraft.voice_description.trim(),
       forbidden_behaviors: characterDraft.forbidden_behaviors.trim(),
       prompt_hint: characterDraft.prompt_hint.trim(),
       llm_summary: characterDraft.llm_summary.trim(),
@@ -554,32 +453,6 @@ export const CharacterLibraryPage: React.FC = () => {
     [characterDraft.tags],
   )
 
-  const voiceOptions = useMemo(
-    () => {
-      const grouped = new Map<string, DoubaoVoiceCatalogItem[]>()
-      voiceCatalog.forEach((item) => {
-        const key = item.scenario || '未分组'
-        const current = grouped.get(key) || []
-        current.push(item)
-        grouped.set(key, current)
-      })
-      return Array.from(grouped.entries()).map(([scenario, items]) => ({
-        label: scenario,
-        options: items.map((item) => ({
-          value: item.voice_type,
-          label: `${item.voice_name} · ${item.language || '未标注语言'} · ${item.style || '未标注风格'}`,
-          item,
-        })),
-      }))
-    },
-    [voiceCatalog],
-  )
-
-  const selectedVoiceMeta = useMemo(
-    () => voiceCatalog.find((item) => item.voice_type === characterDraft.voice_type.trim()) || null,
-    [characterDraft.voice_type, voiceCatalog],
-  )
-
   return (
     <Space direction="vertical" size={20} style={{ width: '100%' }}>
       <Card
@@ -603,7 +476,7 @@ export const CharacterLibraryPage: React.FC = () => {
               <Paragraph style={{ margin: 0, color: 'rgba(255,255,255,0.72)' }}>
                 {isEditMode
                   ? '当前正在编辑已保存角色。你可以继续调整设定和角色图，保存后会直接覆盖当前档案。'
-                  : '这里专注做一件事：把角色设定和角色图打磨到满意，再保存成正式档案。已保存角色单独放到角色库页面查看。'}
+                  : '这里专注把角色设定、音色描述和角色图整理完整，再保存成正式档案。已保存角色会单独进入角色库管理。'}
               </Paragraph>
             </Space>
           </Col>
@@ -614,9 +487,6 @@ export const CharacterLibraryPage: React.FC = () => {
                   切换为新建
                 </Button>
               ) : null}
-              <Button icon={<AudioOutlined />} onClick={() => navigate('/voices')}>
-                音色目录
-              </Button>
               <Button icon={<FolderOpenOutlined />} onClick={() => navigate('/characters/library')}>
                 查看已保存角色
               </Button>
@@ -632,7 +502,7 @@ export const CharacterLibraryPage: React.FC = () => {
               type="warning"
               showIcon
               message="正在编辑角色档案"
-              description="当前角色资料已载入，可以继续调整设定、参考图和声音配置后保存。"
+              description="当前角色资料已载入，可以继续调整设定、参考图和人物表达设定后保存。"
             />
           ) : null}
 
@@ -640,23 +510,10 @@ export const CharacterLibraryPage: React.FC = () => {
             type="info"
             showIcon
             message="建议步骤"
-            description="先完善角色设定，再上传参考图或生成角色图进行微调。保存后，系统会同步整理角色参考素材，方便后续持续复用。"
-          />
-          <Alert
-            type="success"
-            showIcon
-            message="可选音色目录"
-            description="你可以先在音色目录中试听和筛选，再回到这里为角色绑定常用声线。"
-            action={
-              <Button size="small" onClick={() => navigate('/voices')}>
-                打开音色目录
-              </Button>
-            }
+            description="先完善角色设定与音色描述，再上传参考图或生成角色图进行微调。保存后，系统会同步整理角色参考素材，方便后续剧本和视频阶段持续复用。"
           />
 
-          {initializing ? (
-            <Alert type="info" showIcon message="正在加载角色档案..." />
-          ) : null}
+          {initializing ? <Alert type="info" showIcon message="正在加载角色档案..." /> : null}
 
           <Row gutter={[20, 20]} align="top">
             <Col xs={24} xl={14}>
@@ -695,10 +552,18 @@ export const CharacterLibraryPage: React.FC = () => {
 
                     <Row gutter={[12, 12]}>
                       <Col xs={24} md={8}>
-                        <Input value={characterDraft.archetype} onChange={(event) => handleDraftChange('archetype', event.target.value)} placeholder="角色原型" />
+                        <Input
+                          value={characterDraft.archetype}
+                          onChange={(event) => handleDraftChange('archetype', event.target.value)}
+                          placeholder="角色原型"
+                        />
                       </Col>
                       <Col xs={24} md={8}>
-                        <Input value={characterDraft.age_range} onChange={(event) => handleDraftChange('age_range', event.target.value)} placeholder="年龄范围" />
+                        <Input
+                          value={characterDraft.age_range}
+                          onChange={(event) => handleDraftChange('age_range', event.target.value)}
+                          placeholder="年龄范围"
+                        />
                       </Col>
                       <Col xs={24} md={8}>
                         <Input
@@ -753,13 +618,17 @@ export const CharacterLibraryPage: React.FC = () => {
                         <TextArea rows={2} value={characterDraft.gear} onChange={(event) => handleDraftChange('gear', event.target.value)} placeholder="装备" />
                       </Col>
                     </Row>
+                  </Space>
+                </Card>
 
+                <Card size="small" title="表演与声音设定" style={{ borderRadius: 16, background: '#fafcff' }}>
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
                     <Row gutter={[12, 12]}>
                       <Col xs={24} md={12}>
-                        <TextArea rows={2} value={characterDraft.speaking_style} onChange={(event) => handleDraftChange('speaking_style', event.target.value)} placeholder="说话方式" />
+                        <TextArea rows={3} value={characterDraft.speaking_style} onChange={(event) => handleDraftChange('speaking_style', event.target.value)} placeholder="说话方式" />
                       </Col>
                       <Col xs={24} md={12}>
-                        <TextArea rows={2} value={characterDraft.common_actions} onChange={(event) => handleDraftChange('common_actions', event.target.value)} placeholder="常见动作" />
+                        <TextArea rows={3} value={characterDraft.common_actions} onChange={(event) => handleDraftChange('common_actions', event.target.value)} placeholder="常见动作" />
                       </Col>
                     </Row>
 
@@ -771,6 +640,16 @@ export const CharacterLibraryPage: React.FC = () => {
                         <TextArea rows={2} value={characterDraft.forbidden_behaviors} onChange={(event) => handleDraftChange('forbidden_behaviors', event.target.value)} placeholder="禁止行为" />
                       </Col>
                     </Row>
+
+                    <TextArea
+                      rows={4}
+                      value={characterDraft.voice_description}
+                      onChange={(event) => handleDraftChange('voice_description', event.target.value)}
+                      placeholder="音色描述，例如：少女感但不尖锐，气声少，语速平稳，带一点慵懒和好奇心"
+                    />
+                    <Text type="secondary">
+                      这里只记录角色长期稳定的声音设定，用于剧本和视频提示词传递，不直接触发音频合成或试听。
+                    </Text>
                   </Space>
                 </Card>
 
@@ -798,117 +677,10 @@ export const CharacterLibraryPage: React.FC = () => {
                     <Descriptions.Item label="标签数量">{selectedTagCount} 个</Descriptions.Item>
                     <Descriptions.Item label="参考图">{referenceImage ? '已上传' : '未上传'}</Descriptions.Item>
                     <Descriptions.Item label="角色图">{characterImage?.url ? '已生成或已绑定' : '未生成'}</Descriptions.Item>
-                    <Descriptions.Item label="音色">{characterDraft.voice_type.trim() || '未指定，保存后走默认音色'}</Descriptions.Item>
+                    <Descriptions.Item label="音色描述">
+                      {characterDraft.voice_description.trim() || '未填写'}
+                    </Descriptions.Item>
                   </Descriptions>
-                </Card>
-
-                <Card
-                  size="small"
-                  title="角色语音绑定"
-                  style={{ borderRadius: 16, background: '#f7fbff' }}
-                  extra={<Tag color="blue">Doubao TTS</Tag>}
-                >
-                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                    <Text type="secondary">在这里为角色设置常用声线，后续对白会优先使用这组配置。</Text>
-                    <Row gutter={[12, 12]}>
-                      <Col xs={24} md={8} xl={24}>
-                        <Input value={characterDraft.voice_provider} onChange={(event) => handleDraftChange('voice_provider', event.target.value)} placeholder="语音服务" />
-                      </Col>
-                      <Col xs={24} md={16} xl={24}>
-                        <Select
-                          showSearch
-                          allowClear
-                          loading={voiceCatalogLoading}
-                          value={characterDraft.voice_type || undefined}
-                          placeholder="选择音色"
-                          optionFilterProp="label"
-                          options={voiceOptions}
-                          onChange={(value, option) => {
-                            const selectedValue = String(value || '')
-                            handleDraftChange('voice_type', selectedValue)
-                            const selectedItem = (option as { item?: DoubaoVoiceCatalogItem } | undefined)?.item
-                            if (selectedItem && !characterDraft.voice_name.trim()) {
-                              handleDraftChange('voice_name', selectedItem.voice_name)
-                            }
-                          }}
-                        />
-                      </Col>
-                    </Row>
-                    <Input value={characterDraft.voice_name} onChange={(event) => handleDraftChange('voice_name', event.target.value)} placeholder="音色备注名（可选）" />
-                    <Input
-                      value={characterDraft.voice_type}
-                      onChange={(event) => handleDraftChange('voice_type', event.target.value)}
-                      placeholder="也可以手动输入音色 ID"
-                    />
-                    {selectedVoiceMeta ? (
-                      <Alert
-                        type={selectedVoiceMeta.metadata_warning ? 'warning' : 'info'}
-                        showIcon
-                        message={`当前音色：${selectedVoiceMeta.voice_name}`}
-                        description={`${selectedVoiceMeta.language}｜${selectedVoiceMeta.gender}｜${selectedVoiceMeta.style}｜${selectedVoiceMeta.scenario}${
-                          selectedVoiceMeta.metadata_warning ? `｜${selectedVoiceMeta.metadata_warning}` : ''
-                        }`}
-                      />
-                    ) : null}
-                    <Row gutter={[12, 12]}>
-                      <Col xs={24} md={8} xl={24}>
-                        <Input value={characterDraft.voice_emotion} onChange={(event) => handleDraftChange('voice_emotion', event.target.value)} placeholder="情绪风格，例如 happy / serious" />
-                      </Col>
-                      <Col xs={24} md={8} xl={24}>
-                        <Input value={characterDraft.voice_language} onChange={(event) => handleDraftChange('voice_language', event.target.value)} placeholder="语言，例如 zh" />
-                      </Col>
-                      <Col xs={24}>
-                        <Text type="secondary">留空时会自动使用默认音色。建议先试听，再保存到角色档案。</Text>
-                      </Col>
-                    </Row>
-                    <Row gutter={[12, 12]}>
-                      <Col xs={24} md={8}>
-                        <Input value={characterDraft.voice_speed_ratio} onChange={(event) => handleDraftChange('voice_speed_ratio', event.target.value)} placeholder="语速，默认 1.0" />
-                      </Col>
-                      <Col xs={24} md={8}>
-                        <Input value={characterDraft.voice_pitch_ratio} onChange={(event) => handleDraftChange('voice_pitch_ratio', event.target.value)} placeholder="音高，默认 1.0" />
-                      </Col>
-                      <Col xs={24} md={8}>
-                        <Input value={characterDraft.voice_volume_ratio} onChange={(event) => handleDraftChange('voice_volume_ratio', event.target.value)} placeholder="音量，默认 1.0" />
-                      </Col>
-                    </Row>
-                    <Card
-                      size="small"
-                      title="单句试音"
-                      style={{ borderRadius: 12, background: '#fff' }}
-                      extra={voicePreviewProvider ? <Tag color="cyan">{voicePreviewProvider}</Tag> : null}
-                    >
-                      <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                        <TextArea
-                          rows={3}
-                          value={voicePreviewText}
-                          onChange={(event) => setVoicePreviewText(event.target.value)}
-                          placeholder="输入一段角色试听文本"
-                        />
-                        <Space wrap>
-                          <Button
-                            type="primary"
-                            icon={<PlayCircleOutlined />}
-                            loading={voicePreviewGenerating}
-                            onClick={handleGenerateVoicePreview}
-                          >
-                            生成试听
-                          </Button>
-                          <Text type="secondary">建议用角色常说的话来验证音色、语速和情绪是否贴合。</Text>
-                        </Space>
-                        {voicePreviewUrl ? (
-                          <audio
-                            key={voicePreviewUrl}
-                            controls
-                            src={voicePreviewUrl}
-                            style={{ width: '100%' }}
-                          />
-                        ) : (
-                          <Text type="secondary">生成后会在这里直接播放试听音频。</Text>
-                        )}
-                      </Space>
-                    </Card>
-                  </Space>
                 </Card>
 
                 <Card

@@ -21,11 +21,14 @@ export const LoginPage: React.FC = () => {
 
   const redirectTo = (location.state as { from?: string } | null)?.from || '/script-pipeline'
 
-  const handleLogin = async (values: { email: string; password: string }) => {
+  const handleLogin = async (values: { account: string; password: string }) => {
     setLoading(true)
     setError(null)
     try {
-      const response = await scriptPipelineApi.login(values)
+      const response = await scriptPipelineApi.login({
+        account: values.account,
+        password: values.password,
+      })
       setAuth(response.data.access_token, response.data.user)
       message.success('登录成功')
       navigate(redirectTo, { replace: true })
@@ -86,11 +89,11 @@ export const LoginPage: React.FC = () => {
                 children: (
                   <Form layout="vertical" onFinish={handleLogin}>
                     <Form.Item
-                      label="邮箱"
-                      name="email"
-                      rules={[{ required: true, message: '请输入邮箱' }]}
+                      label="邮箱或用户昵称"
+                      name="account"
+                      rules={[{ required: true, message: '请输入邮箱或用户昵称' }]}
                     >
-                      <Input prefix={<MailOutlined />} placeholder="请输入邮箱" />
+                      <Input prefix={<UserOutlined />} placeholder="请输入邮箱或用户昵称" />
                     </Form.Item>
                     <Form.Item
                       label="密码"

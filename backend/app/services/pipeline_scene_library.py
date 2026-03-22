@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.pipeline_scene_profile import PipelineSceneProfile
-from app.services.nanobanana_pro import NanoBananaProClient
+from app.services.preferred_image_generation import PreferredImageGenerationClient
 
 
 class PipelineSceneLibraryService:
@@ -24,7 +24,7 @@ class PipelineSceneLibraryService:
         self.prototype_root = self.library_root / "prototypes"
         self.reference_root.mkdir(parents=True, exist_ok=True)
         self.prototype_root.mkdir(parents=True, exist_ok=True)
-        self.nanobanana = NanoBananaProClient()
+        self.image_generator = PreferredImageGenerationClient()
 
     async def list_profiles(self, db: AsyncSession) -> List[Dict[str, Any]]:
         result = await db.execute(
@@ -249,28 +249,26 @@ class PipelineSceneLibraryService:
 
         if base_path and base_path.exists():
             result = await asyncio.to_thread(
-                self.nanobanana.generate_image_to_image,
+                self.image_generator.generate_image_to_image,
                 str(base_path),
                 prompt,
                 "16:9",
                 "2k",
             )
-            source = "nanobanana-scene-refine"
         else:
             result = await asyncio.to_thread(
-                self.nanobanana.generate_text_to_image,
+                self.image_generator.generate_text_to_image,
                 prompt,
                 "16:9",
                 "2k",
             )
-            source = "nanobanana-scene-prototype"
 
         if not result.get("success"):
-            raise RuntimeError(result.get("error") or "NanoBanana 场景图生成失败")
+            raise RuntimeError(result.get("error") or "场景图生成失败")
 
         image_data = result.get("image_data")
         if not image_data:
-            raise RuntimeError("NanoBanana 未返回场景图片数据")
+            raise RuntimeError("图片生成服务未返回场景图片数据")
 
         asset_id = uuid.uuid4().hex
         safe_name = f"{asset_id}_scene.png"
@@ -282,7 +280,7 @@ class PipelineSceneLibraryService:
             "asset_type": "image/png",
             "asset_filename": safe_name,
             "prompt": prompt,
-            "source": source,
+            "source": str(result.get("source") or "image-provider-scene"),
             "status": "completed",
             "notes": "用户可见场景原型图，可继续微调后保存。",
         }

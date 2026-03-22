@@ -6,11 +6,11 @@
 -- 4. pipeline_scene_profiles
 -- 5. pipeline_render_tasks
 
-CREATE DATABASE IF NOT EXISTS `delta_force_video`
+CREATE DATABASE IF NOT EXISTS `future_of_video`
   DEFAULT CHARACTER SET utf8mb4
   DEFAULT COLLATE utf8mb4_unicode_ci;
 
-USE `delta_force_video`;
+USE `future_of_video`;
 
 SET NAMES utf8mb4;
 
@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS `pipeline_character_profiles` (
   `speaking_style` TEXT NULL,
   `common_actions` TEXT NULL,
   `emotion_baseline` TEXT NULL,
+  `voice_description` TEXT NULL,
   `voice_profile` JSON NULL,
   `forbidden_behaviors` TEXT NULL,
   `prompt_hint` TEXT NULL,

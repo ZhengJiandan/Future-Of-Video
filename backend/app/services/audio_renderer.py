@@ -78,6 +78,65 @@ class AudioLibraryAsset:
 class LocalAudioLibrary:
     AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac"}
     AUDIO_KINDS = ("sfx", "ambience", "music")
+    LOW_SIGNAL_TAGS = {
+        "ambience": {"环境音", "ambient", "loop", "tone", "room", "底噪"},
+        "music": {"氛围", "铺底"},
+        "sfx": set(),
+    }
+    SETTING_TAGS = {
+        "赛博",
+        "科幻",
+        "太空",
+        "城堡",
+        "废弃",
+        "东方",
+        "古风",
+        "寒冬",
+        "winter",
+        "space",
+        "castle",
+        "abandoned",
+        "cyberworld",
+    }
+    PROMPT_HINTS = {
+        "ambience": {
+            "后院": ["庭院", "院子", "户外"],
+            "院内": ["庭院", "院子", "户外"],
+            "雨后": ["风声", "户外", "庭院"],
+            "便利店": ["便利店", "商店", "冰柜", "fridge", "shop", "室内"],
+            "店内": ["商店", "室内", "冰柜", "shop", "fridge"],
+            "药铺": ["商店", "室内"],
+            "室内": ["室内", "内景", "room", "interior"],
+            "悬疑": ["悬疑", "紧张", "压迫", "dark", "tension"],
+            "危险": ["紧张", "压迫", "tension"],
+            "昏暗": ["暗场", "dark"],
+        },
+        "music": {
+            "悬疑": ["悬疑", "紧张", "压迫", "tension"],
+            "危险": ["紧张", "压迫", "tension"],
+            "克制": ["压抑"],
+            "安静": ["温柔", "舒缓"],
+            "悲伤": ["悲伤", "低落", "沉思", "sad"],
+            "古风": ["古风", "东方", "oriental"],
+            "昏暗": ["压抑", "悬疑"],
+        },
+        "sfx": {
+            "潜行": ["脚步", "走路", "摩擦", "rustle"],
+            "贴地": ["脚步", "摩擦"],
+            "落地": ["落地", "landing", "脚步"],
+            "转身": ["转身", "摩擦", "rustle"],
+            "扑": ["落地", "碰撞", "hit"],
+            "打斗": ["打斗", "碰撞", "击中", "fight", "hit"],
+            "对峙": ["打斗", "碰撞", "fight"],
+            "碰撞": ["碰撞", "击中", "hit"],
+            "脚步": ["脚步", "走路", "footstep"],
+        },
+    }
+    MIN_SCORE_BY_KIND = {
+        "ambience": 2,
+        "music": 2,
+        "sfx": 2,
+    }
 
     def __init__(self, *, root_dir: Path, manifest_path: Optional[Path] = None) -> None:
         self.root_dir = Path(root_dir)
@@ -93,17 +152,35 @@ class LocalAudioLibrary:
             return None
 
         normalized_prompt = self._normalize_text(prompt)
+        prompt_terms = self._build_prompt_terms(kind=kind, normalized_prompt=normalized_prompt)
         scored = sorted(
             entries,
             key=lambda item: (
-                self._score_entry(item=item, normalized_prompt=normalized_prompt),
+                self._score_entry(
+                    item=item,
+                    kind=kind,
+                    normalized_prompt=normalized_prompt,
+                    prompt_terms=prompt_terms,
+                ),
                 1 if item.is_default else 0,
                 len(item.tags),
                 item.label,
             ),
             reverse=True,
         )
-        return scored[0] if scored else None
+        if not scored:
+            return None
+
+        best = scored[0]
+        best_score = self._score_entry(
+            item=best,
+            kind=kind,
+            normalized_prompt=normalized_prompt,
+            prompt_terms=prompt_terms,
+        )
+        if best_score < self.MIN_SCORE_BY_KIND.get(kind, 1):
+            return None
+        return best
 
     def _load_entries(self) -> Dict[str, List[AudioLibraryAsset]]:
         entries_by_kind: Dict[str, List[AudioLibraryAsset]] = {kind: [] for kind in self.AUDIO_KINDS}
@@ -183,27 +260,69 @@ class LocalAudioLibrary:
                 unique_tags.append(item)
         return unique_tags
 
-    def _score_entry(self, *, item: AudioLibraryAsset, normalized_prompt: str) -> int:
-        score = 1 if item.is_default else 0
+    def _score_entry(
+        self,
+        *,
+        item: AudioLibraryAsset,
+        kind: str,
+        normalized_prompt: str,
+        prompt_terms: set[str],
+    ) -> int:
+        score = 0
         if not normalized_prompt:
-            return score
+            return 1 if item.is_default else 0
 
         label = self._normalize_text(item.label)
-        if label and label in normalized_prompt:
+        if label and label in prompt_terms:
             score += 4
 
         stem = self._normalize_text(item.path.stem)
-        if stem and stem in normalized_prompt:
+        if stem and stem in prompt_terms:
             score += 3
 
         for tag in item.tags:
             normalized_tag = self._normalize_text(tag)
-            if normalized_tag and normalized_tag in normalized_prompt:
+            if not normalized_tag:
+                continue
+            if normalized_tag in self._low_signal_tags_for_kind(kind):
+                continue
+            if normalized_tag in prompt_terms:
                 score += 2 if len(normalized_tag) <= 2 else 3
+                continue
+            if normalized_tag in self._setting_tags() and normalized_tag not in prompt_terms:
+                score -= 2
+        if item.is_default and score > 0:
+            score += 1
         return score
 
     def _normalize_text(self, value: str) -> str:
         return re.sub(r"[\s_\-./|]+", "", str(value or "").strip().lower())
+
+    def _build_prompt_terms(self, *, kind: str, normalized_prompt: str) -> set[str]:
+        terms = {normalized_prompt} if normalized_prompt else set()
+        for raw_hint, aliases in self.PROMPT_HINTS.get(kind, {}).items():
+            normalized_hint = self._normalize_text(raw_hint)
+            if normalized_hint and normalized_hint in normalized_prompt:
+                terms.add(normalized_hint)
+                for alias in aliases:
+                    normalized_alias = self._normalize_text(alias)
+                    if normalized_alias:
+                        terms.add(normalized_alias)
+        return terms
+
+    def _low_signal_tags_for_kind(self, kind: str) -> set[str]:
+        return {
+            self._normalize_text(tag)
+            for tag in self.LOW_SIGNAL_TAGS.get(kind, set())
+            if self._normalize_text(tag)
+        }
+
+    def _setting_tags(self) -> set[str]:
+        return {
+            self._normalize_text(tag)
+            for tag in self.SETTING_TAGS
+            if self._normalize_text(tag)
+        }
 
     def _bounded_gain(self, value: Any) -> float:
         try:

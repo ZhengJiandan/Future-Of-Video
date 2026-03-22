@@ -15,7 +15,6 @@ import {
   message,
 } from 'antd'
 import {
-  AudioOutlined,
   DeleteOutlined,
   EditOutlined,
   FolderOpenOutlined,
@@ -133,9 +132,6 @@ export const CharacterLibraryListPage: React.FC = () => {
             <Space wrap>
               <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadCharacters()}>
                 刷新列表
-              </Button>
-              <Button icon={<AudioOutlined />} onClick={() => navigate('/voices')}>
-                音色目录
               </Button>
               <Button icon={<PlusOutlined />} type="primary" onClick={() => navigate('/characters/new')}>
                 新建角色

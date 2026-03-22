@@ -13,7 +13,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, inspect, pool, text
 
 from app.core.config import settings
-from app.db.base import Base
+from app.db.base import Base, build_sync_database_url
 from app.models import (
     PipelineCharacterProfile,
     PipelineProject,
@@ -41,7 +41,7 @@ ALEMBIC_VERSION_LENGTH = 128
 
 
 def get_url() -> str:
-    return settings.DATABASE_URL.replace("+aiomysql", "+pymysql")
+    return build_sync_database_url(settings.DATABASE_URL)
 
 
 def ensure_alembic_version_capacity(connection) -> None:

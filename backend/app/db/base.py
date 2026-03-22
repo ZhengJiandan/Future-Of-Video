@@ -16,13 +16,46 @@ logger = logging.getLogger(__name__)
 # 创建声明性基类
 Base = declarative_base()
 
+def build_sync_database_url(database_url: str) -> str:
+    if database_url.startswith("sqlite+aiosqlite"):
+        return database_url.replace("+aiosqlite", "", 1)
+    if database_url.startswith("mysql+aiomysql"):
+        return database_url.replace("+aiomysql", "+pymysql", 1)
+    return database_url
+
+
+def build_sync_engine_kwargs(database_url: str) -> dict:
+    if database_url.startswith("sqlite"):
+        return {
+            "connect_args": {"check_same_thread": False},
+            "echo": settings.DEBUG,
+        }
+    return {
+        "pool_pre_ping": True,
+        "pool_size": settings.DATABASE_POOL_SIZE,
+        "max_overflow": settings.DATABASE_MAX_OVERFLOW,
+        "echo": settings.DEBUG,
+    }
+
+
+def build_async_engine_kwargs(database_url: str) -> dict:
+    if database_url.startswith("sqlite"):
+        return {
+            "connect_args": {"check_same_thread": False},
+            "echo": settings.DEBUG,
+        }
+    return {
+        "pool_pre_ping": True,
+        "pool_size": settings.DATABASE_POOL_SIZE,
+        "max_overflow": settings.DATABASE_MAX_OVERFLOW,
+        "echo": settings.DEBUG,
+    }
+
+
 # 同步引擎（用于Alembic迁移）
 sync_engine = create_engine(
-    settings.DATABASE_URL.replace("+aiomysql", "+pymysql"),
-    pool_pre_ping=True,
-    pool_size=settings.DATABASE_POOL_SIZE,
-    max_overflow=settings.DATABASE_MAX_OVERFLOW,
-    echo=settings.DEBUG
+    build_sync_database_url(settings.DATABASE_URL),
+    **build_sync_engine_kwargs(settings.DATABASE_URL),
 )
 
 SyncSessionLocal = sessionmaker(
@@ -34,10 +67,7 @@ SyncSessionLocal = sessionmaker(
 # 异步引擎（用于应用运行时）
 async_engine = create_async_engine(
     settings.DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=settings.DATABASE_POOL_SIZE,
-    max_overflow=settings.DATABASE_MAX_OVERFLOW,
-    echo=settings.DEBUG
+    **build_async_engine_kwargs(settings.DATABASE_URL),
 )
 
 AsyncSessionLocal = sessionmaker(
@@ -52,6 +82,7 @@ AsyncSessionLocal = sessionmaker(
 CHARACTER_PROFILE_COMPAT_COLUMNS = {
     "face_closeup_image_url": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `face_closeup_image_url` VARCHAR(500) NULL AFTER `three_view_prompt`",
     "face_closeup_image_path": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `face_closeup_image_path` VARCHAR(500) NULL AFTER `face_closeup_image_url`",
+    "voice_description": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `voice_description` TEXT NULL AFTER `emotion_baseline`",
 }
 
 
@@ -147,3 +178,6 @@ async def _ensure_schema_compatibility(conn: AsyncSession) -> None:
         if "face_closeup_image_path" not in existing_columns:
             logger.warning("Auto-migrating missing column: pipeline_character_profiles.face_closeup_image_path")
             await conn.execute(text("ALTER TABLE pipeline_character_profiles ADD COLUMN face_closeup_image_path VARCHAR(500)"))
+        if "voice_description" not in existing_columns:
+            logger.warning("Auto-migrating missing column: pipeline_character_profiles.voice_description")
+            await conn.execute(text("ALTER TABLE pipeline_character_profiles ADD COLUMN voice_description TEXT"))

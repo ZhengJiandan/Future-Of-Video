@@ -18,18 +18,17 @@ import time
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db import get_db
-from app.services.doubao_voice_catalog import doubao_voice_catalog_service
 from app.services.auth_service import get_current_user
 from app.services.pipeline_character_library import pipeline_character_library_service
 from app.services.pipeline_scene_library import pipeline_scene_library_service
 from app.services.pipeline_workflow import pipeline_workflow_service
 from app.services.profile_image_analyzer import profile_image_analyzer_service
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +43,6 @@ class ReferenceAssetPayload(BaseModel):
     content_type: str = "image/png"
     size: int = 0
     source: str = "upload"
-
-
-class DoubaoVoiceCatalogItemPayload(BaseModel):
-    voice_type: str
-    voice_name: str
-    scenario: str = ""
-    language: str = ""
-    gender: str = ""
-    style: str = ""
-    provider: str = "doubao-tts"
-    metadata_warning: str = ""
 
 
 class CharacterProfilePayload(BaseModel):
@@ -79,7 +67,7 @@ class CharacterProfilePayload(BaseModel):
     speaking_style: str = ""
     common_actions: str = ""
     emotion_baseline: str = ""
-    voice_profile: Dict[str, Any] = Field(default_factory=dict)
+    voice_description: str = ""
     forbidden_behaviors: str = ""
     prompt_hint: str = ""
     llm_summary: str = ""
@@ -122,7 +110,7 @@ class CreateCharacterRequest(BaseModel):
     speaking_style: str = Field(default="", description="说话方式")
     common_actions: str = Field(default="", description="常见动作")
     emotion_baseline: str = Field(default="", description="情绪基线")
-    voice_profile: Dict[str, Any] = Field(default_factory=dict, description="角色语音绑定配置")
+    voice_description: str = Field(default="", description="角色音色描述")
     forbidden_behaviors: str = Field(default="", description="禁止行为")
     prompt_hint: str = Field(default="", description="额外提示词")
     llm_summary: str = Field(default="", description="给剧本模型的压缩档案")
@@ -140,6 +128,7 @@ class CreateCharacterRequest(BaseModel):
     three_view_image_url: str = Field(default="", description="三视图图片 URL")
     three_view_prompt: str = Field(default="", description="三视图生成提示词")
     face_closeup_image_url: str = Field(default="", description="面部特写图片 URL")
+    auto_generate_identity_assets: bool = Field(default=True, description="是否自动生成三视图和面部特写")
 
 
 class SceneProfilePayload(BaseModel):
@@ -230,12 +219,6 @@ class GenerateCharacterPrototypeRequest(BaseModel):
     llm_summary: str = Field(default="", description="压缩档案")
     image_prompt_base: str = Field(default="", description="图像稳定描述")
     refine_prompt: str = Field(default="", description="用户微调要求")
-
-
-class GenerateCharacterVoicePreviewRequest(BaseModel):
-    text: str = Field(default="", description="试听文本")
-    character_name: str = Field(default="", description="角色名称")
-    voice_profile: Dict[str, Any] = Field(default_factory=dict, description="角色语音绑定配置")
 
 
 class GenerateScenePrototypeRequest(BaseModel):
@@ -409,11 +392,7 @@ async def list_characters(db: AsyncSession = Depends(get_db)):
 
 @router.get("/tts/voices")
 async def list_tts_voices():
-    catalog = doubao_voice_catalog_service.list_voices()
-    return {
-        "success": True,
-        **catalog,
-    }
+    raise HTTPException(status_code=410, detail="旧版音色目录链路已停用")
 
 
 @router.get("/characters/{character_id}")
@@ -529,19 +508,8 @@ async def generate_character_prototype(request: GenerateCharacterPrototypeReques
 
 
 @router.post("/characters/generate-voice-preview")
-async def generate_character_voice_preview(request: GenerateCharacterVoicePreviewRequest):
-    try:
-        result = await pipeline_character_library_service.generate_voice_preview(**request.model_dump())
-        return {
-            "success": True,
-            "message": "角色试音生成完成",
-            **result,
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.error("Generate character voice preview failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="角色试音生成失败，请稍后重试") from exc
+async def generate_character_voice_preview():
+    raise HTTPException(status_code=410, detail="旧版角色试音链路已停用")
 
 
 @router.post("/characters/analyze-reference")
@@ -731,8 +699,9 @@ class RenderProjectRequest(BaseModel):
     watermark: bool = Field(default=False, description="是否添加水印")
     provider_model: str = Field(default="", description="provider 模型 ID")
     camera_fixed: bool = Field(default=False, description="是否固定镜头")
-    generate_audio: bool = Field(default=True, description="是否规划统一音频")
+    generate_audio: bool = Field(default=True, description="是否启用视频模型自带音频")
     return_last_frame: bool = Field(default=False, description="是否返回尾帧")
+    auto_continue_segments: bool = Field(default=False, description="是否自动连续生成所有片段")
     service_tier: str = Field(default="default", description="provider 服务等级")
     seed: Optional[int] = Field(default=None, description="随机种子")
     selected_character_ids: List[str] = Field(default_factory=list, description="已选角色档案 ID")
@@ -741,6 +710,10 @@ class RenderProjectRequest(BaseModel):
     scene_profiles: List[SceneProfilePayload] = Field(default_factory=list, description="直接传入的场景档案")
     segments: List[SegmentPayload] = Field(..., min_length=1)
     keyframes: List[KeyframeBundlePayload] = Field(default_factory=list)
+
+
+class ResumeRenderTaskRequest(BaseModel):
+    auto_continue_segments: Optional[bool] = Field(default=None, description="是否切换为自动连续生成剩余片段")
 
 
 @router.post("/upload-reference")
@@ -904,6 +877,20 @@ async def render_project(
 ):
     """发起片段渲染和最终合成。"""
     try:
+        existing_task_state = await pipeline_workflow_service.find_active_render_task_for_project(
+            user_id=current_user.id,
+            project_id=request.project_id,
+        )
+        if existing_task_state is not None:
+            return {
+                "success": True,
+                "message": "当前项目已有进行中的渲染任务，已直接复用现有任务，避免重复生成。",
+                "task_id": existing_task_state.task_id,
+                "status": existing_task_state.status,
+                "current_step": existing_task_state.current_step,
+                "renderer": existing_task_state.renderer,
+            }
+
         resolved_character_profiles = await _resolve_character_profiles(
             db,
             selected_character_ids=request.selected_character_ids,
@@ -931,6 +918,7 @@ async def render_project(
                 "camera_fixed": request.camera_fixed,
                 "generate_audio": request.generate_audio,
                 "return_last_frame": request.return_last_frame,
+                "auto_continue_segments": request.auto_continue_segments,
                 "service_tier": request.service_tier,
                 "seed": request.seed,
             },
@@ -1004,11 +992,16 @@ async def pause_render_task(
 @router.post("/render/{task_id}/resume")
 async def resume_render_task(
     task_id: str,
+    request: ResumeRenderTaskRequest = Body(default_factory=ResumeRenderTaskRequest),
     current_user=Depends(get_current_user),
 ):
     """继续已暂停的渲染任务。"""
     try:
-        state = await pipeline_workflow_service.resume_render_task(task_id, user_id=current_user.id)
+        state = await pipeline_workflow_service.resume_render_task(
+            task_id,
+            user_id=current_user.id,
+            auto_continue_segments=request.auto_continue_segments,
+        )
         if not state:
             raise HTTPException(status_code=404, detail="任务不存在")
         return state.to_dict()

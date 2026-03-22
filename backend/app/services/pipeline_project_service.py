@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+import logging
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import delete, select
@@ -9,15 +10,46 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.pipeline_project import PipelineProject
 
+logger = logging.getLogger(__name__)
+
 
 class PipelineProjectService:
     async def list_projects(self, db: AsyncSession, user_id: str) -> List[Dict[str, Any]]:
         result = await db.execute(
-            select(PipelineProject)
+            select(
+                PipelineProject.id,
+                PipelineProject.user_id,
+                PipelineProject.project_title,
+                PipelineProject.current_step,
+                PipelineProject.status,
+                PipelineProject.last_render_task_id,
+                PipelineProject.summary,
+                PipelineProject.created_at,
+                PipelineProject.updated_at,
+            )
             .where(PipelineProject.user_id == user_id)
             .order_by(PipelineProject.updated_at.desc(), PipelineProject.created_at.desc())
         )
-        return [project.to_dict() for project in result.scalars().all()]
+        items: List[Dict[str, Any]] = []
+        for row in result.all():
+            try:
+                items.append(
+                    {
+                        "id": row.id,
+                        "user_id": row.user_id,
+                        "project_title": row.project_title or "未命名项目",
+                        "current_step": int(row.current_step or 0),
+                        "state": {},
+                        "status": row.status or "draft",
+                        "last_render_task_id": row.last_render_task_id or "",
+                        "summary": row.summary or "",
+                        "created_at": row.created_at.isoformat() if row.created_at else "",
+                        "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+                    }
+                )
+            except Exception:
+                logger.exception("Failed to serialize project list item: project_id=%s", getattr(row, "id", ""))
+        return items
 
     async def get_project(self, db: AsyncSession, user_id: str, project_id: str) -> Optional[Dict[str, Any]]:
         result = await db.execute(
@@ -33,9 +65,10 @@ class PipelineProjectService:
         result = await db.execute(
             select(PipelineProject)
             .where(PipelineProject.user_id == user_id)
+            .limit(1)
             .order_by(PipelineProject.updated_at.desc(), PipelineProject.created_at.desc())
         )
-        project = result.scalar_one_or_none()
+        project = result.scalars().first()
         return project.to_dict() if project else None
 
     async def create_project(
@@ -94,9 +127,10 @@ class PipelineProjectService:
             result = await db.execute(
                 select(PipelineProject)
                 .where(PipelineProject.user_id == user_id)
+                .limit(1)
                 .order_by(PipelineProject.updated_at.desc(), PipelineProject.created_at.desc())
             )
-            project = result.scalar_one_or_none()
+            project = result.scalars().first()
         now = datetime.utcnow()
 
         if not project:

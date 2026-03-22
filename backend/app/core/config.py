@@ -1,5 +1,5 @@
 """
-核心配置文件 - 开发测试版（使用SQLite）
+应用核心配置。
 """
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
@@ -18,24 +18,23 @@ class Settings(BaseSettings):
     # 应用基础配置
     APP_NAME: str = "future of video"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = Field(default=True, validation_alias=AliasChoices("DEBUG"))
+    DEBUG: bool = Field(default=False, validation_alias=AliasChoices("DEBUG"))
     ENV: str = Field(default="development", validation_alias=AliasChoices("ENV", "ENVIRONMENT"))
-    PIPELINE_RUNTIME_MODE: str = "full"
+    PIPELINE_RUNTIME_MODE: str = "minimal"
     
     # 服务器配置
     HOST: str = "0.0.0.0"
-    PORT: int = 8080  # 修改为8080，避免8000端口被占用
+    PORT: int = 8080
     WORKERS: int = 1
     
-    # 数据库配置 - 使用 MySQL
+    # 数据库配置
     # URL 格式: mysql+aiomysql://用户名:密码@主机:端口/数据库名
     # 注意: 密码中的 @ 需要替换为 %40
-    DATABASE_URL: str = "mysql+aiomysql://user:password@127.0.0.1:3306/delta_force_video"
-    # 开发测试可使用 SQLite：sqlite+aiosqlite:///./delta_force_video.db
+    DATABASE_URL: str = "mysql+aiomysql://user:password@127.0.0.1:3306/future_of_video"
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 10
     
-    # Redis配置 - 开发模式可选
+    # Redis 配置
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_POOL_SIZE: int = 50
     
@@ -51,20 +50,21 @@ class Settings(BaseSettings):
     ALLOWED_IMAGE_TYPES: List[str] = ["image/jpeg", "image/png", "image/webp"]
     ALLOWED_VIDEO_TYPES: List[str] = ["video/mp4", "video/webm"]
     
-    # AI视频生成服务配置
-    # 可灵AI
+    # 可灵 AI
     KELING_API_KEY: Optional[str] = None
     KELING_BASE_URL: str = "https://api.kelingai.com/v1"
 
-    # NanoBanana 关键帧生成
+    # NanoBanana 图片生成
     NANOBANANA_API_KEY: Optional[str] = None
     NANOBANANA_BASE_URL: str = "https://api.laozhang.ai/v1beta/models/gemini-3-pro-image-preview:generateContent"
     ALLOW_PLACEHOLDER_KEYFRAMES: bool = True
     
-    # 豆包大模型API配置（用于剧本分析）
+    # 豆包大模型 API 配置
     DOUBAO_API_KEY: Optional[str] = None
     DOUBAO_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_MODEL: str = "doubao-seed-2-0-lite-260215"
+    DOUBAO_IMAGE_BASE_URL: str = "https://operator.las.cn-beijing.volces.com/api/v1"
+    DOUBAO_IMAGE_MODEL: str = "doubao-seedream-5-0-260128"
     DOUBAO_VIDEO_MODEL: str = "doubao-seedance-1-5-pro-251215"
     DOUBAO_TTS_API_URL: str = "https://openspeech.bytedance.com/api/v1/tts"
     DOUBAO_TTS_APP_ID: Optional[str] = None
@@ -91,8 +91,8 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4"
     OPENAI_VISION_MODEL: str = "gpt-4o-mini"
 
-    # 项目级音频链路配置
-    AUDIO_PIPELINE_ENABLED: bool = True
+    # 项目级音频后处理链路
+    AUDIO_PIPELINE_ENABLED: bool = False
     AUDIO_TTS_PROVIDER: str = "doubao-tts"
     AUDIO_SFX_PROVIDER: str = "local-library"
     AUDIO_AMBIENCE_PROVIDER: str = "local-library"
@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     LOG_FILE: Optional[str] = None
-    MODEL_DEBUG_LOGGING: bool = True
+    MODEL_DEBUG_LOGGING: bool = False
     MODEL_DEBUG_MAX_CHARS: int = 20000
     
     # 安全配置
@@ -152,7 +152,7 @@ class Settings(BaseSettings):
         if isinstance(value, bool):
             return value
         if value is None:
-            return True
+            return False
         normalized = str(value).strip().lower()
         if normalized in {"1", "true", "yes", "on", "debug", "development", "dev"}:
             return True
@@ -192,7 +192,7 @@ class Settings(BaseSettings):
     @field_validator("PIPELINE_RUNTIME_MODE", mode="before")
     @classmethod
     def normalize_pipeline_runtime_mode(cls, value):
-        normalized = str(value or "full").strip().lower()
+        normalized = str(value or "minimal").strip().lower()
         aliases = {
             "full": "full",
             "complete": "full",

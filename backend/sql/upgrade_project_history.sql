@@ -5,7 +5,7 @@
 -- 1. remove unique-per-user constraint
 -- 2. keep normal index on user_id for project list/history
 
-USE `delta_force_video`;
+USE `future_of_video`;
 
 ALTER TABLE `pipeline_projects`
   DROP INDEX `uq_pipeline_projects_user_id`;

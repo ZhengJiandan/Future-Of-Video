@@ -1,7 +1,6 @@
 import React from 'react'
 import { Button, Card, Col, Row, Space, Typography } from 'antd'
 import {
-  AudioOutlined,
   FolderOpenOutlined,
   TeamOutlined,
   ThunderboltOutlined,
@@ -19,7 +18,7 @@ export const HomePage: React.FC = () => {
         <Title level={2}>视频创作中心</Title>
         <Paragraph type="secondary" style={{ fontSize: 16, maxWidth: 600, margin: '0 auto' }}>
           从创意描述到最终成片，在同一个项目里完成剧本生成、分段确认、关键帧制作、
-          视频渲染和统一音频合成。
+          视频渲染与成片输出。
         </Paragraph>
         <Space size="large" style={{ marginTop: 24 }}>
           <Button
@@ -43,13 +42,6 @@ export const HomePage: React.FC = () => {
             onClick={() => navigate('/characters/library')}
           >
             角色档案库
-          </Button>
-          <Button
-            size="large"
-            icon={<AudioOutlined />}
-            onClick={() => navigate('/voices')}
-          >
-            音色目录
           </Button>
         </Space>
       </div>
@@ -86,7 +78,7 @@ export const HomePage: React.FC = () => {
                 声音与成片
               </Title>
               <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                视频完成后统一补充对白、音效和配乐，输出可直接查看和下载的成片。
+                视频阶段沿用模型原生音频能力，重点保证画面、节奏与最终成片交付体验。
               </Paragraph>
             </Space>
           </Card>

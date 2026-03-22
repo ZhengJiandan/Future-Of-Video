@@ -1,60 +1,71 @@
 # future of video
 
-`future of video` 是一个面向长链路创作的 AI 视频生成工作台。它把角色档案、场景档案、剧本生成、镜头拆分、关键帧生成、视频渲染和统一音频合成串成了一条可编辑、可审核、可恢复的工作流。
+`future of video` 是一个面向长链路创作的 AI 视频生成工作台。它把角色档案、场景档案、剧本生成、镜头拆分、关键帧生成和分段视频渲染串成一条可编辑、可审核、可恢复的工作流。
 
-项目当前采用前后端分离架构：
+当前仓库采用前后端分离架构：
 
 - 前端：React + Vite + Ant Design
-- 后端：FastAPI + SQLAlchemy + MySQL
+- 后端：FastAPI + SQLAlchemy + SQLite / MySQL
 - 媒体处理：FFmpeg
 - 模型调用：Doubao、OpenAI 兼容接口、NanoBanana 等外部模型能力
 - 任务调度：
-  - `full` 模式：Celery + Redis
   - `minimal` 模式：单进程本地后台任务，不依赖 Redis / Celery
+  - `full` 模式：Celery + Redis
+
+## 当前能力边界
+
+- 当前主链路以“角色 / 场景档案 -> 剧本 -> 分段 -> 关键帧 -> 视频生成”为主。
+- 分段视频支持逐段确认继续生成，也支持一键全部生成。
+- 角色的 `voice_description` 当前作为人物设定文本参与提示词，不再走旧的 TTS 绑定链路。
+- 项目级统一音频后处理链路当前默认关闭。公开视频效果目前依赖视频模型原生音频能力，或输出静音视频。
 
 ## 功能概览
 
-- 账号注册、登录和当前项目草稿保存
+- 账号注册、登录、当前项目草稿保存
 - 角色档案库
   - 角色参考图上传
   - 图片分析补全角色字段
   - 角色原型图生成
-  - 三视图生成
-  - 角色语音绑定与单句试音
+  - 三视图 / 近景锚点图生成
+  - 音色描述作为角色设定维护
 - 场景档案库
   - 场景参考图上传
   - 图片分析补全场景字段
   - 场景原型图生成
 - 剧本主链路
+  - 未匹配正式角色时自动生成临时角色草稿
   - 用户描述生成完整剧本
+  - 剧本结果前端可见、可修改
   - 剧本拆分为视频片段
-  - 片段二次校验
+  - 剧本优化阶段与拆分阶段双重连续性检查
   - 关键首帧生成与片段首尾串联
-  - 视频渲染
-  - 统一音频规划、对白 / 音效 / 环境 / 配乐合成
+  - 分段视频生成
+  - 临时角色在生成过视频后可按首帧造型保存到正式角色档案库
   - 最终成片输出
-
 
 ## 仓库结构
 
 ```text
 .
 ├── backend
+│   ├── alembic                  # 数据库迁移
 │   ├── app
-│   │   ├── api            # FastAPI 路由
-│   │   ├── core           # 配置与安全
-│   │   ├── db             # 数据库引擎与初始化
-│   │   ├── models         # SQLAlchemy 模型
-│   │   ├── services       # 核心工作流、角色/场景库、音频/视频能力
-│   │   └── workers        # Celery worker 入口
-│   ├── sql                # 初始化 SQL 与升级脚本
-│   ├── tests              # 后端测试
+│   │   ├── api                  # FastAPI 路由
+│   │   ├── core                 # 配置与安全
+│   │   ├── db                   # 数据库引擎与初始化
+│   │   ├── models               # SQLAlchemy 模型
+│   │   ├── services             # 核心工作流、角色/场景库、模型能力
+│   │   └── workers              # Celery worker 入口
+│   ├── sql                      # 初始化 SQL、升级脚本、示例种子数据
+│   ├── tests                    # 后端测试
 │   └── requirements.txt
+├── docs
+│   └── examples                 # 对外样例输入与回归用例
 ├── frontend
 │   ├── src
 │   │   ├── layouts
 │   │   ├── pages
-│   │   ├── services       # API client
+│   │   ├── services
 │   │   └── stores
 │   └── package.json
 ├── docker-compose.yml
@@ -64,28 +75,31 @@
 ## 核心流程
 
 1. 用户创建项目并输入创意描述。
-2. 选择或创建角色档案、场景档案，并可上传参考图。
-3. 后端基于档案与用户描述生成完整剧本。
-4. 剧本被拆分为多个视频片段，并做连续性校验。
-5. 系统为必要片段生成首帧，其他片段复用上一段尾帧进行串联。
-6. 视频片段生成完成后，系统统一补对白、音效、环境音与配乐。
-7. FFmpeg 合成最终成片并回写任务状态。
+2. 选择或创建角色档案、场景档案，并可上传参考图进行分析补全。
+3. 如果没有匹配到正式角色档案，系统会先按角色档案格式自动生成临时角色草稿，直接用于本次创作。
+4. 后端基于档案与用户描述生成完整剧本。
+5. 剧本在前端展示，用户可直接修改。
+6. 剧本被拆分为多个视频片段，并做连续性约束检查。
+7. 系统为必要片段生成首帧，其他片段尽量复用上一段尾帧进行串联。
+8. 分段视频按顺序生成；可逐段确认继续，也可一键全部生成。
+9. 如果临时角色已经参与视频生成，前端会提示把该角色按首次出场首帧造型保存到正式角色档案库。
+10. 系统输出最终成片并回写任务状态。
 
 ## 运行要求
 
 建议环境：
 
-- Python 3.9+
+- Python 3.10+
 - Node.js 18+
-- MySQL 8.0+
-- FFmpeg 可执行文件已安装并在 `PATH` 中可用
+- SQLite 可直接使用系统内置能力；MySQL 仅在你选择 MySQL 模式时需要
+- FFmpeg 已安装并可通过 `PATH` 调用
 
 可选组件：
 
 - Redis
 - Celery worker
 
-如果只是本地体验完整主链路，推荐直接使用 `minimal` 模式，不需要 Redis / Celery。
+如果只是本地体验主链路，推荐直接使用 `minimal` 模式，不需要 Redis / Celery。
 
 ## 快速开始
 
@@ -96,56 +110,137 @@ git clone <your-repo-url>
 cd future-of-video
 ```
 
-### 2. 准备数据库
+### 推荐路径：GitHub 新用户最短成功路径
 
-创建 MySQL 数据库，或直接执行：
+如果你只是从 GitHub 拉代码后想先把主链路跑起来，推荐直接使用：
 
-```bash
-mysql -u root -p < backend/sql/init_schema.sql
-```
+- `minimal` 模式
+- SQLite
+- 本地前后端开发模式
 
-默认数据库名示例是 `delta_force_video`。如果你使用自己的数据库名，请同步修改 `backend/.env` 中的 `DATABASE_URL`。
+最少前提：
 
-### 3. 配置后端环境变量
+- 已安装 Python 3.10+
+- 已安装 Node.js 18+
+- 已安装 FFmpeg
+- 已准备 `DOUBAO_API_KEY`
+
+注意：
+
+- 当前后端启动时会实例化剧本生成能力，所以 `DOUBAO_API_KEY` 不是“到生成功能时才需要”，而是当前最小链路的启动级依赖。
+- `OPENAI_API_KEY` 对当前最小链路不是启动必填项。
+- SQLite 模式下不需要 MySQL，也不需要手动建库。
+- 本地最小模式的 SQLite 文件默认在 `backend/future_of_video.db`。
+- Docker 最小模式的 SQLite 文件默认在 `backend/uploads/future_of_video.db`。
+
+### 2. 配置后端环境变量
 
 ```bash
 cp backend/.env.example backend/.env
 ```
 
-至少需要确认这些配置：
+说明：
+
+- 本地开发模式下，后端直接读取 `backend/.env`。
+- Docker Compose 下，`backend` 和 `worker` 容器也会读取同一个 `backend/.env`。
+- 如果你已经有可用的 Doubao Key，直接填到 `DOUBAO_API_KEY` 即可，不需要额外准备第二套 key。
+
+最少需要确认这些配置：
 
 - `DATABASE_URL`
 - `JWT_SECRET_KEY`
 - `SECRET_KEY`
 - `PIPELINE_RUNTIME_MODE`
 - `DOUBAO_API_KEY`
-- `DOUBAO_TTS_APP_ID`
-- `DOUBAO_TTS_ACCESS_TOKEN`
-- `NANOBANANA_API_KEY`
-- `OPENAI_API_KEY`
 
-如果你只想使用最小运行版：
+可选但常用：
+
+- `OPENAI_API_KEY`
+  - 当前最小链路不是启动必填项。
+- `NANOBANANA_API_KEY`
+  - 配置后优先使用 NanoBanana 生成图片。
+  - 未配置时，图片生成会回退到 Doubao `doubao-seedream-5-0-260128`。
+
+最小运行模式示例：
 
 ```env
 PIPELINE_RUNTIME_MODE=minimal
+DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
+DEBUG=false
+MODEL_DEBUG_LOGGING=false
 ```
 
-如果你需要完整队列版：
+如果你希望最小测试版本完全不依赖 MySQL，直接使用上面的 SQLite 配置即可。
+
+一个可直接运行的最小示例：
+
+```env
+PIPELINE_RUNTIME_MODE=minimal
+DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
+DOUBAO_API_KEY=your_doubao_api_key
+DEBUG=false
+MODEL_DEBUG_LOGGING=false
+```
+
+Docker 最小测试示例：
+
+```env
+PIPELINE_RUNTIME_MODE=minimal
+DATABASE_URL=sqlite+aiosqlite:///./uploads/future_of_video.db
+DOUBAO_API_KEY=your_doubao_api_key
+DEBUG=false
+MODEL_DEBUG_LOGGING=false
+```
+
+完整队列版示例：
 
 ```env
 PIPELINE_RUNTIME_MODE=full
+DATABASE_URL=mysql+aiomysql://user:password@127.0.0.1:3306/future_of_video
 CELERY_BROKER_URL=redis://127.0.0.1:6379/1
 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/2
 ```
 
-### 4. 启动后端
+### 3. 安装后端依赖
 
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python3 -m app.main
+```
+
+### 4. 初始化数据库
+
+如果你使用 SQLite 最小模式，这一步可以跳过，应用启动时会自动建表。
+
+补充说明：
+
+- `backend/sql/init_schema.sql` 主要用于新 MySQL 库初始化。
+- SQLite 最小模式不要执行这份 MySQL 初始化 SQL。
+- SQLite 最小模式通常也不需要手动跑迁移；按 README 启动后端即可自动建表。
+
+新 MySQL 数据库初始化：
+
+```bash
+mysql -u root -p < backend/sql/init_schema.sql
+```
+
+如果你是在已有数据库上升级，或希望显式同步到最新 schema，执行：
+
+```bash
+cd backend
+alembic upgrade head
+```
+
+默认示例数据库名是 `future_of_video`。如果你使用自己的数据库名，请同步修改 `backend/.env` 中的 `DATABASE_URL`。
+
+### 5. 启动后端
+
+```bash
+cd backend
+source .venv/bin/activate
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
 默认后端地址：
@@ -153,9 +248,10 @@ python3 -m app.main
 - `http://127.0.0.1:8080`
 - API 前缀：`/api/v1`
 
-### 5. 启动前端
+### 6. 配置并启动前端
 
 ```bash
+cp frontend/.env.example frontend/.env
 cd frontend
 npm install
 npm run dev
@@ -167,15 +263,28 @@ npm run dev
 
 开发环境下，Vite 会把 `/api/v1` 和 `/uploads` 代理到 `http://127.0.0.1:8080`。
 
+### 7. 最小模式启动后你应该看到什么
+
+- 后端能正常启动，不要求 MySQL
+- 项目列表页可以打开
+- SQLite 数据库文件会在 `backend/` 目录下自动创建
+- 进入主链路后，可以继续做角色、剧本、分段、关键帧和视频生成
+- 刷新页面后，`/api/v1/projects` 不应再因为端口或数据库初始化问题报 500
+
+如果后端启动阶段就报错，优先检查：
+
+- `DOUBAO_API_KEY` 是否已配置
+- `pip install -r requirements.txt` 是否已经执行，尤其要确认安装了 `aiosqlite`
+- `ffmpeg` 是否在 `PATH` 中可用
+
 ## 运行模式
 
 ### `minimal`
 
 适合本地开发、单机部署、演示环境。
 
-特点：
-
 - 需要数据库
+- 默认推荐 SQLite
 - 需要外部模型 API
 - 需要 FFmpeg
 - 不需要 Redis
@@ -186,13 +295,29 @@ npm run dev
 
 适合需要独立 worker 和队列调度的环境。
 
-特点：
-
 - 需要数据库
 - 需要外部模型 API
 - 需要 FFmpeg
 - 需要 Redis
 - 需要 Celery worker
+
+## 数据库升级说明
+
+仓库同时保留了两套数据库准备方式：
+
+- `backend/sql/init_schema.sql`
+  - 用于新环境快速初始化。
+- `backend/alembic`
+  - 用于后续 schema 迁移和升级。
+
+如果你是从旧版本升级，请优先使用：
+
+```bash
+cd backend
+alembic upgrade head
+```
+
+如果你只执行了旧的初始化 SQL，而没有补迁移，可能会遇到字段缺失问题。
 
 ## 后端接口概览
 
@@ -218,7 +343,14 @@ npm run dev
 - `POST /pipeline/split-script`
 - `POST /pipeline/generate-keyframes`
 - `POST /pipeline/render`
+- `POST /pipeline/render/{task_id}/resume`
+- `POST /pipeline/render/{task_id}/pause`
+- `POST /pipeline/render/{task_id}/cancel`
+- `POST /pipeline/render/{task_id}/clips/{clip_number}/retry`
+- `POST /pipeline/render/{task_id}/retry`
 - `GET /pipeline/render/{task_id}`
+
+其中“逐段确认继续生成”和“一键全部生成”都通过渲染请求里的 `auto_continue_segments` 参数控制，而不是单独的确认接口。
 
 角色 / 场景档案：
 
@@ -231,17 +363,17 @@ npm run dev
 
 ## 测试与构建
 
-后端语法检查：
-
-```bash
-python3 -m py_compile backend/app/main.py
-```
-
 后端测试：
 
 ```bash
 cd backend
-python3 -m pytest
+python3 -m pytest -o addopts='' tests
+```
+
+后端语法检查：
+
+```bash
+python3 -m py_compile backend/app/main.py
 ```
 
 前端构建：
@@ -255,74 +387,77 @@ npm run build
 
 仓库中包含一个开源友好的 `docker-compose.yml` 示例：
 
-- 默认直接运行 `minimal` 模式
-- 默认只启动 `mysql`、`backend`、`frontend`
-- 如果你需要队列版，再启用 `full` profile
+- 默认运行 `minimal` 模式
+- 默认只启动 `backend`、`frontend`
+- 默认使用 SQLite，不依赖 MySQL
+- SQLite 数据库文件会落在 `backend/uploads/future_of_video.db`
+- 如果需要 MySQL + worker 队列版，再启用 `full` profile
 
 最小模式：
 
 ```bash
+cp backend/.env.example backend/.env
+# 在 backend/.env 中至少填入 DOUBAO_API_KEY
+# 并确认 DATABASE_URL=sqlite+aiosqlite:///./uploads/future_of_video.db
+# 如无特殊需求，保持 PIPELINE_RUNTIME_MODE=minimal
 docker compose up --build
 ```
+
+最小模式下的默认访问地址：
+
+- 前端：`http://127.0.0.1:5173`
+- 后端：`http://127.0.0.1:8080`
+
+最小模式下不需要做这些事：
+
+- 不需要本地安装 MySQL
+- 不需要手动建 SQLite 库
+- 不需要执行 `backend/sql/init_schema.sql`
+- 不需要启动 Redis / Celery worker
 
 完整模式：
 
 ```bash
-PIPELINE_RUNTIME_MODE=full docker compose --profile full up --build
+cp backend/.env.example backend/.env
+# 在 backend/.env 中填入 DOUBAO_API_KEY，并显式切换到 MySQL
+DATABASE_URL=mysql+aiomysql://fov:change-me-db@mysql:3306/future_of_video \
+PIPELINE_RUNTIME_MODE=full \
+docker compose --profile full up --build
 ```
 
 注意：
 
-- compose 中的数据库口令是公开示例值，生产环境必须改掉
-- 模型 API key 不在 compose 中硬编码，建议通过 `.env` 或 shell 环境传入
-- 如果你只做本地体验，优先使用 `minimal`
+- compose 中的数据库口令是公开示例值，生产环境必须改掉。
+- backend / worker 容器会读取 `backend/.env`。
+- 默认 `docker compose up --build` 走的是 SQLite 最小模式，不会拉起 `mysql` 和 `redis`。
+- 当前最小链路仍然要求 `DOUBAO_API_KEY`，否则后端启动阶段会失败。
+- `backend/uploads/` 同时保存上传文件、生成产物和 Docker 最小模式下的 SQLite 数据库文件。
+- 开源仓库里的 compose 仅作为开发 / 演示示例，不是生产部署模板。
+
+## 示例输入与回归样例
+
+对外样例已经整理到 `docs/examples/`：
+
+- `docs/examples/cat-pipeline-inputs.md`
+- `docs/examples/ancient-romance-pipeline-inputs.md`
+- `docs/examples/cat-character-entry-regression.md`
+
+这些文件适合本地回归测试、演示和 prompt 样例参考。
 
 ## 开源发布前建议
 
-在真正公开到 GitHub 之前，建议优先完成这些动作：
+如果你准备公开部署或接受外部贡献，建议至少确认这些事项：
 
-### 必做
-
-- 补 `LICENSE`
-  - 这是开源发布的前提，否则别人默认没有合法使用权。
-- 全量检查凭证与示例配置
-  - 包括 `.env`、`.env.example`、`docker-compose.yml`、脚本、截图、日志、测试数据。
-- 清理本地产物
-  - 尤其是 `backend/uploads/` 下的渲染结果、音频文件、模型输出和下载素材。
-- 补完整 `README`
-  - 当前这份 README 已覆盖基础说明，但如果你要对外宣传，最好再补截图、Demo 视频和架构图。
-
-### 强烈建议
-
-- 增加 CI
-  - 仓库现在已经补了一个基础 GitHub Actions CI，但你仍然需要根据自己的发布策略继续完善。
-- 增加 `CONTRIBUTING.md`
-  - 说明分支策略、代码规范、提交流程。
-- 增加 Issue / PR 模板
-  - 降低沟通成本。
-- 增加部署说明
-  - 至少覆盖单机最小模式部署。
-
-### 可能要决定的事情
-
-- 是否公开模型 provider 绑定实现细节
-- 是否要把默认数据库从 MySQL 扩展到 SQLite 演示模式
-- 是否要提供在线 Demo
-- 是否要拆分“产品仓库”和“纯开源核心仓库”
-
-## 当前已做的开源准备
-
-本次已经顺手补了两件事：
-
-- `.gitignore` 增加了运行产物和上传目录忽略
-- `backend/.env.example` 清掉了看起来像真实凭证的示例值
-- 新增了 `LICENSE`、`CONTRIBUTING.md`、`SECURITY.md`、GitHub Issue / PR 模板和基础 CI
+- 检查 `.env`、日志、截图、测试数据里没有真实密钥或敏感信息。
+- 清理 `backend/uploads/`、`uploads/` 等本地产物。
+- 为生产环境单独配置 `DEBUG=false`、密钥管理、HTTPS、对象存储和上传安全策略。
+- 确认第三方模型服务的条款允许你的使用方式。
 
 ## 常见问题
 
 ### 1. 为什么我本地不想装 Redis / Celery？
 
-直接用：
+直接使用：
 
 ```env
 PIPELINE_RUNTIME_MODE=minimal
@@ -330,24 +465,48 @@ PIPELINE_RUNTIME_MODE=minimal
 
 这样主链路仍然可以跑，只是渲染任务不会走外部队列。
 
-### 2. 为什么生成视频失败？
+### 2. 为什么我不配 MySQL 也能跑？
 
-优先检查：
+因为 `minimal` 模式现在支持：
 
-- 外部模型 API 是否已配置
-- FFmpeg 是否安装成功
-- MySQL 是否可连接
-- 上传目录是否可写
-- 后端日志中的 provider 返回错误
+```env
+DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
+```
 
-### 3. 为什么图片分析 / 试音 / 原型图不可用？
+SQLite 模式下，应用启动时会自动建表，适合本地最小测试。
 
-这些能力依赖相应 provider 配置：
+### 3. 为什么本地和 Docker 的 SQLite 路径不一样？
 
-- 图片分析：`OPENAI_API_KEY`
-- 剧本与视频相关能力：`DOUBAO_API_KEY`
-- 语音试音：`DOUBAO_TTS_APP_ID` 与 `DOUBAO_TTS_ACCESS_TOKEN`
-- 角色 / 场景图生成：`NANOBANANA_API_KEY`
+本地开发默认从 `backend/` 目录启动后端，所以使用：
+
+```env
+DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
+```
+
+Docker 最小模式为了把数据库文件和上传产物一起持久化到挂载目录，默认使用：
+
+```env
+DATABASE_URL=sqlite+aiosqlite:///./uploads/future_of_video.db
+```
+
+### 4. 为什么后端启动时就提示 `DOUBAO_API_KEY` 未配置？
+
+因为当前后端启动时会初始化剧本生成服务，所以 `DOUBAO_API_KEY` 现在是启动级依赖，不只是调用生成接口时才需要。
+
+### 5. 为什么图片生成没有走 NanoBanana？
+
+当前逻辑是：
+
+- 优先使用 `NANOBANANA_API_KEY`
+- 如果未配置，则回退到 `DOUBAO_API_KEY` 对应的 Doubao 图片模型
+
+### 6. 临时角色什么时候会提示保存到角色档案库？
+
+如果角色没有匹配到正式档案，系统会先生成临时角色草稿，并直接进入本次剧本、关键帧和视频链路。只有当该临时角色已经实际参与过视频生成后，前端才会提示保存到正式角色档案库；保存时会直接使用该角色首次出场片段的首帧造型作为参考图，不再额外生成三视图或面部特写。
+
+### 7. 为什么最终视频没有项目级额外音频？
+
+当前仓库默认关闭旧的项目级音频合成链路，公开视频效果主要依赖视频模型自身音频能力，或输出静音结果。这是当前实现状态，不是配置错误。
 
 ## 免责声明
 

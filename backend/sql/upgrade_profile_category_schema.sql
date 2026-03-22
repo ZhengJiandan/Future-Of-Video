@@ -1,4 +1,4 @@
-USE `delta_force_video`;
+USE `future_of_video`;
 
 ALTER TABLE `pipeline_character_profiles`
   ADD COLUMN IF NOT EXISTS `category` VARCHAR(100) NULL AFTER `name`;

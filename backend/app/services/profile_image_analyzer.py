@@ -18,13 +18,15 @@ logger = logging.getLogger(__name__)
 
 class ProfileImageAnalyzerService:
     def __init__(self) -> None:
-        self.api_key = getattr(settings, "OPENAI_API_KEY", None)
-        self.base_url = str(getattr(settings, "OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
-        self.model = str(
-            getattr(settings, "OPENAI_VISION_MODEL", None)
-            or getattr(settings, "OPENAI_MODEL", "gpt-4o-mini")
-        ).strip() or "gpt-4o-mini"
-        self.timeout = httpx.Timeout(connect=20.0, read=180.0, write=60.0, pool=60.0)
+        self.api_key = getattr(settings, "DOUBAO_API_KEY", None)
+        self.base_url = str(getattr(settings, "DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")).rstrip("/")
+        self.model = str(getattr(settings, "DOUBAO_MODEL", "doubao-seed-2-0-lite-260215")).strip() or "doubao-seed-2-0-lite-260215"
+        self.timeout = httpx.Timeout(
+            connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
+            read=float(getattr(settings, "DOUBAO_READ_TIMEOUT", 240.0)),
+            write=float(getattr(settings, "DOUBAO_WRITE_TIMEOUT", 60.0)),
+            pool=float(getattr(settings, "DOUBAO_POOL_TIMEOUT", 60.0)),
+        )
 
     async def analyze_character_image(
         self,
@@ -73,7 +75,7 @@ class ProfileImageAnalyzerService:
 4. llm_summary 用 80-180 字概括，便于后续剧本模型稳定引用。
 5. image_prompt_base 和 video_prompt_base 要适合直接给图像/视频模型做稳定提示。
 6. tags / must_keep / forbidden_traits / aliases 必须是字符串数组。
-7. 如果图中没有明显语音信息，不要硬写 voice 相关内容，本任务不输出 voice_profile。
+7. 图片不能可靠判断声音设定，不要硬写音色相关内容，本任务不输出 voice_description。
 """
         user_prompt = (
             "请分析这张角色图片，按给定 JSON 结构补全字段。"
@@ -152,14 +154,13 @@ class ProfileImageAnalyzerService:
         user_prompt: str,
     ) -> Dict[str, Any]:
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY 未配置，暂时无法分析图片")
+            raise ValueError("DOUBAO_API_KEY 未配置，暂时无法分析图片")
         if not image_path.exists():
             raise ValueError("图片不存在，无法分析")
 
         image_url = self._build_data_url(image_path)
         request_body = {
             "model": self.model,
-            "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {
@@ -172,7 +173,13 @@ class ProfileImageAnalyzerService:
             ],
             "temperature": 0.2,
         }
+        payload = await self._request_completion(request_body)
+        content = self._extract_message_content(payload)
+        if not content:
+            raise RuntimeError("图片分析模型返回为空")
+        return self._parse_json_payload(content)
 
+    async def _request_completion(self, request_body: Dict[str, Any]) -> Dict[str, Any]:
         async with httpx.AsyncClient(
             timeout=self.timeout,
             headers={
@@ -185,19 +192,46 @@ class ProfileImageAnalyzerService:
                 json=request_body,
             )
             response.raise_for_status()
-            payload = response.json()
+            return response.json()
 
-        content = (
-            payload.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
-        if not content:
-            raise RuntimeError("图片分析模型返回为空")
+    def _extract_message_content(self, payload: Dict[str, Any]) -> str:
+        content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text_value = str(item.get("text") or item.get("content") or "").strip()
+                    if text_value:
+                        parts.append(text_value)
+            return "\n".join(parts).strip()
+        return str(content or "").strip()
+
+    def _parse_json_payload(self, content: str) -> Dict[str, Any]:
+        normalized = str(content or "").strip()
+        if normalized.startswith("```"):
+            lines = normalized.splitlines()
+            if len(lines) >= 3:
+                normalized = "\n".join(lines[1:-1]).strip()
         try:
-            return json.loads(content)
+            parsed = json.loads(normalized)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"图片分析结果不是合法 JSON: {exc}") from exc
+            start = normalized.find("{")
+            end = normalized.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    parsed = json.loads(normalized[start : end + 1])
+                except json.JSONDecodeError as inner_exc:
+                    raise RuntimeError(f"图片分析结果不是合法 JSON: {inner_exc}") from inner_exc
+            else:
+                raise RuntimeError(f"图片分析结果不是合法 JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("图片分析结果不是 JSON 对象")
+        return parsed
 
     def _build_data_url(self, image_path: Path) -> str:
         raw = image_path.read_bytes()

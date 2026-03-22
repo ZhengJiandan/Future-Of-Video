@@ -18,7 +18,8 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str = Field(..., min_length=3, max_length=255)
+    account: str = Field(default="", min_length=0, max_length=255)
+    email: str = Field(default="", min_length=0, max_length=255)
     password: str = Field(..., min_length=1, max_length=128)
 
 
@@ -43,9 +44,10 @@ async def register(request: RegisterRequest, db: AsyncSession = Depends(get_db))
 @router.post("/login")
 async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     try:
+        identifier = (request.account or request.email).strip()
         result = await auth_service.login_user(
             db,
-            email=request.email,
+            identifier=identifier,
             password=request.password,
         )
         return {
