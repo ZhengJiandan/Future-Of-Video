@@ -12,12 +12,18 @@
   - `minimal` 模式：单进程本地后台任务，不依赖 Redis / Celery
   - `full` 模式：Celery + Redis
 
-## 当前能力边界
+当前运行结论先说清楚：
 
-- 当前主链路以“角色 / 场景档案 -> 剧本 -> 分段 -> 关键帧 -> 视频生成”为主。
-- 分段视频支持逐段确认继续生成，也支持一键全部生成。
-- 角色的 `voice_description` 当前作为人物设定文本参与提示词，不再走旧的 TTS 绑定链路。
-- 项目级统一音频后处理链路当前默认关闭。公开视频效果目前依赖视频模型原生音频能力，或输出静音视频。
+- `minimal` 最小运行模式下，`MySQL` 已经不是必需组件。
+- 最小模式推荐组合是：`SQLite + FastAPI + 前端开发服务器 + FFmpeg + DOUBAO_API_KEY`。
+- 只有你显式选择 `MySQL`，或者切到 `full` 队列模式时，才需要再准备 `MySQL / Redis / Celery worker`。
+
+## 在线 Demo
+
+- 展示地址：`http://82.156.153.123/`
+- 用户：test，密码：123456
+- 仅供展示使用。
+
 
 ## 作者说明
 
@@ -75,6 +81,7 @@
 │   │   ├── services
 │   │   └── stores
 │   └── package.json
+├── uploads                     # 根目录运行时产物（如 Docker 挂载目录）
 ├── docker-compose.yml
 └── README.md
 ```
@@ -98,7 +105,8 @@
 
 - Python 3.10+
 - Node.js 18+
-- SQLite 可直接使用系统内置能力；MySQL 仅在你选择 MySQL 模式时需要
+- SQLite 可直接使用系统内置能力
+- MySQL 仅在你主动切到 MySQL 数据库，或使用 `full` 队列模式时需要
 - FFmpeg 已安装并可通过 `PATH` 调用
 
 可选组件：
@@ -107,6 +115,12 @@
 - Celery worker
 
 如果只是本地体验主链路，推荐直接使用 `minimal` 模式，不需要 Redis / Celery。
+
+这里容易混淆的一点是：
+
+- 仓库代码里的 `Settings.DATABASE_URL` 默认回退值仍然是 MySQL。
+- 但仓库提供的推荐启动方式，是先复制 `backend/.env.example`，而这份示例已经改成了 SQLite 最小模式。
+- 所以如果你跳过 `cp backend/.env.example backend/.env` 这一步，直接裸跑后端，仍然可能因为默认 MySQL 配置而启动失败。
 
 ## 快速开始
 
@@ -131,12 +145,13 @@ cd future-of-video
 - 已安装 Node.js 18+
 - 已安装 FFmpeg
 - 已准备 `DOUBAO_API_KEY`
+- 已复制 `backend/.env.example` 到 `backend/.env`
 
 注意：
 
 - 当前后端启动时会实例化剧本生成能力，所以 `DOUBAO_API_KEY` 不是“到生成功能时才需要”，而是当前最小链路的启动级依赖。
 - `OPENAI_API_KEY` 对当前最小链路不是启动必填项。
-- SQLite 模式下不需要 MySQL，也不需要手动建库。
+- `minimal` + SQLite 组合下不需要 MySQL，也不需要手动建库。
 - 本地最小模式的 SQLite 文件默认在 `backend/future_of_video.db`。
 - Docker 最小模式的 SQLite 文件默认在 `backend/uploads/future_of_video.db`。
 
@@ -151,6 +166,7 @@ cp backend/.env.example backend/.env
 - 本地开发模式下，后端直接读取 `backend/.env`。
 - Docker Compose 下，`backend` 和 `worker` 容器也会读取同一个 `backend/.env`。
 - 如果你已经有可用的 Doubao Key，直接填到 `DOUBAO_API_KEY` 即可，不需要额外准备第二套 key。
+- 如果你想走最小运行路径，`backend/.env` 里应继续保持 SQLite 配置，不要误改回 MySQL。
 
 最少需要确认这些配置：
 
@@ -292,6 +308,7 @@ npm run dev
 
 - 需要数据库
 - 默认推荐 SQLite
+- `MySQL` 不是该模式的必需组件
 - 需要外部模型 API
 - 需要 FFmpeg
 - 不需要 Redis
@@ -441,6 +458,11 @@ docker compose --profile full up --build
 - `backend/uploads/` 同时保存上传文件、生成产物和 Docker 最小模式下的 SQLite 数据库文件。
 - 开源仓库里的 compose 仅作为开发 / 演示示例，不是生产部署模板。
 
+补一句结论：
+
+- `docker compose up --build` 的默认行为已经证明最小模式不把 `mysql` 当成前置依赖。
+- `mysql` 服务只会在 `--profile full` 下被显式启用。
+
 ## 示例输入与回归样例
 
 对外样例已经整理到 `docs/examples/`：
@@ -474,13 +496,13 @@ PIPELINE_RUNTIME_MODE=minimal
 
 ### 2. 为什么我不配 MySQL 也能跑？
 
-因为 `minimal` 模式现在支持：
+因为 `minimal` 模式现在支持直接使用 SQLite，而且应用启动时会自动建表：
 
 ```env
 DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
 ```
 
-SQLite 模式下，应用启动时会自动建表，适合本地最小测试。
+这意味着 `MySQL` 已经不是最小运行模式的必需组件；只有你主动切换到 MySQL，或启用 `full` 模式时才需要它。
 
 ### 3. 为什么本地和 Docker 的 SQLite 路径不一样？
 
@@ -499,6 +521,21 @@ DATABASE_URL=sqlite+aiosqlite:///./uploads/future_of_video.db
 ### 4. 为什么后端启动时就提示 `DOUBAO_API_KEY` 未配置？
 
 因为当前后端启动时会初始化剧本生成服务，所以 `DOUBAO_API_KEY` 现在是启动级依赖，不只是调用生成接口时才需要。
+
+### 4.1 为什么我明明用的是 minimal，还会看到 MySQL 连接错误？
+
+通常是因为你没有复制 `backend/.env.example`，或者把 `DATABASE_URL` 改回了 MySQL 默认值。当前代码层的回退默认值仍然是：
+
+```env
+DATABASE_URL=mysql+aiomysql://user:password@127.0.0.1:3306/future_of_video
+```
+
+如果你要走最小运行路径，请显式确认：
+
+```env
+PIPELINE_RUNTIME_MODE=minimal
+DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
+```
 
 ### 5. 为什么图片生成没有走 NanoBanana？
 
