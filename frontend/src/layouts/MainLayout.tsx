@@ -80,6 +80,53 @@ export const MainLayout: React.FC = () => {
     navigate('/login', { replace: true })
   }
 
+  const handleLogin = () => {
+    navigate('/login')
+  }
+
+  const isPublicLanding = location.pathname === '/' && !user
+
+  if (isPublicLanding) {
+    return (
+      <Layout style={{ minHeight: '100vh', background: '#07111f' }}>
+        <Header
+          style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 10,
+            padding: '0 24px',
+            background: 'rgba(7, 17, 31, 0.78)',
+            backdropFilter: 'blur(18px)',
+            borderBottom: '1px solid rgba(205, 178, 113, 0.18)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <div
+            style={{
+              color: '#f6f2e8',
+              fontSize: 18,
+              fontWeight: 700,
+              letterSpacing: '0.04em',
+            }}
+          >
+            future of video
+          </div>
+          <Space size={12}>
+            <Text style={{ color: 'rgba(246, 242, 232, 0.72)' }}>AI 视频生成工作台</Text>
+            <Button type="primary" onClick={handleLogin}>
+              登录
+            </Button>
+          </Space>
+        </Header>
+        <Content style={{ padding: '0 24px 48px', background: 'transparent' }}>
+          <Outlet />
+        </Content>
+      </Layout>
+    )
+  }
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Sider
@@ -136,7 +183,13 @@ export const MainLayout: React.FC = () => {
           />
           <Space size={16}>
             <Text type="secondary">{user ? `${user.name} · ${user.email}` : '未登录'}</Text>
-            <Button onClick={handleLogout}>退出登录</Button>
+            {user ? (
+              <Button onClick={handleLogout}>退出登录</Button>
+            ) : (
+              <Button type="primary" onClick={handleLogin}>
+                登录
+              </Button>
+            )}
           </Space>
         </Header>
         <Content

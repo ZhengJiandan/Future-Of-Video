@@ -24,7 +24,14 @@ import {
   UploadOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { ReferenceImageAsset, SceneImageAnalysisFields, SceneProfile, resolveAssetUrl, scriptPipelineApi } from '../services/api'
+import {
+  ReferenceImageAsset,
+  SceneImageAnalysisFields,
+  SceneProfile,
+  resolveAssetUrl,
+  resolveDisplayAssetUrl,
+  scriptPipelineApi,
+} from '../services/api'
 
 const { Title, Paragraph, Text } = Typography
 const { TextArea } = Input
@@ -133,6 +140,7 @@ export const SceneLibraryPage: React.FC = () => {
           const asset: ReferenceImageAsset = {
             id: profile.id,
             url: profile.reference_image_url,
+            thumbnail_url: profile.reference_image_thumbnail_url,
             filename,
             original_filename: profile.reference_image_original_name || filename,
             content_type: 'image/png',
@@ -278,6 +286,7 @@ export const SceneLibraryPage: React.FC = () => {
         name: asset.original_filename || asset.filename,
         status: 'done',
         url: resolveAssetUrl(asset.url),
+        thumbUrl: resolveDisplayAssetUrl(asset.url, asset.thumbnail_url),
       }
 
       setReferenceImage(asset)
@@ -334,6 +343,7 @@ export const SceneLibraryPage: React.FC = () => {
       const asset: ReferenceImageAsset = {
         id: response.data.asset_filename,
         url: response.data.asset_url,
+        thumbnail_url: response.data.thumbnail_url,
         filename: response.data.asset_filename,
         original_filename: response.data.asset_filename,
         content_type: response.data.asset_type,
@@ -652,9 +662,10 @@ export const SceneLibraryPage: React.FC = () => {
                     </Space>
                     {referenceImage ? (
                       <Image
-                        src={resolveAssetUrl(referenceImage.url)}
+                        src={resolveDisplayAssetUrl(referenceImage.url, referenceImage.thumbnail_url)}
                         alt="场景参考图"
                         style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }}
+                        preview={{ src: resolveAssetUrl(referenceImage.url) }}
                       />
                     ) : (
                       <Text type="secondary">如果你已经有理想场景图，可以上传后直接保存，也可以先做图片分析，让系统按场景档案字段补充基础信息。</Text>
@@ -681,9 +692,10 @@ export const SceneLibraryPage: React.FC = () => {
                     {sceneImage?.url ? (
                       <>
                         <Image
-                          src={resolveAssetUrl(sceneImage.url)}
+                          src={resolveDisplayAssetUrl(sceneImage.url, sceneImage.thumbnail_url)}
                           alt="场景原型图"
                           style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }}
+                          preview={{ src: resolveAssetUrl(sceneImage.url) }}
                         />
                         {sceneImagePrompt ? (
                           <Alert type="success" showIcon message="本次场景图描述" description={sceneImagePrompt} />

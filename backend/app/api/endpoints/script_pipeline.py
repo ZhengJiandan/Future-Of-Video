@@ -38,6 +38,7 @@ router = APIRouter(dependencies=[Depends(get_current_user)])
 class ReferenceAssetPayload(BaseModel):
     id: str
     url: str
+    thumbnail_url: str = ""
     filename: str
     original_filename: str = ""
     content_type: str = "image/png"

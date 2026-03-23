@@ -15,6 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.pipeline_scene_profile import PipelineSceneProfile
 from app.services.preferred_image_generation import PreferredImageGenerationClient
+from app.utils.image_variants import (
+    build_upload_url,
+    ensure_thumbnail_for_path,
+    thumbnail_path_for_source_path,
+    thumbnail_url_for_asset,
+)
 
 
 class PipelineSceneLibraryService:
@@ -195,9 +201,11 @@ class PipelineSceneLibraryService:
         safe_name = f"{asset_id}_scene_reference{suffix}"
         output_path = self.reference_root / safe_name
         output_path.write_bytes(content)
+        thumbnail_path = ensure_thumbnail_for_path(output_path)
         return {
             "id": asset_id,
             "url": self._build_asset_url(output_path),
+            "thumbnail_url": build_upload_url(thumbnail_path) if thumbnail_path else "",
             "filename": safe_name,
             "original_filename": filename,
             "content_type": content_type,
@@ -274,9 +282,11 @@ class PipelineSceneLibraryService:
         safe_name = f"{asset_id}_scene.png"
         output_path = self.prototype_root / safe_name
         output_path.write_bytes(image_data)
+        thumbnail_path = ensure_thumbnail_for_path(output_path)
 
         return {
             "asset_url": self._build_asset_url(output_path),
+            "thumbnail_url": build_upload_url(thumbnail_path) if thumbnail_path else "",
             "asset_type": "image/png",
             "asset_filename": safe_name,
             "prompt": prompt,
@@ -335,6 +345,11 @@ class PipelineSceneLibraryService:
             "profile_version": self._normalize_profile_version(profile.get("profile_version")),
             "source": str(profile.get("source") or "library").strip() or "library",
             "reference_image_url": str(profile.get("reference_image_url") or "").strip(),
+            "reference_image_thumbnail_url": str(
+                profile.get("reference_image_thumbnail_url")
+                or thumbnail_url_for_asset(str(profile.get("reference_image_url") or "").strip())
+                or ""
+            ).strip(),
             "reference_image_original_name": str(profile.get("reference_image_original_name") or "").strip(),
             "created_at": str(profile.get("created_at") or now),
             "updated_at": str(profile.get("updated_at") or profile.get("created_at") or now),
@@ -415,6 +430,9 @@ class PipelineSceneLibraryService:
             path = Path(asset_path)
             if path.exists() and path.is_file():
                 path.unlink()
+            thumbnail_path = thumbnail_path_for_source_path(path)
+            if thumbnail_path.exists() and thumbnail_path.is_file():
+                thumbnail_path.unlink()
         except Exception:
             return
 

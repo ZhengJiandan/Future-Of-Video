@@ -12,20 +12,16 @@ import { ScriptPipelinePage } from './pages/ScriptPipelinePage'
 
 export const router = createBrowserRouter([
   {
-    path: '/login',
-    element: <LoginPage />,
-  },
-  {
-    element: <RequireAuth />,
+    path: '/',
+    element: <MainLayout />,
     children: [
       {
-        path: '/',
-        element: <MainLayout />,
+        index: true,
+        element: <HomePage />,
+      },
+      {
+        element: <RequireAuth />,
         children: [
-          {
-            index: true,
-            element: <HomePage />,
-          },
           {
             path: 'script-pipeline',
             element: <ScriptPipelinePage />,
@@ -71,7 +67,11 @@ export const router = createBrowserRouter([
     ],
   },
   {
+    path: '/login',
+    element: <LoginPage />,
+  },
+  {
     path: '*',
-    element: <Navigate to="/script-pipeline" replace />,
+    element: <Navigate to="/" replace />,
   },
 ])

@@ -79,6 +79,7 @@ export interface ProjectListResponse {
 export interface ReferenceImageAsset {
   id: string
   url: string
+  thumbnail_url?: string
   filename: string
   original_filename: string
   content_type: string
@@ -122,15 +123,20 @@ export interface CharacterProfile {
   profile_version: number
   source: string
   display_image_url?: string
+  display_image_thumbnail_url?: string
   reference_image_url: string
+  reference_image_thumbnail_url?: string
   reference_image_original_name: string
   three_view_image_url: string
+  three_view_image_thumbnail_url?: string
   three_view_prompt: string
   face_closeup_image_url?: string
+  face_closeup_image_thumbnail_url?: string
   identity_reference_images?: Array<{
     type: string
     label: string
     url: string
+    thumbnail_url?: string
   }>
   identity_anchor_pack?: Record<string, unknown>
   created_at: string
@@ -167,6 +173,7 @@ export interface SceneProfile {
   profile_version: number
   source: string
   reference_image_url: string
+  reference_image_thumbnail_url?: string
   reference_image_original_name: string
   created_at: string
   updated_at: string
@@ -310,6 +317,7 @@ export interface SplitScriptResponse {
 
 export interface KeyframeAsset {
   asset_url: string
+  thumbnail_url?: string
   asset_type: string
   asset_filename: string
   prompt: string
@@ -448,6 +456,7 @@ export interface CharacterThreeViewResponse {
   success: boolean
   message: string
   asset_url: string
+  thumbnail_url?: string
   asset_type: string
   asset_filename: string
   prompt: string
@@ -460,6 +469,7 @@ export interface CharacterPrototypeResponse {
   success: boolean
   message: string
   asset_url: string
+  thumbnail_url?: string
   asset_type: string
   asset_filename: string
   prompt: string
@@ -472,6 +482,7 @@ export interface ScenePrototypeResponse {
   success: boolean
   message: string
   asset_url: string
+  thumbnail_url?: string
   asset_type: string
   asset_filename: string
   prompt: string
@@ -980,5 +991,8 @@ export const resolveAssetUrl = (assetUrl?: string) => {
 
   return assetUrl
 }
+
+export const resolveDisplayAssetUrl = (assetUrl?: string, thumbnailUrl?: string) =>
+  resolveAssetUrl(thumbnailUrl || assetUrl)
 
 export default apiClient

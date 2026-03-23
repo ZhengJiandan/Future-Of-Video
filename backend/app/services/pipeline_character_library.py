@@ -19,6 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.pipeline_character_profile import PipelineCharacterProfile
 from app.services.preferred_image_generation import PreferredImageGenerationClient
+from app.utils.image_variants import (
+    build_upload_url,
+    ensure_thumbnail_for_path,
+    thumbnail_path_for_source_path,
+    thumbnail_url_for_asset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -335,9 +341,11 @@ class PipelineCharacterLibraryService:
         safe_name = f"{asset_id}_reference{suffix}"
         output_path = self.reference_root / safe_name
         output_path.write_bytes(content)
+        thumbnail_path = ensure_thumbnail_for_path(output_path)
         return {
             "id": asset_id,
             "url": self._build_asset_url(output_path),
+            "thumbnail_url": build_upload_url(thumbnail_path) if thumbnail_path else "",
             "filename": safe_name,
             "original_filename": filename,
             "content_type": content_type,
@@ -387,9 +395,11 @@ class PipelineCharacterLibraryService:
         safe_name = f"{asset_id}_three_view.png"
         output_path = self.three_view_root / safe_name
         output_path.write_bytes(image_data)
+        thumbnail_path = ensure_thumbnail_for_path(output_path)
 
         return {
             "asset_url": self._build_asset_url(output_path),
+            "thumbnail_url": build_upload_url(thumbnail_path) if thumbnail_path else "",
             "asset_type": "image/png",
             "asset_filename": safe_name,
             "prompt": prompt,
@@ -453,9 +463,11 @@ class PipelineCharacterLibraryService:
         safe_name = f"{asset_id}_character.png"
         output_path = self.prototype_root / safe_name
         output_path.write_bytes(image_data)
+        thumbnail_path = ensure_thumbnail_for_path(output_path)
 
         return {
             "asset_url": self._build_asset_url(output_path),
+            "thumbnail_url": build_upload_url(thumbnail_path) if thumbnail_path else "",
             "asset_type": "image/png",
             "asset_filename": safe_name,
             "prompt": prompt,
@@ -520,11 +532,32 @@ class PipelineCharacterLibraryService:
             "profile_version": self._normalize_profile_version(profile.get("profile_version")),
             "source": str(profile.get("source") or "library").strip() or "library",
             "reference_image_url": str(profile.get("reference_image_url") or "").strip(),
+            "reference_image_thumbnail_url": str(
+                profile.get("reference_image_thumbnail_url")
+                or thumbnail_url_for_asset(str(profile.get("reference_image_url") or "").strip())
+                or ""
+            ).strip(),
             "reference_image_original_name": str(profile.get("reference_image_original_name") or "").strip(),
             "three_view_image_url": str(profile.get("three_view_image_url") or "").strip(),
+            "three_view_image_thumbnail_url": str(
+                profile.get("three_view_image_thumbnail_url")
+                or thumbnail_url_for_asset(str(profile.get("three_view_image_url") or "").strip())
+                or ""
+            ).strip(),
             "three_view_prompt": str(profile.get("three_view_prompt") or "").strip(),
             "face_closeup_image_url": str(profile.get("face_closeup_image_url") or "").strip(),
+            "face_closeup_image_thumbnail_url": str(
+                profile.get("face_closeup_image_thumbnail_url")
+                or thumbnail_url_for_asset(str(profile.get("face_closeup_image_url") or "").strip())
+                or ""
+            ).strip(),
             "display_image_url": str(profile.get("display_image_url") or profile.get("reference_image_url") or "").strip(),
+            "display_image_thumbnail_url": str(
+                profile.get("display_image_thumbnail_url")
+                or profile.get("reference_image_thumbnail_url")
+                or thumbnail_url_for_asset(str(profile.get("display_image_url") or profile.get("reference_image_url") or "").strip())
+                or ""
+            ).strip(),
             "identity_reference_images": self._build_identity_reference_images(profile),
             "identity_anchor_pack": self._build_identity_anchor_pack(profile),
             "created_at": str(profile.get("created_at") or now),
@@ -537,11 +570,32 @@ class PipelineCharacterLibraryService:
         three_view = str(profile.get("three_view_image_url") or "").strip()
         face_closeup = str(profile.get("face_closeup_image_url") or "").strip()
         if main_reference:
-            items.append({"type": "main_reference", "label": "主参考图", "url": main_reference})
+            items.append(
+                {
+                    "type": "main_reference",
+                    "label": "主参考图",
+                    "url": main_reference,
+                    "thumbnail_url": thumbnail_url_for_asset(main_reference),
+                }
+            )
         if three_view:
-            items.append({"type": "three_view", "label": "三视图", "url": three_view})
+            items.append(
+                {
+                    "type": "three_view",
+                    "label": "三视图",
+                    "url": three_view,
+                    "thumbnail_url": thumbnail_url_for_asset(three_view),
+                }
+            )
         if face_closeup:
-            items.append({"type": "face_closeup", "label": "面部特写", "url": face_closeup})
+            items.append(
+                {
+                    "type": "face_closeup",
+                    "label": "面部特写",
+                    "url": face_closeup,
+                    "thumbnail_url": thumbnail_url_for_asset(face_closeup),
+                }
+            )
         return items
 
     def _build_identity_anchor_pack(self, profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -549,8 +603,24 @@ class PipelineCharacterLibraryService:
             "character_id": str(profile.get("id") or "").strip(),
             "profile_version": self._normalize_profile_version(profile.get("profile_version")),
             "display_image_url": str(profile.get("reference_image_url") or "").strip(),
+            "display_image_thumbnail_url": str(
+                profile.get("display_image_thumbnail_url")
+                or profile.get("reference_image_thumbnail_url")
+                or thumbnail_url_for_asset(str(profile.get("reference_image_url") or "").strip())
+                or ""
+            ).strip(),
             "three_view_image_url": str(profile.get("three_view_image_url") or "").strip(),
+            "three_view_image_thumbnail_url": str(
+                profile.get("three_view_image_thumbnail_url")
+                or thumbnail_url_for_asset(str(profile.get("three_view_image_url") or "").strip())
+                or ""
+            ).strip(),
             "face_closeup_image_url": str(profile.get("face_closeup_image_url") or "").strip(),
+            "face_closeup_image_thumbnail_url": str(
+                profile.get("face_closeup_image_thumbnail_url")
+                or thumbnail_url_for_asset(str(profile.get("face_closeup_image_url") or "").strip())
+                or ""
+            ).strip(),
             "must_keep": self._normalize_list_field(profile.get("must_keep") or []),
             "forbidden_traits": self._normalize_list_field(profile.get("forbidden_traits") or []),
             "core_appearance": str(profile.get("core_appearance") or "").strip(),
@@ -651,6 +721,9 @@ class PipelineCharacterLibraryService:
             path = Path(asset_path)
             if path.exists() and path.is_file():
                 path.unlink()
+            thumbnail_path = thumbnail_path_for_source_path(path)
+            if thumbnail_path.exists() and thumbnail_path.is_file():
+                thumbnail_path.unlink()
         except Exception:
             return
 
@@ -752,6 +825,8 @@ class PipelineCharacterLibraryService:
 
             closeup = prepared.crop((left, top, right, bottom)).resize((1024, 1024))
             closeup.save(output_path, format="PNG")
+
+        ensure_thumbnail_for_path(output_path)
 
         return self._build_asset_url(output_path)
 
