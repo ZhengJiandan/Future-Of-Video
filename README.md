@@ -99,11 +99,10 @@
 - Python 3.10+
 - Node.js 18+
 - SQLite 可直接使用系统内置能力
-- MySQL 仅在你主动切到 MySQL 数据库，或使用 `full` 队列模式时需要
 - FFmpeg 已安装并可通过 `PATH` 调用
 
 可选组件：
-
+- MySQL
 - Redis
 - Celery worker
 
@@ -281,11 +280,10 @@ npm run dev
 
 ### 7. 最小模式启动后你应该看到什么
 
-- 后端能正常启动，不要求 MySQL
+- 后端能正常启动
 - 项目列表页可以打开
 - SQLite 数据库文件会在 `backend/` 目录下自动创建
 - 进入主链路后，可以继续做角色、剧本、分段、关键帧和视频生成
-- 刷新页面后，`/api/v1/projects` 不应再因为端口或数据库初始化问题报 500
 
 如果后端启动阶段就报错，优先检查：
 
@@ -301,9 +299,9 @@ npm run dev
 
 - 需要数据库
 - 默认推荐 SQLite
-- `MySQL` 不是该模式的必需组件
 - 需要外部模型 API
 - 需要 FFmpeg
+- 不需要 Mysql
 - 不需要 Redis
 - 不需要 Celery worker
 - 渲染任务在 FastAPI 进程内以后台协程执行
@@ -312,9 +310,9 @@ npm run dev
 
 适合需要独立 worker 和队列调度的环境。
 
-- 需要数据库
 - 需要外部模型 API
 - 需要 FFmpeg
+- 需要 Mysql
 - 需要 Redis
 - 需要 Celery worker
 
