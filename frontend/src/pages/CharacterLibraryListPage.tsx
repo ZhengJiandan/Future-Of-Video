@@ -23,7 +23,7 @@ import {
   TeamOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { CharacterProfile, resolveAssetUrl, scriptPipelineApi } from '../services/api'
+import { CharacterProfile, resolveAssetUrl, resolveDisplayAssetUrl, scriptPipelineApi } from '../services/api'
 
 const { Title, Paragraph, Text } = Typography
 const { Search } = Input
@@ -200,10 +200,13 @@ export const CharacterLibraryListPage: React.FC = () => {
                       }}
                     >
                       <Image
-                        src={resolveAssetUrl(character.reference_image_url)}
+                        src={resolveDisplayAssetUrl(
+                          character.reference_image_url,
+                          character.reference_image_thumbnail_url,
+                        )}
                         alt={character.name}
                         style={{ maxHeight: 248, objectFit: 'contain' }}
-                        preview
+                        preview={{ src: resolveAssetUrl(character.reference_image_url) }}
                       />
                     </div>
                   ) : undefined

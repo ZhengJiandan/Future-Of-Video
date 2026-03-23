@@ -16,10 +16,10 @@ export const LoginPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
 
   if (token) {
-    return <Navigate to="/script-pipeline" replace />
+    return <Navigate to="/" replace />
   }
 
-  const redirectTo = (location.state as { from?: string } | null)?.from || '/script-pipeline'
+  const redirectTo = (location.state as { from?: string } | null)?.from || '/'
 
   const handleLogin = async (values: { account: string; password: string }) => {
     setLoading(true)

@@ -29,6 +29,7 @@ import {
   CharacterProfile,
   ReferenceImageAsset,
   resolveAssetUrl,
+  resolveDisplayAssetUrl,
   scriptPipelineApi,
 } from '../services/api'
 
@@ -124,6 +125,7 @@ export const CharacterLibraryPage: React.FC = () => {
   const assetFromProfileImage = (
     id: string,
     url: string,
+    thumbnailUrl: string | undefined,
     originalFilename: string,
     source: string,
   ): ReferenceImageAsset | null => {
@@ -134,6 +136,7 @@ export const CharacterLibraryPage: React.FC = () => {
     return {
       id,
       url,
+      thumbnail_url: thumbnailUrl,
       filename,
       original_filename: originalFilename || filename,
       content_type: 'image/png',
@@ -171,6 +174,7 @@ export const CharacterLibraryPage: React.FC = () => {
         const imageAsset = assetFromProfileImage(
           profile.id,
           profile.reference_image_url,
+          profile.reference_image_thumbnail_url,
           profile.reference_image_original_name,
           'character-library',
         )
@@ -316,6 +320,7 @@ export const CharacterLibraryPage: React.FC = () => {
         name: asset.original_filename || asset.filename,
         status: 'done',
         url: resolveAssetUrl(asset.url),
+        thumbUrl: resolveDisplayAssetUrl(asset.url, asset.thumbnail_url),
       }
 
       setReferenceImage(asset)
@@ -365,6 +370,7 @@ export const CharacterLibraryPage: React.FC = () => {
       const asset: ReferenceImageAsset = {
         id: response.data.asset_filename,
         url: response.data.asset_url,
+        thumbnail_url: response.data.thumbnail_url,
         filename: response.data.asset_filename,
         original_filename: response.data.asset_filename,
         content_type: response.data.asset_type,
@@ -701,7 +707,12 @@ export const CharacterLibraryPage: React.FC = () => {
                       </Button>
                     </Space>
                     {referenceImage ? (
-                      <Image src={resolveAssetUrl(referenceImage.url)} alt="角色参考图" style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }} />
+                      <Image
+                        src={resolveDisplayAssetUrl(referenceImage.url, referenceImage.thumbnail_url)}
+                        alt="角色参考图"
+                        style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }}
+                        preview={{ src: resolveAssetUrl(referenceImage.url) }}
+                      />
                     ) : (
                       <Text type="secondary">如果你已经有角色形象，可以上传后直接保存，也可以先做图片分析，让系统按角色档案字段补充基础信息。</Text>
                     )}
@@ -726,7 +737,12 @@ export const CharacterLibraryPage: React.FC = () => {
                     </Button>
                     {characterImage?.url ? (
                       <>
-                        <Image src={resolveAssetUrl(characterImage.url)} alt="角色原型图" style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }} />
+                        <Image
+                          src={resolveDisplayAssetUrl(characterImage.url, characterImage.thumbnail_url)}
+                          alt="角色原型图"
+                          style={{ width: '100%', borderRadius: 14, objectFit: 'cover' }}
+                          preview={{ src: resolveAssetUrl(characterImage.url) }}
+                        />
                         {characterImagePrompt ? <Alert type="success" showIcon message="本次角色图描述" description={characterImagePrompt} /> : null}
                       </>
                     ) : (

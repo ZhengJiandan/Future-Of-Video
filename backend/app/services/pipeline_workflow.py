@@ -44,6 +44,7 @@ from app.services.preferred_image_generation import PreferredImageGenerationClie
 from app.services.script_generator import FullScript, ScriptGenerator
 from app.services.script_splitter import ScriptSplitter, SplitConfig
 from app.services.video_merger import MergeOptions, VideoMergerService, VideoSegment as MergedVideoSegment
+from app.utils.image_variants import build_upload_url, ensure_thumbnail_for_path
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ class KeyframeAsset:
     asset_filename: str
     prompt: str
     source: str
+    thumbnail_url: str = ""
     status: str = "completed"
     notes: str = ""
 
@@ -222,6 +224,7 @@ class PipelineWorkflowService:
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / safe_filename
         target_path.write_bytes(content)
+        thumbnail_path = ensure_thumbnail_for_path(target_path)
 
         asset = ReferenceAsset(
             id=asset_id,
@@ -232,7 +235,9 @@ class PipelineWorkflowService:
             size=len(content),
             source="upload",
         )
-        return asdict(asset)
+        payload = asdict(asset)
+        payload["thumbnail_url"] = build_upload_url(thumbnail_path) if thumbnail_path else ""
+        return payload
 
     async def generate_script(
         self,
@@ -1924,6 +1929,7 @@ class PipelineWorkflowService:
 
             return KeyframeAsset(
                 asset_url=self._build_asset_url(output_path),
+                thumbnail_url="",
                 asset_type="image/png",
                 asset_filename=filename,
                 prompt=prompt,
@@ -1948,6 +1954,7 @@ class PipelineWorkflowService:
             )
             return KeyframeAsset(
                 asset_url=self._build_asset_url(output_path),
+                thumbnail_url="",
                 asset_type="image/svg+xml",
                 asset_filename=filename,
                 prompt=prompt,
@@ -1967,8 +1974,10 @@ class PipelineWorkflowService:
     ) -> KeyframeAsset:
         output_path = task_dir / filename
         output_path.write_bytes(content)
+        thumbnail_path = ensure_thumbnail_for_path(output_path)
         return KeyframeAsset(
             asset_url=self._build_asset_url(output_path),
+            thumbnail_url=build_upload_url(thumbnail_path) if thumbnail_path else "",
             asset_type="image/png",
             asset_filename=filename,
             prompt=prompt,

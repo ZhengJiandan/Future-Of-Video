@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Column, DateTime, Integer, JSON, String, Text
 
 from app.models.base import BaseModel
+from app.utils.image_variants import thumbnail_url_for_asset
 
 
 class PipelineCharacterProfile(BaseModel):
@@ -60,6 +61,9 @@ class PipelineCharacterProfile(BaseModel):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def to_dict(self):
+        reference_image_thumbnail_url = thumbnail_url_for_asset(self.reference_image_url or "")
+        three_view_image_thumbnail_url = thumbnail_url_for_asset(self.three_view_image_url or "")
+        face_closeup_image_thumbnail_url = thumbnail_url_for_asset(self.face_closeup_image_url or "")
         identity_reference_images = []
         if self.reference_image_url:
             identity_reference_images.append(
@@ -67,6 +71,7 @@ class PipelineCharacterProfile(BaseModel):
                     "type": "main_reference",
                     "label": "主参考图",
                     "url": self.reference_image_url,
+                    "thumbnail_url": reference_image_thumbnail_url,
                 }
             )
         if self.three_view_image_url:
@@ -75,6 +80,7 @@ class PipelineCharacterProfile(BaseModel):
                     "type": "three_view",
                     "label": "三视图",
                     "url": self.three_view_image_url,
+                    "thumbnail_url": three_view_image_thumbnail_url,
                 }
             )
         if self.face_closeup_image_url:
@@ -83,6 +89,7 @@ class PipelineCharacterProfile(BaseModel):
                     "type": "face_closeup",
                     "label": "面部特写",
                     "url": self.face_closeup_image_url,
+                    "thumbnail_url": face_closeup_image_thumbnail_url,
                 }
             )
 
@@ -122,18 +129,25 @@ class PipelineCharacterProfile(BaseModel):
             "profile_version": self.profile_version or 1,
             "source": self.source or "library",
             "display_image_url": self.reference_image_url or "",
+            "display_image_thumbnail_url": reference_image_thumbnail_url,
             "reference_image_url": self.reference_image_url or "",
+            "reference_image_thumbnail_url": reference_image_thumbnail_url,
             "reference_image_original_name": self.reference_image_original_name or "",
             "three_view_image_url": self.three_view_image_url or "",
+            "three_view_image_thumbnail_url": three_view_image_thumbnail_url,
             "three_view_prompt": self.three_view_prompt or "",
             "face_closeup_image_url": self.face_closeup_image_url or "",
+            "face_closeup_image_thumbnail_url": face_closeup_image_thumbnail_url,
             "identity_reference_images": identity_reference_images,
             "identity_anchor_pack": {
                 "character_id": self.id,
                 "profile_version": self.profile_version or 1,
                 "display_image_url": self.reference_image_url or "",
+                "display_image_thumbnail_url": reference_image_thumbnail_url,
                 "three_view_image_url": self.three_view_image_url or "",
+                "three_view_image_thumbnail_url": three_view_image_thumbnail_url,
                 "face_closeup_image_url": self.face_closeup_image_url or "",
+                "face_closeup_image_thumbnail_url": face_closeup_image_thumbnail_url,
                 "must_keep": self.must_keep or [],
                 "forbidden_traits": self.forbidden_traits or [],
                 "core_appearance": self.core_appearance or "",

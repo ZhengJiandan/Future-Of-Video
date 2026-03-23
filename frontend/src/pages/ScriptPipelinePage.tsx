@@ -56,6 +56,7 @@ import {
   SegmentKeyframes,
   SplitValidationReport,
   resolveAssetUrl,
+  resolveDisplayAssetUrl,
   scriptPipelineApi,
 } from '../services/api'
 import { useProjectStore } from '../stores/project'
@@ -90,6 +91,7 @@ const buildUploadFileList = (assets: ReferenceImageAsset[]): UploadFile[] =>
     name: asset.original_filename || asset.filename,
     status: 'done',
     url: resolveAssetUrl(asset.url),
+    thumbUrl: resolveDisplayAssetUrl(asset.url, asset.thumbnail_url),
   }))
 
 const formatApiErrorDetail = (detail: unknown): string => {
@@ -380,10 +382,12 @@ const hasMeaningfulProjectState = (state: {
 
 const PreviewAsset: React.FC<{
   assetUrl?: string
+  thumbnailUrl?: string
   assetType?: string
   title: string
-}> = ({ assetUrl, assetType, title }) => {
+}> = ({ assetUrl, thumbnailUrl, assetType, title }) => {
   const resolvedUrl = resolveAssetUrl(assetUrl)
+  const displayUrl = resolveDisplayAssetUrl(assetUrl, thumbnailUrl)
 
   if (!resolvedUrl) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="结果未生成" />
@@ -393,9 +397,9 @@ const PreviewAsset: React.FC<{
     return (
       <Image
         alt={title}
-        src={resolvedUrl}
+        src={displayUrl}
         style={{ width: '100%', borderRadius: 12, objectFit: 'cover' }}
-        preview={{ mask: '预览' }}
+        preview={{ src: resolvedUrl, mask: '预览' }}
       />
     )
   }
@@ -2133,6 +2137,7 @@ export const ScriptPipelinePage: React.FC = () => {
                         <div style={{ marginTop: 12 }}>
                           <PreviewAsset
                             assetUrl={bundle.start_frame.asset_url}
+                            thumbnailUrl={bundle.start_frame.thumbnail_url}
                             assetType={bundle.start_frame.asset_type}
                             title={`${bundle.title} 首帧`}
                           />
@@ -2566,6 +2571,7 @@ export const ScriptPipelinePage: React.FC = () => {
                       <>
                         <PreviewAsset
                           assetUrl={firstFrameReference.asset_url}
+                          thumbnailUrl={firstFrameReference.thumbnail_url}
                           assetType={firstFrameReference.asset_type}
                           title={`${profile.name} 首次出场首帧`}
                         />

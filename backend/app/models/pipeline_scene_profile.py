@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Column, DateTime, Integer, JSON, String, Text
 
 from app.models.base import BaseModel
+from app.utils.image_variants import thumbnail_url_for_asset
 
 
 class PipelineSceneProfile(BaseModel):
@@ -47,6 +48,7 @@ class PipelineSceneProfile(BaseModel):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def to_dict(self):
+        reference_image_thumbnail_url = thumbnail_url_for_asset(self.reference_image_url or "")
         return {
             "id": self.id,
             "name": self.name,
@@ -77,6 +79,7 @@ class PipelineSceneProfile(BaseModel):
             "profile_version": self.profile_version or 1,
             "source": self.source or "library",
             "reference_image_url": self.reference_image_url or "",
+            "reference_image_thumbnail_url": reference_image_thumbnail_url,
             "reference_image_original_name": self.reference_image_original_name or "",
             "created_at": self.created_at.isoformat() if self.created_at else "",
             "updated_at": self.updated_at.isoformat() if self.updated_at else "",

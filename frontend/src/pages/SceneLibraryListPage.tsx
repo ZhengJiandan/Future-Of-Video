@@ -22,7 +22,7 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { SceneProfile, resolveAssetUrl, scriptPipelineApi } from '../services/api'
+import { SceneProfile, resolveAssetUrl, resolveDisplayAssetUrl, scriptPipelineApi } from '../services/api'
 
 const { Title, Paragraph, Text } = Typography
 const { Search } = Input
@@ -195,10 +195,10 @@ export const SceneLibraryListPage: React.FC = () => {
                       }}
                     >
                       <Image
-                        src={resolveAssetUrl(scene.reference_image_url)}
+                        src={resolveDisplayAssetUrl(scene.reference_image_url, scene.reference_image_thumbnail_url)}
                         alt={scene.name}
                         style={{ maxHeight: 208, objectFit: 'contain' }}
-                        preview
+                        preview={{ src: resolveAssetUrl(scene.reference_image_url) }}
                       />
                     </div>
                   ) : undefined
