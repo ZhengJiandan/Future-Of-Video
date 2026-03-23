@@ -1,5 +1,7 @@
 # future of video
 
+[English](./README.en.md)
+
 `future of video` 是一个面向长链路创作的 AI 视频生成工作台。它把角色档案、场景档案、剧本生成、镜头拆分、关键帧生成和分段视频渲染串成一条可编辑、可审核、可恢复的工作流。
 
 当前仓库采用前后端分离架构：
@@ -76,7 +78,8 @@
 │   │   └── stores
 │   └── package.json
 ├── docker-compose.yml
-└── README.md
+├── README.md
+└── README.en.md
 ```
 
 ## 核心流程
