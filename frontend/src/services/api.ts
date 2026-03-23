@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { getAccessToken, useAuthStore } from '../stores/auth'
+import { getTemporaryDoubaoApiKey, useRuntimeSecretsStore } from '../stores/runtimeSecrets'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 
@@ -12,8 +13,12 @@ const apiClient = axios.create({
 
 apiClient.interceptors.request.use((config) => {
   const token = getAccessToken()
+  const temporaryDoubaoApiKey = getTemporaryDoubaoApiKey()
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
+  }
+  if (temporaryDoubaoApiKey) {
+    config.headers['X-Doubao-Api-Key'] = temporaryDoubaoApiKey
   }
   return config
 })
@@ -21,6 +26,20 @@ apiClient.interceptors.request.use((config) => {
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
+    const errorCode =
+      error?.response?.headers?.['x-error-code'] ||
+      error?.response?.headers?.['X-Error-Code'] ||
+      ''
+    const detail = error?.response?.data?.detail
+    const missingDoubaoApiKey =
+      errorCode === 'missing_doubao_api_key' ||
+      (typeof detail === 'string' && detail.includes('DOUBAO_API_KEY'))
+
+    if (missingDoubaoApiKey) {
+      const reason = typeof detail === 'string' ? detail : '当前调用缺少 DOUBAO_API_KEY。'
+      useRuntimeSecretsStore.getState().openApiKeyModal(reason)
+    }
+
     if (error?.response?.status === 401) {
       useAuthStore.getState().logout()
       if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {

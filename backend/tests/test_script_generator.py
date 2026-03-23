@@ -2,6 +2,7 @@ import logging
 
 import pytest
 
+from app.core.provider_keys import MissingProviderConfigError
 from app.services import script_generator as script_generator_module
 from app.services.script_generator import FullScript, SceneInfo, ScriptGenerator, ShotInfo
 
@@ -9,6 +10,19 @@ from app.services.script_generator import FullScript, SceneInfo, ScriptGenerator
 class _DummyDoubaoLLM:
     def __init__(self, *args, **kwargs) -> None:
         pass
+
+
+class _MissingKeyDoubaoLLM:
+    async def chat_completion(self, *args, **kwargs):
+        raise MissingProviderConfigError(
+            code="missing_doubao_api_key",
+            message="未配置 DOUBAO_API_KEY，无法调用豆包能力。",
+        )
+
+
+class _BrokenDoubaoLLM:
+    async def chat_completion(self, *args, **kwargs):
+        raise RuntimeError("boom")
 
 
 @pytest.fixture
@@ -197,3 +211,76 @@ async def test_repair_shot_late_entry_risks_keeps_original_when_not_improved(
     )
 
     assert result is original_script
+
+
+@pytest.mark.asyncio
+async def test_prepare_character_resolution_raises_when_doubao_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(script_generator_module, "DoubaoLLM", _MissingKeyDoubaoLLM)
+    generator = ScriptGenerator()
+
+    with pytest.raises(MissingProviderConfigError):
+        await generator.prepare_character_resolution(
+            user_input="帮我生成一个未来都市里的女特工角色",
+            style="电影感",
+            character_profiles=[
+                {
+                    "id": "library-1",
+                    "name": "无关角色",
+                    "role": "配角",
+                    "category": "测试",
+                    "archetype": "",
+                    "llm_summary": "一个和当前需求无关的角色。",
+                }
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_character_resolution_raises_when_intent_extraction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(script_generator_module, "DoubaoLLM", _BrokenDoubaoLLM)
+    generator = ScriptGenerator()
+
+    with pytest.raises(RuntimeError, match="角色分析调用豆包失败"):
+        await generator.prepare_character_resolution(
+            user_input="帮我生成一个未来都市里的女特工角色",
+            style="电影感",
+            character_profiles=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_select_profiles_returns_empty_when_no_profile_scores_match(
+    generator: ScriptGenerator,
+) -> None:
+    result = await generator._select_profiles(
+        profile_type="character",
+        user_input="完全不相关的需求描述",
+        intent_queries=[{"keywords": ["不存在的关键词"], "role": "", "archetype": "", "category": "", "name_hint": ""}],
+        profiles=[
+            {
+                "id": "char-1",
+                "name": "橘丸",
+                "role": "盗贼",
+                "category": "动物",
+                "archetype": "",
+                "description": "虎斑猫盗贼",
+                "llm_summary": "擅长潜入的猫。",
+            },
+            {
+                "id": "char-2",
+                "name": "蓝尾",
+                "role": "黑客",
+                "category": "动物",
+                "archetype": "",
+                "description": "技术支援猫",
+                "llm_summary": "负责监控接入。",
+            },
+        ],
+        desired_count=3,
+    )
+
+    assert result == []

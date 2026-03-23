@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Union
 import httpx
 
 from app.core.config import settings
+from app.core.provider_keys import require_doubao_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -85,14 +86,11 @@ class DoubaoVideoGenerator:
         model: str = SEEDANCE_15_PRO,
         base_url: Optional[str] = None,
     ):
-        self.api_key = api_key or settings.DOUBAO_API_KEY or os.getenv("DOUBAO_API_KEY")
+        self.api_key = require_doubao_api_key(explicit_api_key=api_key, action_label="调用豆包视频生成")
         self.model = model
         self.base_url = (base_url or settings.DOUBAO_BASE_URL or DEFAULT_DOUBAO_BASE_URL).rstrip("/")
         self.debug_logging = bool(getattr(settings, "MODEL_DEBUG_LOGGING", True))
         self.debug_max_chars = int(getattr(settings, "MODEL_DEBUG_MAX_CHARS", 20000))
-
-        if not self.api_key:
-            raise ValueError("DOUBAO_API_KEY 未配置，无法调用豆包视频生成接口")
 
         # HTTP客户端
         self.client = httpx.AsyncClient(

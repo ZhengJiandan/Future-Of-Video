@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.provider_keys import DOUBAO_API_KEY_ERROR_CODE, MissingProviderConfigError, get_effective_doubao_api_key
 from app.db import get_db
 from app.services.auth_service import get_current_user
 from app.services.pipeline_character_library import pipeline_character_library_service
@@ -33,6 +34,14 @@ from app.services.profile_image_analyzer import profile_image_analyzer_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
+
+
+def _raise_provider_config_http_exception(exc: MissingProviderConfigError) -> None:
+    raise HTTPException(
+        status_code=428,
+        detail=str(exc),
+        headers={"X-Error-Code": exc.code},
+    ) from exc
 
 
 class ReferenceAssetPayload(BaseModel):
@@ -485,6 +494,8 @@ async def generate_character_three_view(request: GenerateCharacterThreeViewReque
             "message": "角色三视图生成完成",
             **result,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -501,6 +512,8 @@ async def generate_character_prototype(request: GenerateCharacterPrototypeReques
             "message": "角色原型图生成完成",
             **result,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -528,6 +541,8 @@ async def analyze_character_reference(request: AnalyzeCharacterImageRequest):
             "message": "角色图片分析完成",
             "fields": fields,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
@@ -547,6 +562,8 @@ async def generate_scene_prototype(request: GenerateScenePrototypeRequest):
             "message": "场景原型图生成完成",
             **result,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -569,6 +586,8 @@ async def analyze_scene_reference(request: AnalyzeSceneImageRequest):
             "message": "场景图片分析完成",
             "fields": fields,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
@@ -779,6 +798,8 @@ async def generate_script(request: GenerateScriptRequest, db: AsyncSession = Dep
             "processing_time": time.time() - start_time,
             **result,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except Exception as exc:
         logger.error("Generate script failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="剧本生成失败，请稍后重试") from exc
@@ -808,6 +829,8 @@ async def prepare_characters(request: PrepareCharactersRequest, db: AsyncSession
             "processing_time": time.time() - start_time,
             **result,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except Exception as exc:
         logger.error("Prepare characters failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="角色准备失败，请稍后重试") from exc
@@ -830,6 +853,8 @@ async def split_script(request: SplitScriptRequest):
             "processing_time": time.time() - start_time,
             **result,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except Exception as exc:
         logger.error("Split script failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="剧本拆分失败，请稍后重试") from exc
@@ -878,6 +903,11 @@ async def render_project(
 ):
     """发起片段渲染和最终合成。"""
     try:
+        if request.provider in {"auto", "doubao"} and not get_effective_doubao_api_key():
+            raise MissingProviderConfigError(
+                code=DOUBAO_API_KEY_ERROR_CODE,
+                message="未配置 DOUBAO_API_KEY，无法调用豆包视频生成。可在前端临时填写后重试，或改用 local 预览模式。",
+            )
         existing_task_state = await pipeline_workflow_service.find_active_render_task_for_project(
             user_id=current_user.id,
             project_id=request.project_id,
@@ -937,6 +967,8 @@ async def render_project(
             "current_step": task_state.current_step,
             "renderer": task_state.renderer,
         }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except Exception as exc:
         logger.error("Render project failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="渲染任务创建失败，请稍后重试") from exc
@@ -1008,6 +1040,8 @@ async def resume_render_task(
         return state.to_dict()
     except HTTPException:
         raise
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -1033,6 +1067,8 @@ async def retry_render_clip(
         return state.to_dict()
     except HTTPException:
         raise
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

@@ -12,13 +12,13 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.config import settings
+from app.core.provider_keys import require_doubao_api_key
 
 logger = logging.getLogger(__name__)
 
 
 class ProfileImageAnalyzerService:
     def __init__(self) -> None:
-        self.api_key = getattr(settings, "DOUBAO_API_KEY", None)
         self.base_url = str(getattr(settings, "DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")).rstrip("/")
         self.model = str(getattr(settings, "DOUBAO_MODEL", "doubao-seed-2-0-lite-260215")).strip() or "doubao-seed-2-0-lite-260215"
         self.timeout = httpx.Timeout(
@@ -153,8 +153,7 @@ class ProfileImageAnalyzerService:
         system_prompt: str,
         user_prompt: str,
     ) -> Dict[str, Any]:
-        if not self.api_key:
-            raise ValueError("DOUBAO_API_KEY 未配置，暂时无法分析图片")
+        api_key = require_doubao_api_key(action_label="调用豆包图片分析")
         if not image_path.exists():
             raise ValueError("图片不存在，无法分析")
 
@@ -173,17 +172,17 @@ class ProfileImageAnalyzerService:
             ],
             "temperature": 0.2,
         }
-        payload = await self._request_completion(request_body)
+        payload = await self._request_completion(request_body, api_key=api_key)
         content = self._extract_message_content(payload)
         if not content:
             raise RuntimeError("图片分析模型返回为空")
         return self._parse_json_payload(content)
 
-    async def _request_completion(self, request_body: Dict[str, Any]) -> Dict[str, Any]:
+    async def _request_completion(self, request_body: Dict[str, Any], *, api_key: str) -> Dict[str, Any]:
         async with httpx.AsyncClient(
             timeout=self.timeout,
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
         ) as client:
