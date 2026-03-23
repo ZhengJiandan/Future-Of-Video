@@ -16,6 +16,10 @@ from loguru import logger
 from app.core.config import settings
 from app.core.provider_keys import get_effective_doubao_api_key
 
+DEFAULT_ARK_IMAGE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+DEFAULT_ARK_TEXT_TO_IMAGE_MODEL = "doubao-seedream-4-0-250828"
+DEFAULT_ARK_IMAGE_EDIT_MODEL = "doubao-seededit-3-0-i2i-250628"
+
 
 class DoubaoImageGenerationClient:
     """火山引擎豆包 Seedream 图片生成客户端。
@@ -36,13 +40,18 @@ class DoubaoImageGenerationClient:
             or getattr(settings, "DOUBAO_IMAGE_BASE_URL", None)
             or "https://operator.las.cn-beijing.volces.com/api/v1"
         ).rstrip("/")
+        self.ark_base_url = (
+            getattr(settings, "DOUBAO_BASE_URL", None)
+            or DEFAULT_ARK_IMAGE_BASE_URL
+        ).rstrip("/")
         self.model = model or getattr(settings, "DOUBAO_IMAGE_MODEL", "doubao-seedream-5-0-260128")
         self.debug_logging = bool(getattr(settings, "MODEL_DEBUG_LOGGING", True))
         self.debug_max_chars = int(getattr(settings, "MODEL_DEBUG_MAX_CHARS", 20000))
         self.timeout = max(30, int(float(getattr(settings, "DOUBAO_READ_TIMEOUT", 240.0))))
         self.endpoint_candidates = [
-            "/online/images/generations",
-            "/images/generations",
+            (self.base_url, "/online/images/generations", "default"),
+            (self.base_url, "/images/generations", "default"),
+            (self.ark_base_url, "/images/generations", "ark-compatible"),
         ]
 
     @property
@@ -97,7 +106,7 @@ class DoubaoImageGenerationClient:
             return
         logger.info(
             "Doubao image request | model={} | url={} | timeout={}s\n{}",
-            self.model,
+            payload.get("model") or self.model,
             url,
             self.timeout,
             self._json_for_log(payload),
@@ -111,6 +120,17 @@ class DoubaoImageGenerationClient:
             self.model,
             self._json_for_log(response_body),
         )
+
+    def _resolve_payload_for_candidate(self, payload: Dict[str, Any], strategy: str) -> Dict[str, Any]:
+        candidate_payload = dict(payload)
+        if strategy != "ark-compatible":
+            return candidate_payload
+
+        has_image_input = bool(candidate_payload.get("image"))
+        candidate_payload["model"] = (
+            DEFAULT_ARK_IMAGE_EDIT_MODEL if has_image_input else DEFAULT_ARK_TEXT_TO_IMAGE_MODEL
+        )
+        return candidate_payload
 
     def _normalize_size(self, *, aspect_ratio: str, image_size: str) -> str:
         presets = {
@@ -151,17 +171,18 @@ class DoubaoImageGenerationClient:
             }
 
         last_error = "Doubao image generation failed"
-        for endpoint in self.endpoint_candidates:
-            url = f"{self.base_url}{endpoint}"
+        for base_url, endpoint, strategy in self.endpoint_candidates:
+            url = f"{base_url}{endpoint}"
+            request_payload = self._resolve_payload_for_candidate(payload, strategy)
             try:
-                self._log_request(url=url, payload=payload)
+                self._log_request(url=url, payload=request_payload)
                 response = requests.post(
                     url,
                     headers=self._headers(),
-                    json=payload,
+                    json=request_payload,
                     timeout=self.timeout,
                 )
-                if response.status_code in {404, 405}:
+                if response.status_code in {401, 403, 404, 405}:
                     last_error = f"API Error: {response.status_code} - {response.text[:200]}"
                     continue
                 if response.status_code != 200:

@@ -2235,7 +2235,8 @@ export const ScriptPipelinePage: React.FC = () => {
                   value={provider}
                   onChange={setProvider}
                   options={[
-                    { value: 'auto', label: '自动选择' },
+                    { value: 'auto', label: '自动选择（可灵优先）' },
+                    { value: 'kling', label: '可灵 Kling' },
                     { value: 'doubao', label: '豆包 Seedance' },
                     { value: 'local', label: '本地快速预览' },
                   ]}
@@ -2269,7 +2270,7 @@ export const ScriptPipelinePage: React.FC = () => {
                 />
               </Col>
               <Col xs={24} md={8}>
-                <Text>豆包模型</Text>
+                <Text>模型 ID（仅豆包时生效）</Text>
                 <Select
                   style={{ width: '100%', marginTop: 8 }}
                   value={providerModel}

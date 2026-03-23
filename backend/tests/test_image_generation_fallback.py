@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import settings
+from app.services.doubao_image_generation import DoubaoImageGenerationClient
 from app.services.pipeline_character_library import PipelineCharacterLibraryService
 from app.services.pipeline_workflow import PipelineWorkflowService
 from app.services.preferred_image_generation import PreferredImageGenerationClient
@@ -136,3 +137,48 @@ async def test_character_library_uses_fallback_image_provider_source(
     assert result["source"] == "doubao-seedream-text-to-image"
     generated_path = tmp_path / "generated" / "pipeline" / "character_library" / "prototypes" / result["asset_filename"]
     assert generated_path.read_bytes() == b"doubao-frame"
+
+
+def test_doubao_image_client_falls_back_to_ark_when_las_returns_unauthorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "DOUBAO_API_KEY", "ark-temp-key")
+    monkeypatch.setattr(settings, "DOUBAO_IMAGE_BASE_URL", "https://operator.las.cn-beijing.volces.com/api/v1")
+    monkeypatch.setattr(settings, "DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+
+    calls: list[tuple[str, str]] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: dict | None = None, text: str = "") -> None:
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url: str, headers=None, json=None, timeout=None):
+        calls.append((url, str((json or {}).get("model") or "")))
+        if url.startswith("https://operator.las.cn-beijing.volces.com"):
+            return _Response(401, text='{"error":"Unauthorized"}')
+        return _Response(
+            200,
+            payload={
+                "data": [
+                    {
+                        "b64_json": "aGVsbG8=",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("app.services.doubao_image_generation.requests.post", fake_post)
+
+    client = DoubaoImageGenerationClient()
+    result = client.generate_text_to_image("一只太空猫", aspect_ratio="16:9", image_size="2k")
+
+    assert result["success"] is True
+    assert result["image_data"] == b"hello"
+    assert calls[0][0] == "https://operator.las.cn-beijing.volces.com/api/v1/online/images/generations"
+    assert calls[-1][0] == "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+    assert calls[-1][1] == "doubao-seedream-4-0-250828"

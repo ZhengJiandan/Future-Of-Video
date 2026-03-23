@@ -32,6 +32,22 @@ def test_settings_accept_local_runtime_alias() -> None:
     assert configured.pipeline_render_dispatch_mode == "local"
 
 
+def test_auto_render_provider_prefers_kling_over_doubao(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = PipelineWorkflowService()
+    monkeypatch.setattr(service, "_kling_enabled", lambda: True)
+    monkeypatch.setattr(service, "_doubao_enabled", lambda: True)
+
+    assert service._choose_render_provider({"provider": "auto"}) == "kling-official"
+
+
+def test_auto_render_provider_falls_back_to_doubao_when_kling_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = PipelineWorkflowService()
+    monkeypatch.setattr(service, "_kling_enabled", lambda: False)
+    monkeypatch.setattr(service, "_doubao_enabled", lambda: True)
+
+    assert service._choose_render_provider({"provider": "auto"}) == "doubao-official"
+
+
 @pytest.mark.asyncio
 async def test_start_render_task_runs_in_local_process_when_minimal_mode(
     monkeypatch: pytest.MonkeyPatch,

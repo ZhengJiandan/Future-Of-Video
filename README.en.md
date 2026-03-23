@@ -24,7 +24,7 @@ The repository currently uses a separated frontend/backend architecture:
 
 - This project mainly addresses a practical limitation of current video models: a single generation is usually too short to become a complete standalone film. In theory, segmented generation can be chained into videos longer than 5 minutes, but given current model quality, keeping the final output within 1 minute is still the safer recommendation to reduce character drift, style drift, and continuity artifacts.
 - The project is currently developed and maintained by a single person in spare time. Rough edges and omissions are expected. Discussion, feedback, and practical improvements are welcome.
-- The current primary workflow depends on Doubao-family models by default. Since the `Seedance 2.0` API is not fully open yet, and recent policy changes have also affected Doubao video generation availability, production stability is not ideal. If you plan to rely on this seriously, integrating Kling or another more stable video API is recommended.
+- The repository now supports Kling video generation. When the render provider is set to `auto`, the system prefers Kling multi-image-to-video first and only falls back to Doubao video generation when Kling `AK/SK` credentials are missing. Since the `Seedance 2.0` API is not fully open yet, and recent policy changes have also affected Doubao video generation availability, production stability is not ideal. If you plan to rely on this seriously, configuring Kling first is the recommended path.
 - For image generation, `NanoBanana Pro` is generally the better choice. The current repository uses a third-party compatible integration at relatively low cost. If `NANOBANANA_API_KEY` is not configured, the system falls back to Doubao image generation.
 
 ## Feature Overview
@@ -170,6 +170,10 @@ At minimum, review these settings:
 - `JWT_SECRET_KEY`
 - `SECRET_KEY`
 - `PIPELINE_RUNTIME_MODE`
+- `KLING_ACCESS_KEY`
+- `KLING_SECRET_KEY`
+  - Used for Kling video generation.
+  - When `provider=auto`, Kling is preferred if both are configured; otherwise the system falls back to Doubao video generation.
 - `DOUBAO_API_KEY`
   - It can be configured server-side in advance, or temporarily provided in the current frontend session when Doubao-backed features are actually called.
 
@@ -538,11 +542,19 @@ Current logic:
 - Prefer `NANOBANANA_API_KEY`
 - If missing, fall back to the Doubao image model associated with `DOUBAO_API_KEY`
 
-### 7. When will temporary characters be offered for saving into the formal character library?
+### 7. Why does “auto” prefer Kling for video generation?
+
+Current priority:
+
+- If `KLING_ACCESS_KEY` + `KLING_SECRET_KEY` are configured, `provider=auto` prefers Kling video generation
+- If Kling credentials are missing, the system falls back to Doubao video generation
+- If neither side has usable credentials, the request fails, or you can explicitly switch to `local` preview mode
+
+### 8. When will temporary characters be offered for saving into the formal character library?
 
 If no formal profile is matched, the system first generates temporary character drafts and uses them directly in the script, keyframe, and video workflow. The frontend only offers saving them into the formal character library after those temporary characters have actually been used in video generation. When saved, the first frame of that character’s first generated segment is used directly as the reference image, without generating extra three-view or close-up images.
 
-### 8. Why is there no extra project-level audio in the final video?
+### 9. Why is there no extra project-level audio in the final video?
 
 The current repository disables the old project-level audio compositing path by default. Public demo results mainly rely on the video model’s own audio capability, or remain silent. That is the current implementation status, not a configuration issue.
 

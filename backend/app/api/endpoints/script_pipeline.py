@@ -23,7 +23,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.provider_keys import DOUBAO_API_KEY_ERROR_CODE, MissingProviderConfigError, get_effective_doubao_api_key
+from app.core.provider_keys import (
+    DOUBAO_API_KEY_ERROR_CODE,
+    KLING_API_KEY_ERROR_CODE,
+    MissingProviderConfigError,
+    get_effective_doubao_api_key,
+    kling_credentials_configured,
+)
 from app.db import get_db
 from app.services.auth_service import get_current_user
 from app.services.pipeline_character_library import pipeline_character_library_service
@@ -903,10 +909,20 @@ async def render_project(
 ):
     """发起片段渲染和最终合成。"""
     try:
-        if request.provider in {"auto", "doubao"} and not get_effective_doubao_api_key():
+        if request.provider == "kling" and not kling_credentials_configured():
+            raise MissingProviderConfigError(
+                code=KLING_API_KEY_ERROR_CODE,
+                message="未配置 KLING_ACCESS_KEY / KLING_SECRET_KEY，无法调用可灵视频生成。",
+            )
+        if request.provider == "doubao" and not get_effective_doubao_api_key():
             raise MissingProviderConfigError(
                 code=DOUBAO_API_KEY_ERROR_CODE,
                 message="未配置 DOUBAO_API_KEY，无法调用豆包视频生成。可在前端临时填写后重试，或改用 local 预览模式。",
+            )
+        if request.provider == "auto" and not kling_credentials_configured() and not get_effective_doubao_api_key():
+            raise MissingProviderConfigError(
+                code=KLING_API_KEY_ERROR_CODE,
+                message="未配置可灵或豆包视频生成凭证。请先配置 KLING_ACCESS_KEY / KLING_SECRET_KEY，或在前端临时填写 DOUBAO_API_KEY 后重试，或改用 local 预览模式。",
             )
         existing_task_state = await pipeline_workflow_service.find_active_render_task_for_project(
             user_id=current_user.id,

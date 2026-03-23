@@ -36,7 +36,13 @@ import httpx
 from sqlalchemy import select, update
 
 from app.core.config import settings
-from app.core.provider_keys import get_effective_doubao_api_key, require_doubao_api_key
+from app.core.provider_keys import (
+    get_effective_doubao_api_key,
+    get_effective_kling_credentials,
+    kling_credentials_configured,
+    require_doubao_api_key,
+    require_kling_credentials,
+)
 from app.db.base import AsyncSessionLocal
 from app.models.pipeline_project import PipelineProject
 from app.models.pipeline_render_task import PipelineRenderTask
@@ -2186,10 +2192,20 @@ class PipelineWorkflowService:
         requested = render_config.get("provider", "auto")
         if requested == "local":
             return "local-preview"
-        if requested in {"doubao", "auto"}:
+        if requested == "kling":
+            if self._kling_enabled():
+                return "kling-official"
+            require_kling_credentials(action_label="调用可灵视频生成；或改用自动选择 / 豆包 / local 预览模式")
+        if requested == "doubao":
             if self._doubao_enabled():
                 return "doubao-official"
             require_doubao_api_key(action_label="调用豆包视频生成；或显式选择 local 预览模式")
+        if requested == "auto":
+            if self._kling_enabled():
+                return "kling-official"
+            if self._doubao_enabled():
+                return "doubao-official"
+            require_kling_credentials(action_label="调用可灵视频生成；当前未命中可灵配置，也未找到豆包视频配置")
         raise RuntimeError(f"不支持的视频 provider: {requested}")
 
     async def _render_video_or_preview(
@@ -2203,6 +2219,37 @@ class PipelineWorkflowService:
         render_config: Dict[str, Any],
     ) -> Dict[str, str]:
         provider = self._choose_render_provider(render_config)
+        if provider == "kling-official":
+            try:
+                rendered = await self._try_render_kling_video(
+                    task_dir=task_dir,
+                    segment=segment,
+                    keyframe_bundle=keyframe_bundle,
+                    character_profiles=character_profiles,
+                    scene_profiles=scene_profiles,
+                    render_config=render_config,
+                )
+                if rendered:
+                    return rendered
+                raise RuntimeError(f"片段 {segment['segment_number']} 可灵视频生成失败，未获得真实视频结果")
+            except Exception as exc:
+                if str(render_config.get("provider") or "auto") == "auto" and self._doubao_enabled():
+                    logger.warning(
+                        "Kling render failed for segment %s under auto mode, fallback to Doubao: %s",
+                        segment.get("segment_number"),
+                        exc,
+                    )
+                    rendered = await self._try_render_doubao_video(
+                        task_dir=task_dir,
+                        segment=segment,
+                        keyframe_bundle=keyframe_bundle,
+                        character_profiles=character_profiles,
+                        scene_profiles=scene_profiles,
+                        render_config=render_config,
+                    )
+                    if rendered:
+                        return rendered
+                raise
         if provider == "doubao-official":
             rendered = await self._try_render_doubao_video(
                 task_dir=task_dir,
@@ -2373,6 +2420,84 @@ class PipelineWorkflowService:
         except Exception as exc:
             logger.error("Doubao render failed for segment %s: %s", segment.get("segment_number"), exc)
             raise RuntimeError(f"片段 {segment['segment_number']} 豆包视频生成失败: {exc}") from exc
+
+    async def _try_render_kling_video(
+        self,
+        *,
+        task_dir: Path,
+        segment: Dict[str, Any],
+        keyframe_bundle: Optional[Dict[str, Any]],
+        character_profiles: List[Dict[str, Any]],
+        scene_profiles: List[Dict[str, Any]],
+        render_config: Dict[str, Any],
+    ) -> Optional[Dict[str, str]]:
+        if not self._kling_enabled():
+            require_kling_credentials(action_label="调用可灵视频生成")
+
+        try:
+            from app.services.kling_video import KlingVideoGenerator
+
+            access_key, secret_key = require_kling_credentials(action_label="调用可灵视频生成")
+            generator = KlingVideoGenerator(
+                access_key=access_key,
+                secret_key=secret_key,
+                model=self._resolve_kling_model(str(render_config.get("provider_model") or "")),
+                mode=self._resolve_kling_mode(),
+                base_url=settings.KLING_BASE_URL,
+            )
+
+            try:
+                image_list = self._build_kling_image_list(
+                    task_dir=task_dir,
+                    segment=segment,
+                    keyframe_bundle=keyframe_bundle,
+                    character_profiles=character_profiles,
+                    scene_profiles=scene_profiles,
+                )
+                if not image_list:
+                    raise RuntimeError("可灵 multi-image2video 缺少可用图片输入")
+
+                prompt = self._build_segment_video_prompt(
+                    segment=segment,
+                    character_profiles=character_profiles,
+                    scene_profiles=scene_profiles,
+                )
+                negative_prompt = self._build_segment_negative_prompt(
+                    segment=segment,
+                    character_profiles=character_profiles,
+                    scene_profiles=scene_profiles,
+                )
+
+                response = await generator.create_multi_image_video_task(
+                    image_list=image_list,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    duration=self._normalize_kling_duration(segment["duration"]),
+                    aspect_ratio=self._normalize_kling_aspect_ratio(str(render_config.get("aspect_ratio") or "16:9")),
+                    enable_audio=bool(render_config.get("generate_audio", True)),
+                    external_task_id=f"segment-{segment.get('segment_number')}",
+                )
+                if response.status.lower() in {"submitted", "processing", "queued", "running"}:
+                    response = await generator.wait_for_completion(
+                        response.task_id,
+                        poll_interval=5,
+                        max_wait_time=900,
+                    )
+            finally:
+                await generator.close()
+
+            if response.video_url:
+                return {
+                    "asset_url": response.video_url,
+                    "asset_type": "video/mp4",
+                    "asset_filename": f"clip_{segment['segment_number']:02d}.mp4",
+                    "provider": "kling-official",
+                    "last_frame_url": "",
+                }
+            raise RuntimeError(response.error_message or f"片段 {segment['segment_number']} 未返回 video_url")
+        except Exception as exc:
+            logger.error("Kling render failed for segment %s: %s", segment.get("segment_number"), exc)
+            raise RuntimeError(f"片段 {segment['segment_number']} 可灵视频生成失败: {exc}") from exc
 
     def _is_sensitive_image_error(self, exc: Exception) -> bool:
         if not isinstance(exc, httpx.HTTPStatusError) or exc.response is None:
@@ -2885,6 +3010,12 @@ class PipelineWorkflowService:
     def _get_doubao_api_key(self) -> Optional[str]:
         return get_effective_doubao_api_key()
 
+    def _kling_enabled(self) -> bool:
+        return kling_credentials_configured()
+
+    def _get_kling_credentials(self) -> tuple[Optional[str], Optional[str]]:
+        return get_effective_kling_credentials()
+
     def _build_project_audio_plan(
         self,
         *,
@@ -3160,7 +3291,7 @@ class PipelineWorkflowService:
             "resolution": self._normalize_doubao_resolution(str(render_config.get("resolution") or "720p")),
             "aspect_ratio": self._normalize_doubao_aspect_ratio(str(render_config.get("aspect_ratio") or "16:9")),
             "watermark": bool(render_config.get("watermark", False)),
-            "provider_model": str(render_config.get("provider_model") or settings.DOUBAO_VIDEO_MODEL),
+            "provider_model": str(render_config.get("provider_model") or ""),
             "camera_fixed": bool(render_config.get("camera_fixed", False)),
             "generate_audio": provider_generate_audio,
             "requested_generate_audio": False,
@@ -3902,6 +4033,83 @@ class PipelineWorkflowService:
 
         encoded = base64.b64encode(asset_path.read_bytes()).decode("utf-8")
         return f"data:{mime_type};base64,{encoded}"
+
+    def _build_kling_image_reference(self, asset_url: str) -> Optional[str]:
+        if not asset_url:
+            return None
+        if asset_url.startswith("http://") or asset_url.startswith("https://"):
+            return asset_url
+
+        asset_path = self._asset_url_to_path(asset_url)
+        if not asset_path or not asset_path.exists():
+            return None
+
+        return base64.b64encode(asset_path.read_bytes()).decode("utf-8")
+
+    def _build_kling_image_list(
+        self,
+        *,
+        task_dir: Optional[Path],
+        segment: Dict[str, Any],
+        keyframe_bundle: Optional[Dict[str, Any]],
+        character_profiles: List[Dict[str, Any]],
+        scene_profiles: List[Dict[str, Any]],
+    ) -> List[Dict[str, str]]:
+        segment_characters, _ = self._get_segment_profile_context(
+            segment=segment,
+            character_profiles=character_profiles,
+            scene_profiles=scene_profiles,
+        )
+
+        candidates: List[str] = []
+        if keyframe_bundle:
+            start_frame = str((keyframe_bundle.get("start_frame") or {}).get("asset_url") or "").strip()
+            if start_frame:
+                candidates.append(start_frame)
+
+        for item in self._build_video_character_reference_images(
+            task_dir=task_dir,
+            segment=segment,
+            character_profiles=segment_characters,
+        ):
+            asset_url = str(item.get("url") or "").strip()
+            if asset_url:
+                candidates.append(asset_url)
+
+        image_list: List[Dict[str, str]] = []
+        seen = set()
+        for asset_url in candidates:
+            payload = self._build_kling_image_reference(asset_url)
+            if not payload or payload in seen:
+                continue
+            seen.add(payload)
+            image_list.append({"image": payload})
+            if len(image_list) >= 4:
+                break
+        return image_list
+
+    def _resolve_kling_model(self, requested_model: str) -> str:
+        normalized = str(requested_model or "").strip()
+        if normalized.startswith("kling-"):
+            return normalized
+        return str(getattr(settings, "KLING_VIDEO_MODEL", "") or "kling-v1-6")
+
+    def _resolve_kling_mode(self) -> str:
+        mode = str(getattr(settings, "KLING_VIDEO_MODE", "") or "std").strip().lower()
+        return mode if mode in {"std", "pro"} else "std"
+
+    def _normalize_kling_aspect_ratio(self, value: str) -> str:
+        allowed = {"16:9", "9:16", "1:1"}
+        return value if value in allowed else "16:9"
+
+    def _normalize_kling_duration(self, value: Any) -> int:
+        try:
+            rounded = int(round(float(value)))
+        except (TypeError, ValueError):
+            rounded = 5
+        if rounded <= 5:
+            return 5
+        return min(int(getattr(settings, "KLING_MAX_DURATION", 10) or 10), 10)
 
     def _normalize_doubao_resolution(self, value: str) -> str:
         allowed = {"480p", "720p", "1080p"}

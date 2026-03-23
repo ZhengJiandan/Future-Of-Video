@@ -51,8 +51,26 @@ class Settings(BaseSettings):
     ALLOWED_VIDEO_TYPES: List[str] = ["video/mp4", "video/webm"]
     
     # 可灵 AI
-    KELING_API_KEY: Optional[str] = None
-    KELING_BASE_URL: str = "https://api.kelingai.com/v1"
+    KLING_ACCESS_KEY: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("KLING_ACCESS_KEY", "KLING_API_KEY", "KELING_API_KEY"),
+    )
+    KLING_SECRET_KEY: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("KLING_SECRET_KEY", "KELING_SECRET_KEY"),
+    )
+    KLING_BASE_URL: str = Field(
+        default="https://api-singapore.klingai.com",
+        validation_alias=AliasChoices("KLING_BASE_URL", "KELING_BASE_URL"),
+    )
+    KLING_VIDEO_MODEL: str = Field(
+        default="kling-v1-6",
+        validation_alias=AliasChoices("KLING_VIDEO_MODEL", "KELING_VIDEO_MODEL"),
+    )
+    KLING_VIDEO_MODE: str = Field(
+        default="std",
+        validation_alias=AliasChoices("KLING_VIDEO_MODE", "KELING_VIDEO_MODE"),
+    )
 
     # NanoBanana 图片生成
     NANOBANANA_API_KEY: Optional[str] = None
@@ -78,7 +96,10 @@ class Settings(BaseSettings):
     DOUBAO_SCRIPT_READ_TIMEOUT: float = 360.0
     DOUBAO_MAX_RETRIES: int = 2
     DOUBAO_RETRY_BACKOFF_SECONDS: float = 2.0
-    KELING_MAX_DURATION: int = 10
+    KLING_MAX_DURATION: int = Field(
+        default=10,
+        validation_alias=AliasChoices("KLING_MAX_DURATION", "KELING_MAX_DURATION"),
+    )
     
     # 即梦AI
     JIMENG_API_KEY: Optional[str] = None
