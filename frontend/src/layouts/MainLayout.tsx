@@ -3,7 +3,6 @@ import { Layout, Menu, Button, Typography, theme, Space, Modal, Input, message }
 import {
   EnvironmentOutlined,
   FolderOpenOutlined,
-  KeyOutlined,
   TeamOutlined,
   HomeOutlined,
   MenuFoldOutlined,
@@ -29,7 +28,6 @@ export const MainLayout: React.FC = () => {
   const apiKeyModalReason = useRuntimeSecretsStore((state) => state.apiKeyModalReason)
   const setTemporaryDoubaoApiKey = useRuntimeSecretsStore((state) => state.setTemporaryDoubaoApiKey)
   const clearTemporaryDoubaoApiKey = useRuntimeSecretsStore((state) => state.clearTemporaryDoubaoApiKey)
-  const openApiKeyModal = useRuntimeSecretsStore((state) => state.openApiKeyModal)
   const closeApiKeyModal = useRuntimeSecretsStore((state) => state.closeApiKeyModal)
   const {
     token: { colorBgContainer },
@@ -100,11 +98,6 @@ export const MainLayout: React.FC = () => {
     navigate('/login')
   }
 
-  const handleOpenApiKeyModal = () => {
-    setEditingApiKey(temporaryDoubaoApiKey)
-    openApiKeyModal()
-  }
-
   const handleSaveApiKey = () => {
     const normalized = editingApiKey.trim()
     if (!normalized) {
@@ -154,9 +147,6 @@ export const MainLayout: React.FC = () => {
           </div>
           <Space size={12}>
             <Text style={{ color: 'rgba(246, 242, 232, 0.72)' }}>AI 视频生成工作台</Text>
-            <Button icon={<KeyOutlined />} onClick={handleOpenApiKeyModal}>
-              临时豆包 Key
-            </Button>
             <Button type="primary" onClick={handleLogin}>
               登录
             </Button>
@@ -248,9 +238,6 @@ export const MainLayout: React.FC = () => {
             }}
           />
           <Space size={16}>
-            <Button icon={<KeyOutlined />} onClick={handleOpenApiKeyModal}>
-              {temporaryDoubaoApiKey ? '临时豆包 Key 已设置' : '临时豆包 Key'}
-            </Button>
             <Text type="secondary">{user ? `${user.name} · ${user.email}` : '未登录'}</Text>
             {user ? (
               <Button onClick={handleLogout}>退出登录</Button>
