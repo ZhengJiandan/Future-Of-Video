@@ -13,7 +13,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/auth'
 
-const { Title, Paragraph, Text, Link } = Typography
+const { Title, Paragraph, Text } = Typography
 
 const publicFeatureCards = [
   {
