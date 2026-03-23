@@ -2688,7 +2688,7 @@ export const ScriptPipelinePage: React.FC = () => {
         <Row justify="space-between" align="middle" gutter={[16, 16]}>
           <Col xs={24} lg={16}>
             <Title level={2} style={{ marginBottom: 8, color: '#fff' }}>
-              端到端视频生成主流程
+              视频生成主流程
             </Title>
             <Paragraph style={{ color: 'rgba(255,255,255,0.82)', fontSize: 15, marginBottom: 0 }}>
               当前页面只保留单条可执行主链。每次只处理一个步骤，减少来回滚动和跨步骤干扰。
