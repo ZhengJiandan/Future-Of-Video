@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import httpx
 
 from app.core.config import settings
+from app.core.provider_keys import MissingProviderConfigError
 from app.services.doubao_llm import DoubaoLLM, DoubaoMessage
 
 logger = logging.getLogger(__name__)
@@ -383,16 +384,11 @@ class ScriptGenerator:
                     default=float(target_total_duration or 0),
                 ),
             }
+        except MissingProviderConfigError:
+            raise
         except Exception as exc:
-            logger.warning("生成意图提取失败，回退启发式: %s", exc)
-            tokens = self._tokenize(f"{user_input} {style}")
-            return {
-                "character_queries": [{"keywords": tokens[:6], "role": "", "archetype": "", "category": "", "name_hint": ""}],
-                "scene_queries": [{"keywords": tokens[:6], "scene_type": "", "story_function": "", "category": "", "name_hint": ""}],
-                "style_keywords": self._tokenize(style),
-                "tone_keywords": [],
-                "duration_preference": float(target_total_duration or 0),
-            }
+            logger.error("生成意图提取失败，终止自动角色分析: %s", exc, exc_info=True)
+            raise RuntimeError("角色分析调用豆包失败，请检查临时 Key 或服务配置后重试。") from exc
 
     async def _select_character_profiles(
         self,
@@ -523,6 +519,8 @@ class ScriptGenerator:
                 normalized["profile_version"] = 1
                 drafts.append(normalized)
             return drafts
+        except MissingProviderConfigError:
+            raise
         except Exception as exc:
             logger.warning("临时角色草稿生成失败: %s", exc)
             return []
@@ -550,7 +548,7 @@ class ScriptGenerator:
         scored.sort(key=lambda item: item[0], reverse=True)
         shortlisted = [profile for score, profile in scored if score > 0][:6]
         if not shortlisted:
-            shortlisted = [profile for _, profile in scored[: min(desired_count, len(scored))]]
+            return []
 
         llm_selected = await self._choose_profiles_with_llm(
             profile_type=profile_type,
@@ -623,6 +621,8 @@ class ScriptGenerator:
             lookup = {item.get("id"): item for item in candidates if item.get("id")}
             selected = [lookup[item_id] for item_id in selected_ids if item_id in lookup]
             return selected[:desired_count]
+        except MissingProviderConfigError:
+            raise
         except Exception as exc:
             logger.warning("%s 档案二次筛选失败，回退评分结果: %s", profile_type, exc)
             return []

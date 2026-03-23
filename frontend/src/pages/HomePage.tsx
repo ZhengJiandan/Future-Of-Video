@@ -52,7 +52,7 @@ const runtimeCards = [
     title: '最短成功路径',
     badge: 'Local First',
     description: '适合演示、本地试跑和功能验证，重点是尽快进入主链路。',
-    items: ['SQLite', 'minimal 模式', '无需 MySQL / Redis / Celery', '需要 FFmpeg 与 DOUBAO_API_KEY'],
+    items: ['SQLite', 'minimal 模式', '无需 MySQL / Redis / Celery', '调用豆包能力时需要 FFmpeg 与 DOUBAO_API_KEY'],
   },
   {
     title: '完整队列模式',

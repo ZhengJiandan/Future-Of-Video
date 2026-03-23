@@ -1,8 +1,9 @@
-import React, { useState } from 'react'
-import { Layout, Menu, Button, Typography, theme, Space } from 'antd'
+import React, { useEffect, useState } from 'react'
+import { Layout, Menu, Button, Typography, theme, Space, Modal, Input, message } from 'antd'
 import {
   EnvironmentOutlined,
   FolderOpenOutlined,
+  KeyOutlined,
   TeamOutlined,
   HomeOutlined,
   MenuFoldOutlined,
@@ -11,19 +12,34 @@ import {
 } from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useAuthStore } from '../stores/auth'
+import { useRuntimeSecretsStore } from '../stores/runtimeSecrets'
 
 const { Header, Sider, Content } = Layout
 const { Text } = Typography
 
 export const MainLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false)
+  const [editingApiKey, setEditingApiKey] = useState('')
   const navigate = useNavigate()
   const location = useLocation()
   const user = useAuthStore((state) => state.user)
   const logout = useAuthStore((state) => state.logout)
+  const temporaryDoubaoApiKey = useRuntimeSecretsStore((state) => state.temporaryDoubaoApiKey)
+  const apiKeyModalOpen = useRuntimeSecretsStore((state) => state.apiKeyModalOpen)
+  const apiKeyModalReason = useRuntimeSecretsStore((state) => state.apiKeyModalReason)
+  const setTemporaryDoubaoApiKey = useRuntimeSecretsStore((state) => state.setTemporaryDoubaoApiKey)
+  const clearTemporaryDoubaoApiKey = useRuntimeSecretsStore((state) => state.clearTemporaryDoubaoApiKey)
+  const openApiKeyModal = useRuntimeSecretsStore((state) => state.openApiKeyModal)
+  const closeApiKeyModal = useRuntimeSecretsStore((state) => state.closeApiKeyModal)
   const {
     token: { colorBgContainer },
   } = theme.useToken()
+
+  useEffect(() => {
+    if (apiKeyModalOpen) {
+      setEditingApiKey(temporaryDoubaoApiKey)
+    }
+  }, [apiKeyModalOpen, temporaryDoubaoApiKey])
 
   const getSelectedMenuKey = (pathname: string) => {
     if (pathname.startsWith('/characters')) {
@@ -84,6 +100,29 @@ export const MainLayout: React.FC = () => {
     navigate('/login')
   }
 
+  const handleOpenApiKeyModal = () => {
+    setEditingApiKey(temporaryDoubaoApiKey)
+    openApiKeyModal()
+  }
+
+  const handleSaveApiKey = () => {
+    const normalized = editingApiKey.trim()
+    if (!normalized) {
+      message.warning('请输入 DOUBAO_API_KEY，或点击清除临时 Key')
+      return
+    }
+    setTemporaryDoubaoApiKey(normalized)
+    closeApiKeyModal()
+    message.success('已保存到当前浏览器会话，可直接重试刚才的操作')
+  }
+
+  const handleClearApiKey = () => {
+    clearTemporaryDoubaoApiKey()
+    setEditingApiKey('')
+    closeApiKeyModal()
+    message.success('已清除当前浏览器会话中的临时 DOUBAO_API_KEY')
+  }
+
   const isPublicLanding = location.pathname === '/' && !user
 
   if (isPublicLanding) {
@@ -115,6 +154,9 @@ export const MainLayout: React.FC = () => {
           </div>
           <Space size={12}>
             <Text style={{ color: 'rgba(246, 242, 232, 0.72)' }}>AI 视频生成工作台</Text>
+            <Button icon={<KeyOutlined />} onClick={handleOpenApiKeyModal}>
+              临时豆包 Key
+            </Button>
             <Button type="primary" onClick={handleLogin}>
               登录
             </Button>
@@ -123,6 +165,30 @@ export const MainLayout: React.FC = () => {
         <Content style={{ padding: '0 24px 48px', background: 'transparent' }}>
           <Outlet />
         </Content>
+        <Modal
+          title="本次会话临时 DOUBAO_API_KEY"
+          open={apiKeyModalOpen}
+          onOk={handleSaveApiKey}
+          onCancel={closeApiKeyModal}
+          okText="保存并继续"
+          cancelText="关闭"
+        >
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Text type="secondary">
+              {apiKeyModalReason || '如果服务端未配置 DOUBAO_API_KEY，可在当前浏览器会话临时填写。关闭页面或清除后即失效。'}
+            </Text>
+            <Input.Password
+              placeholder="输入 DOUBAO_API_KEY"
+              value={editingApiKey}
+              onChange={(event) => setEditingApiKey(event.target.value)}
+            />
+            {temporaryDoubaoApiKey ? (
+              <Button danger type="link" style={{ padding: 0, width: 'fit-content' }} onClick={handleClearApiKey}>
+                清除当前会话临时 Key
+              </Button>
+            ) : null}
+          </Space>
+        </Modal>
       </Layout>
     )
   }
@@ -182,6 +248,9 @@ export const MainLayout: React.FC = () => {
             }}
           />
           <Space size={16}>
+            <Button icon={<KeyOutlined />} onClick={handleOpenApiKeyModal}>
+              {temporaryDoubaoApiKey ? '临时豆包 Key 已设置' : '临时豆包 Key'}
+            </Button>
             <Text type="secondary">{user ? `${user.name} · ${user.email}` : '未登录'}</Text>
             {user ? (
               <Button onClick={handleLogout}>退出登录</Button>
@@ -203,6 +272,30 @@ export const MainLayout: React.FC = () => {
         >
           <Outlet />
         </Content>
+        <Modal
+          title="本次会话临时 DOUBAO_API_KEY"
+          open={apiKeyModalOpen}
+          onOk={handleSaveApiKey}
+          onCancel={closeApiKeyModal}
+          okText="保存并继续"
+          cancelText="关闭"
+        >
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Text type="secondary">
+              {apiKeyModalReason || '如果服务端未配置 DOUBAO_API_KEY，可在当前浏览器会话临时填写。关闭页面或清除后即失效。'}
+            </Text>
+            <Input.Password
+              placeholder="输入 DOUBAO_API_KEY"
+              value={editingApiKey}
+              onChange={(event) => setEditingApiKey(event.target.value)}
+            />
+            {temporaryDoubaoApiKey ? (
+              <Button danger type="link" style={{ padding: 0, width: 'fit-content' }} onClick={handleClearApiKey}>
+                清除当前会话临时 Key
+              </Button>
+            ) : null}
+          </Space>
+        </Modal>
       </Layout>
     </Layout>
   )

@@ -14,6 +14,7 @@ import requests
 from loguru import logger
 
 from app.core.config import settings
+from app.core.provider_keys import get_effective_doubao_api_key
 
 
 class DoubaoImageGenerationClient:
@@ -29,11 +30,7 @@ class DoubaoImageGenerationClient:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
     ) -> None:
-        self.api_key = (
-            api_key
-            or getattr(settings, "DOUBAO_API_KEY", None)
-            or os.getenv("DOUBAO_API_KEY")
-        )
+        self.api_key = api_key
         self.base_url = (
             base_url
             or getattr(settings, "DOUBAO_IMAGE_BASE_URL", None)
@@ -43,10 +40,6 @@ class DoubaoImageGenerationClient:
         self.debug_logging = bool(getattr(settings, "MODEL_DEBUG_LOGGING", True))
         self.debug_max_chars = int(getattr(settings, "MODEL_DEBUG_MAX_CHARS", 20000))
         self.timeout = max(30, int(float(getattr(settings, "DOUBAO_READ_TIMEOUT", 240.0))))
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
         self.endpoint_candidates = [
             "/online/images/generations",
             "/images/generations",
@@ -54,7 +47,14 @@ class DoubaoImageGenerationClient:
 
     @property
     def configured(self) -> bool:
-        return bool(self.api_key)
+        return bool(get_effective_doubao_api_key(self.api_key))
+
+    def _headers(self) -> Dict[str, str]:
+        api_key = get_effective_doubao_api_key(self.api_key)
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
     def _truncate_for_log(self, value: str) -> str:
         if len(value) <= self.debug_max_chars:
@@ -157,7 +157,7 @@ class DoubaoImageGenerationClient:
                 self._log_request(url=url, payload=payload)
                 response = requests.post(
                     url,
-                    headers=self.headers,
+                    headers=self._headers(),
                     json=payload,
                     timeout=self.timeout,
                 )

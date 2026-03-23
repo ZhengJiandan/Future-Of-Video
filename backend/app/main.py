@@ -11,6 +11,7 @@ import time
 import os
 
 from app.core.config import settings
+from app.core.request_runtime import reset_request_doubao_api_key, set_request_doubao_api_key
 from app.db import init_db, close_db
 from app.api.api import api_router
 from app.services.pipeline_workflow import pipeline_workflow_service
@@ -115,6 +116,7 @@ app.add_middleware(
 async def log_requests(request: Request, call_next):
     """记录所有HTTP请求"""
     start_time = time.time()
+    request_key_token = set_request_doubao_api_key(request.headers.get("X-Doubao-Api-Key"))
     
     # 获取请求信息
     client_host = request.client.host if request.client else "unknown"
@@ -139,6 +141,8 @@ async def log_requests(request: Request, call_next):
         process_time = time.time() - start_time
         logger.error(f"Request failed: {method} {url} - {str(e)} - {process_time:.3f}s")
         raise
+    finally:
+        reset_request_doubao_api_key(request_key_token)
 
 
 # 全局异常处理

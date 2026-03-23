@@ -7,6 +7,7 @@ import { RouterProvider } from 'react-router-dom'
 import { router } from './router'
 import { useAuthStore } from './stores/auth'
 import { useProjectStore } from './stores/project'
+import { useRuntimeSecretsStore } from './stores/runtimeSecrets'
 import './index.css'
 
 // 创建QueryClient实例
@@ -39,6 +40,7 @@ const themeConfig = {
 
 useAuthStore.getState().hydrate()
 useProjectStore.getState().hydrate()
+useRuntimeSecretsStore.getState().hydrate()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

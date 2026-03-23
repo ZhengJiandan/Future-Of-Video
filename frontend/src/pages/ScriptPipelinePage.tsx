@@ -358,6 +358,8 @@ const validationStatusToTagColor = (status?: string): string => {
 const hasMeaningfulProjectState = (state: {
   userInput: string
   projectTitle: string
+  constraintCharacterIds: string[]
+  constraintSceneIds: string[]
   selectedCharacterIds: string[]
   selectedSceneIds: string[]
   referenceImages: ReferenceImageAsset[]
@@ -370,6 +372,8 @@ const hasMeaningfulProjectState = (state: {
   Boolean(
     state.userInput.trim() ||
       state.scriptDraft.trim() ||
+      state.constraintCharacterIds.length ||
+      state.constraintSceneIds.length ||
       state.selectedCharacterIds.length ||
       state.selectedSceneIds.length ||
       state.referenceImages.length ||
@@ -458,8 +462,10 @@ export const ScriptPipelinePage: React.FC = () => {
   const [referenceImages, setReferenceImages] = useState<ReferenceImageAsset[]>([])
   const [uploadFileList, setUploadFileList] = useState<UploadFile[]>([])
   const [characterProfiles, setCharacterProfiles] = useState<CharacterProfile[]>([])
+  const [constraintCharacterIds, setConstraintCharacterIds] = useState<string[]>([])
   const [selectedCharacterIds, setSelectedCharacterIds] = useState<string[]>([])
   const [sceneProfiles, setSceneProfiles] = useState<SceneProfile[]>([])
+  const [constraintSceneIds, setConstraintSceneIds] = useState<string[]>([])
   const [selectedSceneIds, setSelectedSceneIds] = useState<string[]>([])
 
   const [scriptLoading, setScriptLoading] = useState(false)
@@ -511,7 +517,9 @@ export const ScriptPipelinePage: React.FC = () => {
     setSeedInput(null)
     setReferenceImages([])
     setUploadFileList([])
+    setConstraintCharacterIds([])
     setSelectedCharacterIds([])
+    setConstraintSceneIds([])
     setSelectedSceneIds([])
     setGeneratedScript(null)
     setManualCharacterProfiles([])
@@ -625,9 +633,13 @@ export const ScriptPipelinePage: React.FC = () => {
       )
       setReferenceImages(restoredReferenceImages)
       setUploadFileList(buildUploadFileList(restoredReferenceImages))
+      setConstraintCharacterIds(
+        Array.isArray(state.constraintCharacterIds) ? (state.constraintCharacterIds as string[]) : [],
+      )
       setSelectedCharacterIds(
         Array.isArray(state.selectedCharacterIds) ? (state.selectedCharacterIds as string[]) : [],
       )
+      setConstraintSceneIds(Array.isArray(state.constraintSceneIds) ? (state.constraintSceneIds as string[]) : [])
       setSelectedSceneIds(Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : [])
       setGeneratedScript(restoredGeneratedScript)
       setManualCharacterProfiles(
@@ -789,6 +801,8 @@ export const ScriptPipelinePage: React.FC = () => {
       serviceTier,
       seedInput,
       referenceImages,
+      constraintCharacterIds,
+      constraintSceneIds,
       selectedCharacterIds,
       selectedSceneIds,
       generatedScript,
@@ -806,6 +820,8 @@ export const ScriptPipelinePage: React.FC = () => {
       !hasMeaningfulProjectState({
         userInput,
         projectTitle,
+        constraintCharacterIds,
+        constraintSceneIds,
         selectedCharacterIds,
         selectedSceneIds,
         referenceImages,
@@ -872,6 +888,8 @@ export const ScriptPipelinePage: React.FC = () => {
   }, [
     aspectRatio,
     cameraFixed,
+    constraintCharacterIds,
+    constraintSceneIds,
     currentStep,
     generatedScript,
     manualCharacterProfiles,
@@ -964,7 +982,7 @@ export const ScriptPipelinePage: React.FC = () => {
         style: stylePreference.trim(),
         target_total_duration: targetTotalDuration || undefined,
         selected_character_ids: libraryCharacterIds,
-        selected_scene_ids: selectedSceneIds,
+        selected_scene_ids: constraintSceneIds,
         character_profiles: temporaryCharacters,
         reference_images: referenceImages,
       })
@@ -993,6 +1011,10 @@ export const ScriptPipelinePage: React.FC = () => {
 
     setPreparingCharacters(true)
     setError(null)
+    setCharacterPrepareResult(null)
+    setCharacterConfirmOpen(false)
+    setConfirmedLibraryCharacterIds([])
+    setConfirmedTemporaryCharacterIds([])
     setCharacterConfirmMode('generate_script')
 
     try {
@@ -1000,13 +1022,15 @@ export const ScriptPipelinePage: React.FC = () => {
         user_input: userInput.trim(),
         style: stylePreference.trim(),
         target_total_duration: targetTotalDuration || undefined,
-        selected_character_ids: selectedCharacterIds,
+        selected_character_ids: constraintCharacterIds,
       })
       setCharacterPrepareResult(response.data)
       setConfirmedLibraryCharacterIds(response.data.selected_character_ids || [])
       setConfirmedTemporaryCharacterIds((response.data.temporary_character_profiles || []).map((item) => item.id))
       setCharacterConfirmOpen(true)
     } catch (requestError: unknown) {
+      setCharacterPrepareResult(null)
+      setCharacterConfirmOpen(false)
       setError(extractApiErrorMessage(requestError, '角色确认分析失败'))
     } finally {
       setPreparingCharacters(false)
@@ -1187,6 +1211,10 @@ export const ScriptPipelinePage: React.FC = () => {
     setError(null)
     if (!generatedScript) {
       setPreparingCharacters(true)
+      setCharacterPrepareResult(null)
+      setCharacterConfirmOpen(false)
+      setConfirmedLibraryCharacterIds([])
+      setConfirmedTemporaryCharacterIds([])
       setCharacterConfirmMode('split_script')
 
       try {
@@ -1194,7 +1222,7 @@ export const ScriptPipelinePage: React.FC = () => {
           user_input: scriptDraft.trim(),
           style: stylePreference.trim(),
           target_total_duration: targetTotalDuration || undefined,
-          selected_character_ids: selectedCharacterIds,
+          selected_character_ids: constraintCharacterIds,
           character_profiles: manualCharacterProfiles,
         })
         setCharacterPrepareResult(response.data)
@@ -1202,6 +1230,8 @@ export const ScriptPipelinePage: React.FC = () => {
         setConfirmedTemporaryCharacterIds((response.data.temporary_character_profiles || []).map((item) => item.id))
         setCharacterConfirmOpen(true)
       } catch (requestError: unknown) {
+        setCharacterPrepareResult(null)
+        setCharacterConfirmOpen(false)
         setError(extractApiErrorMessage(requestError, '角色确认分析失败'))
       } finally {
         setPreparingCharacters(false)
@@ -1465,8 +1495,8 @@ export const ScriptPipelinePage: React.FC = () => {
     return availability[stepIndex]
   }
 
-  const selectedCharacters = characterProfiles.filter((profile) => selectedCharacterIds.includes(profile.id))
-  const selectedScenes = sceneProfiles.filter((profile) => selectedSceneIds.includes(profile.id))
+  const constrainedCharacters = characterProfiles.filter((profile) => constraintCharacterIds.includes(profile.id))
+  const constrainedScenes = sceneProfiles.filter((profile) => constraintSceneIds.includes(profile.id))
   const effectiveCharacterProfiles = generatedScript?.character_profiles || manualCharacterProfiles
   const temporaryCharacters = effectiveCharacterProfiles.filter((profile) => profile.source === 'ai-generated-draft')
   const characterResolution = generatedScript?.character_resolution
@@ -1599,8 +1629,8 @@ export const ScriptPipelinePage: React.FC = () => {
                           allowClear
                           loading={charactersLoading}
                           style={{ width: '100%', marginTop: 8 }}
-                          value={selectedCharacterIds}
-                          onChange={setSelectedCharacterIds}
+                          value={constraintCharacterIds}
+                          onChange={setConstraintCharacterIds}
                           placeholder="可多选。留空则由系统先分析用户输入，再匹配角色。"
                           options={characterProfiles.map((profile) => ({
                             value: profile.id,
@@ -1609,10 +1639,10 @@ export const ScriptPipelinePage: React.FC = () => {
                         />
                       </div>
 
-                      {selectedCharacters.length ? (
+                      {constrainedCharacters.length ? (
                         <Card type="inner" size="small" title="已选角色">
                           <Space wrap>
-                            {selectedCharacters.map((profile) => (
+                            {constrainedCharacters.map((profile) => (
                               <Tag key={profile.id} color="processing">
                                 {profile.name}
                               </Tag>
@@ -1628,8 +1658,8 @@ export const ScriptPipelinePage: React.FC = () => {
                           allowClear
                           loading={scenesLoading}
                           style={{ width: '100%', marginTop: 8 }}
-                          value={selectedSceneIds}
-                          onChange={setSelectedSceneIds}
+                          value={constraintSceneIds}
+                          onChange={setConstraintSceneIds}
                           placeholder="可多选。留空则由系统根据剧情自动分析和匹配场景。"
                           options={sceneProfiles.map((profile) => ({
                             value: profile.id,
@@ -1638,10 +1668,10 @@ export const ScriptPipelinePage: React.FC = () => {
                         />
                       </div>
 
-                      {selectedScenes.length ? (
+                      {constrainedScenes.length ? (
                         <Card type="inner" size="small" title="已选场景">
                           <Space wrap>
-                            {selectedScenes.map((profile) => (
+                            {constrainedScenes.map((profile) => (
                               <Tag key={profile.id} color="green">
                                 {profile.name}
                               </Tag>

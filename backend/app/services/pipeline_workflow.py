@@ -36,6 +36,7 @@ import httpx
 from sqlalchemy import select, update
 
 from app.core.config import settings
+from app.core.provider_keys import get_effective_doubao_api_key, require_doubao_api_key
 from app.db.base import AsyncSessionLocal
 from app.models.pipeline_project import PipelineProject
 from app.models.pipeline_render_task import PipelineRenderTask
@@ -2188,7 +2189,7 @@ class PipelineWorkflowService:
         if requested in {"doubao", "auto"}:
             if self._doubao_enabled():
                 return "doubao-official"
-            raise RuntimeError("未配置豆包视频生成能力，请补充 DOUBAO_API_KEY 或显式选择 local 预览模式")
+            require_doubao_api_key(action_label="调用豆包视频生成；或显式选择 local 预览模式")
         raise RuntimeError(f"不支持的视频 provider: {requested}")
 
     async def _render_video_or_preview(
@@ -2246,7 +2247,7 @@ class PipelineWorkflowService:
         render_config: Dict[str, Any],
     ) -> Optional[Dict[str, str]]:
         if not self._doubao_enabled():
-            raise RuntimeError("DOUBAO_API_KEY 未配置，无法调用豆包视频生成")
+            require_doubao_api_key(action_label="调用豆包视频生成")
 
         try:
             from app.services.doubao_video_official import (
@@ -2882,7 +2883,7 @@ class PipelineWorkflowService:
         return bool(self._get_doubao_api_key())
 
     def _get_doubao_api_key(self) -> Optional[str]:
-        return settings.DOUBAO_API_KEY or os.getenv("DOUBAO_API_KEY")
+        return get_effective_doubao_api_key()
 
     def _build_project_audio_plan(
         self,
