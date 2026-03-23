@@ -18,8 +18,8 @@ backend/.env
 backend/.env.local
 
 # 运行产物 / 本地素材
-uploads/
-backend/uploads/
+#uploads/
+#backend/uploads/
 frontend/dist/
 htmlcov/
 *.log
