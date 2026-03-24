@@ -66,8 +66,8 @@ const { TextArea } = Input
 
 const stepItems = [
   { title: '输入需求', subtitle: '创意、角色、参考图', icon: <FileTextOutlined /> },
-  { title: '确认剧本', subtitle: '查看概要并继续拆分', icon: <EditOutlined /> },
-  { title: '审核片段', subtitle: '确认拆分和画面描述', icon: <CheckCircleOutlined /> },
+  { title: '确认剧本', subtitle: '确认内容并按约束分段', icon: <EditOutlined /> },
+  { title: '审核片段', subtitle: '审核分段结果与画面描述', icon: <CheckCircleOutlined /> },
   { title: '审核首尾帧', subtitle: '确认关键帧连续性', icon: <FileImageOutlined /> },
   { title: '生成视频', subtitle: '开始渲染并查看进度', icon: <VideoCameraOutlined /> },
   { title: '查看结果', subtitle: '成片与片段结果', icon: <EyeOutlined /> },
@@ -1595,8 +1595,8 @@ export const ScriptPipelinePage: React.FC = () => {
               <Alert
                 type="info"
                 showIcon
-                message="也可以直接从剧本审核开始"
-                description="如果你已经有成熟剧本，可以直接把完整剧本贴在这里，然后跳过“生成剧本”，直接进入“审核剧本”阶段。"
+                message="建议直接输入创意需求与约束"
+                description="系统会先做角色确认，再生成完整剧本，随后进入剧本审核与后续拆分流程。"
               />
               <TextArea
                 rows={7}
@@ -1864,13 +1864,13 @@ export const ScriptPipelinePage: React.FC = () => {
                   type="success"
                   showIcon
                   message="剧本内容已准备完成"
-                  description="下面展示的是当前将用于拆分的完整剧本。你可以直接修改文本，再继续下一步。"
+                  description="下面展示的是当前将用于分段的完整剧本。你可以直接修改文本；下一步会按时长与约束把它切成片段。"
                 />
 
                 <Card
                   size="small"
                   title="完整剧本"
-                  extra={<Text type="secondary">可直接编辑，下一步会按当前文本拆分</Text>}
+                  extra={<Text type="secondary">可直接编辑，下一步会按约束切分剧本并生成分段结果</Text>}
                 >
                   <TextArea
                     value={scriptDraft}
@@ -1895,7 +1895,7 @@ export const ScriptPipelinePage: React.FC = () => {
                 disabled={!scriptDraft.trim()}
                 onClick={handleSplitScript}
               >
-                继续拆分片段
+                按约束切分剧本
               </Button>
             </Space>
           </div>
@@ -2799,7 +2799,7 @@ export const ScriptPipelinePage: React.FC = () => {
               loading={characterConfirmMode === 'generate_script' ? scriptLoading : splitLoading}
               onClick={() => void handleConfirmCharactersAndContinue()}
             >
-              {characterConfirmMode === 'generate_script' ? '确认角色并生成剧本' : '确认角色并拆分片段'}
+              {characterConfirmMode === 'generate_script' ? '确认角色并生成剧本' : '确认角色并生成分段'}
             </Button>
           </Space>
         }
