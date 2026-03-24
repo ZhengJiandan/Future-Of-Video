@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from app.core.provider_keys import DOUBAO_API_KEY_ERROR_CODE, MissingProviderConfigError
 from app.services.doubao_image_generation import DoubaoImageGenerationClient
 from app.services.nanobanana_pro import NanoBananaProClient
 
@@ -28,6 +29,17 @@ class PreferredImageGenerationClient:
             attempts.append("doubao")
         return attempts
 
+    def _ensure_provider_configured(self) -> None:
+        if self._provider_attempts():
+            return
+        raise MissingProviderConfigError(
+            code=DOUBAO_API_KEY_ERROR_CODE,
+            message=(
+                "未配置可用的图片生成凭证，无法生成图片。"
+                "请先配置 NANOBANANA_API_KEY，或在前端临时填写 DOUBAO_API_KEY 后重试。"
+            ),
+        )
+
     def _finalize(self, result: Dict[str, Any], *, source: str, provider: str) -> Dict[str, Any]:
         normalized = dict(result or {})
         normalized["source"] = source
@@ -43,6 +55,8 @@ class PreferredImageGenerationClient:
         doubao_call,
         doubao_source: str,
     ) -> Dict[str, Any]:
+        self._ensure_provider_configured()
+
         if getattr(self.nanobanana, "api_key", None):
             try:
                 result = nanobanana_call()
@@ -101,6 +115,7 @@ class PreferredImageGenerationClient:
         prompt: str,
         aspect_ratio: str = "16:9",
         image_size: str = "2k",
+        source_image_url: str = "",
     ) -> Dict[str, Any]:
         return self._run_with_fallback(
             operation_label="image_to_image",
@@ -116,6 +131,7 @@ class PreferredImageGenerationClient:
                 prompt,
                 aspect_ratio=aspect_ratio,
                 image_size=image_size,
+                source_image_url=source_image_url,
             ),
             doubao_source="doubao-seedream-image-to-image",
         )

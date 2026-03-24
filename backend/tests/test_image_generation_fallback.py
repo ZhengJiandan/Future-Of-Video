@@ -21,7 +21,7 @@ class _DummyNanoBanana:
         self.calls.append(("text", prompt))
         return {"success": True, "image_data": self.payload}
 
-    def generate_image_to_image(self, input_image_path: str, prompt: str, aspect_ratio: str = "16:9", image_size: str = "2k"):
+    def generate_image_to_image(self, input_image_path: str, prompt: str, aspect_ratio: str = "16:9", image_size: str = "2k", source_image_url: str = ""):
         self.calls.append(("image", prompt))
         return {"success": True, "image_data": self.payload}
 
@@ -40,7 +40,7 @@ class _DummyDoubao:
         self.calls.append(("text", prompt))
         return {"success": True, "image_data": self.payload}
 
-    def generate_image_to_image(self, input_image_path: str, prompt: str, aspect_ratio: str = "16:9", image_size: str = "2k"):
+    def generate_image_to_image(self, input_image_path: str, prompt: str, aspect_ratio: str = "16:9", image_size: str = "2k", source_image_url: str = ""):
         self.calls.append(("image", prompt))
         return {"success": True, "image_data": self.payload}
 
@@ -59,7 +59,7 @@ class _DummyImageGenerator:
         self.calls.append(("text", prompt))
         return {"success": True, "image_data": self.payload, "source": self.source}
 
-    def generate_image_to_image(self, input_image_path: str, prompt: str, aspect_ratio: str = "16:9", image_size: str = "2k"):
+    def generate_image_to_image(self, input_image_path: str, prompt: str, aspect_ratio: str = "16:9", image_size: str = "2k", source_image_url: str = ""):
         self.calls.append(("image", prompt))
         return {"success": True, "image_data": self.payload, "source": self.source}
 
@@ -139,11 +139,10 @@ async def test_character_library_uses_fallback_image_provider_source(
     assert generated_path.read_bytes() == b"doubao-frame"
 
 
-def test_doubao_image_client_falls_back_to_ark_when_las_returns_unauthorized(
+def test_doubao_image_client_uses_ark_for_text_to_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "DOUBAO_API_KEY", "ark-temp-key")
-    monkeypatch.setattr(settings, "DOUBAO_IMAGE_BASE_URL", "https://operator.las.cn-beijing.volces.com/api/v1")
     monkeypatch.setattr(settings, "DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
 
     calls: list[tuple[str, str]] = []
@@ -159,8 +158,6 @@ def test_doubao_image_client_falls_back_to_ark_when_las_returns_unauthorized(
 
     def fake_post(url: str, headers=None, json=None, timeout=None):
         calls.append((url, str((json or {}).get("model") or "")))
-        if url.startswith("https://operator.las.cn-beijing.volces.com"):
-            return _Response(401, text='{"error":"Unauthorized"}')
         return _Response(
             200,
             payload={
@@ -179,6 +176,124 @@ def test_doubao_image_client_falls_back_to_ark_when_las_returns_unauthorized(
 
     assert result["success"] is True
     assert result["image_data"] == b"hello"
-    assert calls[0][0] == "https://operator.las.cn-beijing.volces.com/api/v1/online/images/generations"
-    assert calls[-1][0] == "https://ark.cn-beijing.volces.com/api/v3/images/generations"
-    assert calls[-1][1] == "doubao-seedream-4-0-250828"
+    assert calls == [("https://ark.cn-beijing.volces.com/api/v3/images/generations", "doubao-seedream-5-0-260128")]
+
+
+def test_doubao_image_client_uses_ark_image_edit_model_for_image_to_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "DOUBAO_API_KEY", "ark-temp-key")
+    monkeypatch.setattr(settings, "DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+
+    image_path = tmp_path / "input.png"
+    image_path.write_bytes(b"fake-image")
+
+    calls: list[tuple[str, str]] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: dict | None = None, text: str = "") -> None:
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url: str, headers=None, json=None, timeout=None):
+        calls.append((url, json or {}))
+        return _Response(
+            200,
+            payload={
+                "data": [
+                    {
+                        "url": "https://example.com/generated.png",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("app.services.doubao_image_generation.requests.post", fake_post)
+    monkeypatch.setattr(
+        "app.services.doubao_image_generation.requests.get",
+        lambda url, timeout=None: type(
+            "_GetResponse",
+            (),
+            {"content": b"hello", "raise_for_status": lambda self: None},
+        )(),
+    )
+
+    client = DoubaoImageGenerationClient()
+    result = client.generate_image_to_image(
+        str(image_path),
+        "把它改成电影概念图",
+        aspect_ratio="16:9",
+        image_size="2k",
+    )
+
+    assert result["success"] is True
+    assert result["image_data"] == b"hello"
+    assert calls == [
+        (
+            "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+            {
+                "model": "doubao-seedream-5-0-260128",
+                "prompt": "把它改成电影概念图",
+                "image": "data:image/png;base64,ZmFrZS1pbWFnZQ==",
+                "size": "2560x1440",
+                "response_format": "url",
+                "watermark": False,
+            },
+        )
+    ]
+
+
+def test_doubao_image_client_enforces_seedream_50_min_pixels_for_text_to_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "DOUBAO_API_KEY", "ark-temp-key")
+    monkeypatch.setattr(settings, "DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+
+    calls: list[tuple[str, dict]] = []
+
+    class _Response:
+        def __init__(self, status_code: int, payload: dict | None = None, text: str = "") -> None:
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url: str, headers=None, json=None, timeout=None):
+        calls.append((url, json or {}))
+        return _Response(
+            200,
+            payload={
+                "data": [
+                    {
+                        "b64_json": "aGVsbG8=",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("app.services.doubao_image_generation.requests.post", fake_post)
+
+    client = DoubaoImageGenerationClient()
+    result = client.generate_text_to_image("一只太空猫", aspect_ratio="16:9", image_size="2k")
+
+    assert result["success"] is True
+    assert result["image_data"] == b"hello"
+    assert calls == [
+        (
+            "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+            {
+                "model": "doubao-seedream-5-0-260128",
+                "prompt": "一只太空猫",
+                "size": "2560x1440",
+                "response_format": "b64_json",
+                "watermark": False,
+            },
+        )
+    ]

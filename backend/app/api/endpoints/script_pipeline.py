@@ -512,7 +512,9 @@ async def generate_character_three_view(request: GenerateCharacterThreeViewReque
 @router.post("/characters/generate-prototype")
 async def generate_character_prototype(request: GenerateCharacterPrototypeRequest):
     try:
-        result = await pipeline_character_library_service.generate_character_image_asset(**request.model_dump())
+        result = await pipeline_character_library_service.generate_character_image_asset(
+            **request.model_dump(),
+        )
         return {
             "success": True,
             "message": "角色原型图生成完成",
