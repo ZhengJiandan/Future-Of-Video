@@ -33,6 +33,7 @@ from app.core.provider_keys import (
 from app.db import get_db
 from app.services.auth_service import get_current_user
 from app.services.pipeline_character_library import pipeline_character_library_service
+from app.services.pipeline_project_service import pipeline_project_service
 from app.services.pipeline_scene_library import pipeline_scene_library_service
 from app.services.pipeline_workflow import pipeline_workflow_service
 from app.services.profile_image_analyzer import profile_image_analyzer_service
@@ -270,6 +271,7 @@ class AnalyzeSceneImageRequest(BaseModel):
 class GenerateScriptRequest(BaseModel):
     """完整剧本生成请求。"""
 
+    project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
     user_input: str = Field(..., min_length=1, description="用户的原始剧情描述")
     style: str = Field(default="", description="视觉风格偏好")
     target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0, description="目标总时长")
@@ -771,7 +773,11 @@ async def upload_reference(file: UploadFile = File(...)):
 
 
 @router.post("/generate-script")
-async def generate_script(request: GenerateScriptRequest, db: AsyncSession = Depends(get_db)):
+async def generate_script(
+    request: GenerateScriptRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     """生成完整剧本，并返回可编辑文本。"""
     start_time = time.time()
 
@@ -800,12 +806,66 @@ async def generate_script(request: GenerateScriptRequest, db: AsyncSession = Dep
             scene_profiles=resolved_scene_profiles,
             reference_images=[reference.model_dump() for reference in request.reference_images],
         )
-        return {
+        response_payload = {
             "success": True,
             "message": "完整剧本生成完成，请先审核后再进入拆分阶段",
             "processing_time": time.time() - start_time,
             **result,
         }
+        existing_project = None
+        if request.project_id:
+            existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
+        if existing_project is None:
+            existing_project = await pipeline_project_service.get_current_project(db, current_user.id)
+
+        existing_state = existing_project.get("state") if isinstance(existing_project, dict) else {}
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+        summary_payload = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+        existing_project_title = existing_project.get("project_title") if isinstance(existing_project, dict) else ""
+
+        project_title = str(
+            summary_payload.get("title")
+            or existing_project_title
+            or "未命名项目"
+        ).strip() or "未命名项目"
+        summary_text = str(summary_payload.get("synopsis") or "").strip()
+        project_state = {
+            **existing_state,
+            "currentStep": 1,
+            "transitionDirection": "forward",
+            "userInput": request.user_input,
+            "stylePreference": request.style,
+            "projectTitle": project_title,
+            "targetTotalDuration": request.target_total_duration,
+            "constraintCharacterIds": request.selected_character_ids,
+            "constraintSceneIds": request.selected_scene_ids,
+            "selectedCharacterIds": result.get("selected_character_ids") or request.selected_character_ids,
+            "selectedSceneIds": result.get("selected_scene_ids") or request.selected_scene_ids,
+            "referenceImages": [reference.model_dump() for reference in request.reference_images],
+            "generatedScript": response_payload,
+            "manualCharacterProfiles": [],
+            "savedTemporaryCharacterIds": existing_state.get("savedTemporaryCharacterIds", []),
+            "scriptDraft": str(result.get("script_text") or ""),
+            "scriptSummary": result.get("summary") or None,
+            "segments": existing_state.get("segments", []),
+            "splitValidationReport": existing_state.get("splitValidationReport"),
+            "keyframes": existing_state.get("keyframes", []),
+            "renderTaskId": existing_state.get("renderTaskId"),
+            "renderStatus": existing_state.get("renderStatus"),
+        }
+        await pipeline_project_service.save_current_project(
+            db,
+            project_id=request.project_id,
+            user_id=current_user.id,
+            project_title=project_title,
+            current_step=1,
+            state=project_state,
+            status="draft",
+            last_render_task_id=str(existing_project.get("last_render_task_id") or "") if isinstance(existing_project, dict) else "",
+            summary=summary_text,
+        )
+        return response_payload
     except MissingProviderConfigError as exc:
         _raise_provider_config_http_exception(exc)
     except Exception as exc:

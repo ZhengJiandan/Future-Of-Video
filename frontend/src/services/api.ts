@@ -925,6 +925,7 @@ export const scriptPipelineApi = {
   deleteScene: (sceneId: string) => apiClient.delete<{ success: boolean; message: string }>(`/pipeline/scenes/${sceneId}`),
 
   generateScript: (data: {
+    project_id?: string
     user_input: string
     style?: string
     target_total_duration?: number

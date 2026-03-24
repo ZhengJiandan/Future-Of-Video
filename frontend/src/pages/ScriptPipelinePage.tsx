@@ -430,6 +430,11 @@ const downloadAsset = (assetUrl?: string, filename?: string) => {
   document.body.removeChild(link)
 }
 
+const isGatewayTimeoutError = (error: unknown): boolean => {
+  const responseError = error as { response?: { status?: number } }
+  return responseError.response?.status === 504
+}
+
 export const ScriptPipelinePage: React.FC = () => {
   const navigate = useNavigate()
   const flowTrackRef = useRef<HTMLDivElement | null>(null)
@@ -541,6 +546,195 @@ export const ScriptPipelinePage: React.FC = () => {
     setError(null)
   }
 
+  const applyProjectState = (item: Record<string, unknown>) => {
+    const state = (item.state as Record<string, unknown>) || {}
+    const restoredReferenceImages = Array.isArray(state.referenceImages)
+      ? (state.referenceImages as ReferenceImageAsset[])
+      : []
+    const restoredGeneratedScript =
+      state.generatedScript && typeof state.generatedScript === 'object'
+        ? (state.generatedScript as GeneratedScriptResponse)
+        : null
+    const restoredScriptSummary =
+      state.scriptSummary && typeof state.scriptSummary === 'object'
+        ? (state.scriptSummary as ScriptSummary)
+        : null
+    const restoredSegments = Array.isArray(state.segments)
+      ? normalizeSegmentItems(state.segments as SegmentItem[])
+      : []
+    const restoredSplitValidationReport =
+      state.splitValidationReport && typeof state.splitValidationReport === 'object'
+        ? (state.splitValidationReport as SplitValidationReport)
+        : null
+    const restoredKeyframes = Array.isArray(state.keyframes) ? (state.keyframes as SegmentKeyframes[]) : []
+    const restoredRenderStatus =
+      state.renderStatus && typeof state.renderStatus === 'object'
+        ? (state.renderStatus as RenderStatusResponse)
+        : null
+
+    setCurrentStep(Number(state.currentStep ?? item.current_step ?? 0))
+    setTransitionDirection(state.transitionDirection === 'backward' ? 'backward' : 'forward')
+    setUserInput(String(state.userInput || ''))
+    setStylePreference(String(state.stylePreference || '写实战术电影感'))
+    setProjectTitle(String(state.projectTitle || item.project_title || '未命名项目'))
+    setMaxSegmentDuration(normalizeMaxSegmentDuration(Number(state.maxSegmentDuration || MAX_SEGMENT_DURATION)))
+    setTargetTotalDuration(
+      state.targetTotalDuration === null || state.targetTotalDuration === undefined
+        ? null
+        : Number(state.targetTotalDuration),
+    )
+    setProvider(String(state.provider || 'auto'))
+    setResolution(String(state.resolution || '720p'))
+    setAspectRatio(String(state.aspectRatio || '16:9'))
+    setWatermark(Boolean(state.watermark))
+    setProviderModel(String(state.providerModel || 'doubao-seedance-1-5-pro-251215'))
+    setCameraFixed(Boolean(state.cameraFixed))
+    setGenerateAudio(state.generateAudio === false ? false : true)
+    setReturnLastFrame(Boolean(state.returnLastFrame))
+    setServiceTier(String(state.serviceTier || 'default'))
+    setSeedInput(
+      state.seedInput === null || state.seedInput === undefined || state.seedInput === ''
+        ? null
+        : Number(state.seedInput),
+    )
+    setReferenceImages(restoredReferenceImages)
+    setUploadFileList(buildUploadFileList(restoredReferenceImages))
+    setConstraintCharacterIds(
+      Array.isArray(state.constraintCharacterIds) ? (state.constraintCharacterIds as string[]) : [],
+    )
+    setSelectedCharacterIds(
+      Array.isArray(state.selectedCharacterIds) ? (state.selectedCharacterIds as string[]) : [],
+    )
+    setConstraintSceneIds(Array.isArray(state.constraintSceneIds) ? (state.constraintSceneIds as string[]) : [])
+    setSelectedSceneIds(Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : [])
+    setGeneratedScript(restoredGeneratedScript)
+    setManualCharacterProfiles(
+      Array.isArray(state.manualCharacterProfiles) ? (state.manualCharacterProfiles as CharacterProfile[]) : [],
+    )
+    setSavedTemporaryCharacterIds(
+      Array.isArray(state.savedTemporaryCharacterIds) ? (state.savedTemporaryCharacterIds as string[]) : [],
+    )
+    setScriptDraft(String(state.scriptDraft || ''))
+    setScriptSummary(restoredScriptSummary)
+    setSegments(restoredSegments)
+    setSplitValidationReport(restoredSplitValidationReport)
+    setKeyframes(restoredKeyframes)
+    setRenderTaskId(
+      typeof state.renderTaskId === 'string' && state.renderTaskId
+        ? state.renderTaskId
+        : String(item.last_render_task_id || '') || null,
+    )
+    setRenderStatus(restoredRenderStatus)
+  }
+
+  const buildProjectStateSnapshot = (overrides: Record<string, unknown> = {}) => ({
+    currentStep,
+    transitionDirection,
+    userInput,
+    stylePreference,
+    projectTitle,
+    maxSegmentDuration,
+    targetTotalDuration,
+    provider,
+    resolution,
+    aspectRatio,
+    watermark,
+    providerModel,
+    cameraFixed,
+    generateAudio,
+    returnLastFrame,
+    serviceTier,
+    seedInput,
+    referenceImages,
+    constraintCharacterIds,
+    constraintSceneIds,
+    selectedCharacterIds,
+    selectedSceneIds,
+    generatedScript,
+    manualCharacterProfiles,
+    savedTemporaryCharacterIds,
+    scriptDraft,
+    scriptSummary,
+    segments,
+    splitValidationReport,
+    keyframes,
+    renderTaskId,
+    renderStatus,
+    ...overrides,
+  })
+
+  const buildProjectPayload = (overrides: {
+    project_title?: string
+    current_step?: number
+    state?: Record<string, unknown>
+    status?: string
+    summary?: string
+    last_render_task_id?: string
+  } = {}) => ({
+    project_title: overrides.project_title ?? (projectTitle.trim() || '未命名项目'),
+    current_step: overrides.current_step ?? currentStep,
+    state: overrides.state ?? buildProjectStateSnapshot(),
+    status:
+      overrides.status ??
+      (renderStatus?.status === 'queued' || renderStatus?.status === 'dispatching' || renderStatus?.status === 'processing'
+        ? 'in_progress'
+        : renderStatus?.status === 'paused'
+          ? 'paused'
+          : renderStatus?.status === 'completed'
+            ? 'completed'
+            : renderStatus?.status === 'failed'
+              ? 'failed'
+              : renderStatus?.status === 'cancelled'
+                ? 'cancelled'
+                : renderTaskId
+                  ? 'in_progress'
+                  : (overrides.current_step ?? currentStep) >= 5
+                    ? 'completed'
+                    : 'draft'),
+    last_render_task_id: overrides.last_render_task_id ?? (renderTaskId || undefined),
+    summary: overrides.summary ?? (scriptSummary?.synopsis || ''),
+  })
+
+  const ensureProjectExists = async () => {
+    if (selectedProjectId) {
+      return selectedProjectId
+    }
+
+    const response = await scriptPipelineApi.createProject(
+      buildProjectPayload({
+        current_step: currentStep,
+        state: buildProjectStateSnapshot(),
+      }),
+    )
+    const projectId = response.data.item.id
+    setCurrentProjectId(projectId)
+    return projectId
+  }
+
+  const recoverGeneratedScriptFromProject = async (projectId: string, originalError: unknown) => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      try {
+        const response = await scriptPipelineApi.getProject(projectId)
+        const item = response.data.item as Record<string, unknown> | null
+        const state = (item?.state as Record<string, unknown>) || {}
+        if (item && (state.generatedScript || (typeof state.scriptDraft === 'string' && state.scriptDraft.trim()))) {
+          applyProjectState(item)
+          setCharacterPrepareResult(null)
+          setCharacterConfirmOpen(false)
+          setSavedTemporaryCharacterIds([])
+          setError(null)
+          message.warning('生成剧本请求超时，但后端已完成生成，已自动恢复到剧本确认阶段')
+          return true
+        }
+      } catch {
+        // Ignore polling errors and keep retrying until timeout.
+      }
+    }
+
+    throw originalError
+  }
+
   useEffect(() => {
     const fetchCharacters = async () => {
       setCharactersLoading(true)
@@ -579,87 +773,6 @@ export const ScriptPipelinePage: React.FC = () => {
     }
 
     let active = true
-
-    const applyProjectState = (item: Record<string, unknown>) => {
-      const state = (item.state as Record<string, unknown>) || {}
-      const restoredReferenceImages = Array.isArray(state.referenceImages)
-        ? (state.referenceImages as ReferenceImageAsset[])
-        : []
-      const restoredGeneratedScript =
-        state.generatedScript && typeof state.generatedScript === 'object'
-          ? (state.generatedScript as GeneratedScriptResponse)
-          : null
-      const restoredScriptSummary =
-        state.scriptSummary && typeof state.scriptSummary === 'object'
-          ? (state.scriptSummary as ScriptSummary)
-          : null
-      const restoredSegments = Array.isArray(state.segments)
-        ? normalizeSegmentItems(state.segments as SegmentItem[])
-        : []
-      const restoredSplitValidationReport =
-        state.splitValidationReport && typeof state.splitValidationReport === 'object'
-          ? (state.splitValidationReport as SplitValidationReport)
-          : null
-      const restoredKeyframes = Array.isArray(state.keyframes) ? (state.keyframes as SegmentKeyframes[]) : []
-      const restoredRenderStatus =
-        state.renderStatus && typeof state.renderStatus === 'object'
-          ? (state.renderStatus as RenderStatusResponse)
-          : null
-
-      setCurrentStep(Number(state.currentStep ?? item.current_step ?? 0))
-      setTransitionDirection(state.transitionDirection === 'backward' ? 'backward' : 'forward')
-      setUserInput(String(state.userInput || ''))
-      setStylePreference(String(state.stylePreference || '写实战术电影感'))
-      setProjectTitle(String(state.projectTitle || item.project_title || '未命名项目'))
-      setMaxSegmentDuration(normalizeMaxSegmentDuration(Number(state.maxSegmentDuration || MAX_SEGMENT_DURATION)))
-      setTargetTotalDuration(
-        state.targetTotalDuration === null || state.targetTotalDuration === undefined
-          ? null
-          : Number(state.targetTotalDuration),
-      )
-      setProvider(String(state.provider || 'auto'))
-      setResolution(String(state.resolution || '720p'))
-      setAspectRatio(String(state.aspectRatio || '16:9'))
-      setWatermark(Boolean(state.watermark))
-      setProviderModel(String(state.providerModel || 'doubao-seedance-1-5-pro-251215'))
-      setCameraFixed(Boolean(state.cameraFixed))
-      setGenerateAudio(state.generateAudio === false ? false : true)
-      setReturnLastFrame(Boolean(state.returnLastFrame))
-      setServiceTier(String(state.serviceTier || 'default'))
-      setSeedInput(
-        state.seedInput === null || state.seedInput === undefined || state.seedInput === ''
-          ? null
-          : Number(state.seedInput),
-      )
-      setReferenceImages(restoredReferenceImages)
-      setUploadFileList(buildUploadFileList(restoredReferenceImages))
-      setConstraintCharacterIds(
-        Array.isArray(state.constraintCharacterIds) ? (state.constraintCharacterIds as string[]) : [],
-      )
-      setSelectedCharacterIds(
-        Array.isArray(state.selectedCharacterIds) ? (state.selectedCharacterIds as string[]) : [],
-      )
-      setConstraintSceneIds(Array.isArray(state.constraintSceneIds) ? (state.constraintSceneIds as string[]) : [])
-      setSelectedSceneIds(Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : [])
-      setGeneratedScript(restoredGeneratedScript)
-      setManualCharacterProfiles(
-        Array.isArray(state.manualCharacterProfiles) ? (state.manualCharacterProfiles as CharacterProfile[]) : [],
-      )
-      setSavedTemporaryCharacterIds(
-        Array.isArray(state.savedTemporaryCharacterIds) ? (state.savedTemporaryCharacterIds as string[]) : [],
-      )
-      setScriptDraft(String(state.scriptDraft || ''))
-      setScriptSummary(restoredScriptSummary)
-      setSegments(restoredSegments)
-      setSplitValidationReport(restoredSplitValidationReport)
-      setKeyframes(restoredKeyframes)
-      setRenderTaskId(
-        typeof state.renderTaskId === 'string' && state.renderTaskId
-          ? state.renderTaskId
-          : String(item.last_render_task_id || '') || null,
-      )
-      setRenderStatus(restoredRenderStatus)
-    }
 
     const restoreProject = async () => {
       setProjectHydrating(true)
@@ -782,39 +895,7 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
-    const stateForSave = {
-      currentStep,
-      transitionDirection,
-      userInput,
-      stylePreference,
-      projectTitle,
-      maxSegmentDuration,
-      targetTotalDuration,
-      provider,
-      resolution,
-      aspectRatio,
-      watermark,
-      providerModel,
-      cameraFixed,
-      generateAudio,
-      returnLastFrame,
-      serviceTier,
-      seedInput,
-      referenceImages,
-      constraintCharacterIds,
-      constraintSceneIds,
-      selectedCharacterIds,
-      selectedSceneIds,
-      generatedScript,
-      manualCharacterProfiles,
-      savedTemporaryCharacterIds,
-      scriptDraft,
-      scriptSummary,
-      segments,
-      splitValidationReport,
-      keyframes,
-      renderTaskId,
-    }
+    const stateForSave = buildProjectStateSnapshot()
 
     if (
       !hasMeaningfulProjectState({
@@ -836,29 +917,7 @@ export const ScriptPipelinePage: React.FC = () => {
     }
 
     const timer = window.setTimeout(() => {
-      const payload = {
-        project_title: projectTitle.trim() || '未命名项目',
-        current_step: currentStep,
-        state: stateForSave,
-        status:
-          renderStatus?.status === 'queued' || renderStatus?.status === 'dispatching' || renderStatus?.status === 'processing'
-            ? 'in_progress'
-            : renderStatus?.status === 'paused'
-              ? 'paused'
-            : renderStatus?.status === 'completed'
-              ? 'completed'
-              : renderStatus?.status === 'failed'
-                ? 'failed'
-                : renderStatus?.status === 'cancelled'
-                  ? 'cancelled'
-                  : renderTaskId
-                    ? 'in_progress'
-                    : currentStep >= 5
-                      ? 'completed'
-                      : 'draft',
-        last_render_task_id: renderTaskId || undefined,
-        summary: scriptSummary?.synopsis || '',
-      }
+      const payload = buildProjectPayload({ state: stateForSave })
 
       const persist = async () => {
         try {
@@ -964,20 +1023,25 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
-    setCurrentStep(1)
-    setScriptLoading(true)
-    setError(null)
-    setGeneratedScript(null)
-    setManualCharacterProfiles([])
-    setSavedTemporaryCharacterIds([])
-    setSegments([])
-    setSplitValidationReport(null)
-    setKeyframes([])
-    setRenderTaskId(null)
-    setRenderStatus(null)
+    let ensuredProjectId: string | null = null
 
     try {
+      ensuredProjectId = await ensureProjectExists()
+
+      setCurrentStep(1)
+      setScriptLoading(true)
+      setError(null)
+      setGeneratedScript(null)
+      setManualCharacterProfiles([])
+      setSavedTemporaryCharacterIds([])
+      setSegments([])
+      setSplitValidationReport(null)
+      setKeyframes([])
+      setRenderTaskId(null)
+      setRenderStatus(null)
+
       const response = await scriptPipelineApi.generateScript({
+        project_id: ensuredProjectId,
         user_input: userInput.trim(),
         style: stylePreference.trim(),
         target_total_duration: targetTotalDuration || undefined,
@@ -997,6 +1061,18 @@ export const ScriptPipelinePage: React.FC = () => {
       setProjectTitle(response.data.summary.title || '未命名项目')
       setCurrentStep(1)
     } catch (requestError: unknown) {
+      if (ensuredProjectId && isGatewayTimeoutError(requestError)) {
+        try {
+          const recovered = await recoverGeneratedScriptFromProject(ensuredProjectId, requestError)
+          if (recovered) {
+            return
+          }
+        } catch (recoveryError) {
+          setError(extractApiErrorMessage(recoveryError, '完整剧本生成失败'))
+          setCurrentStep(0)
+          return
+        }
+      }
       setError(extractApiErrorMessage(requestError, '完整剧本生成失败'))
       setCurrentStep(0)
     } finally {
@@ -1035,31 +1111,6 @@ export const ScriptPipelinePage: React.FC = () => {
     } finally {
       setPreparingCharacters(false)
     }
-  }
-
-  const handleUseInputAsScript = () => {
-    const manualScript = userInput.trim()
-    if (!manualScript) {
-      return
-    }
-
-    setError(null)
-    setGeneratedScript(null)
-    setManualCharacterProfiles([])
-    setCharacterPrepareResult(null)
-    setCharacterConfirmOpen(false)
-    setConfirmedLibraryCharacterIds([])
-    setConfirmedTemporaryCharacterIds([])
-    setSavedTemporaryCharacterIds([])
-    setScriptSummary(null)
-    setScriptDraft(manualScript)
-    setSegments([])
-    setSplitValidationReport(null)
-    setKeyframes([])
-    setRenderTaskId(null)
-    setRenderStatus(null)
-    setTransitionDirection('forward')
-    setCurrentStep(1)
   }
 
   const buildConfirmedCharacterProfiles = (
@@ -1500,7 +1551,6 @@ export const ScriptPipelinePage: React.FC = () => {
   const effectiveCharacterProfiles = generatedScript?.character_profiles || manualCharacterProfiles
   const temporaryCharacters = effectiveCharacterProfiles.filter((profile) => profile.source === 'ai-generated-draft')
   const characterResolution = generatedScript?.character_resolution
-  const isManualScriptMode = !generatedScript
   const finalPreviewUrl = renderStatus?.final_output?.asset_url
   const finalPreviewType = renderStatus?.final_output?.asset_type
   const previousStepIndex = Math.max(currentStep - 1, 0)
@@ -1706,13 +1756,6 @@ export const ScriptPipelinePage: React.FC = () => {
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
             <Button
-              size="large"
-              disabled={!userInput.trim()}
-              onClick={handleUseInputAsScript}
-            >
-              直接进入剧本审核
-            </Button>
-            <Button
               type="primary"
               size="large"
               icon={<PlayCircleOutlined />}
@@ -1756,15 +1799,6 @@ export const ScriptPipelinePage: React.FC = () => {
                       {scriptSummary.synopsis}
                     </Descriptions.Item>
                   </Descriptions>
-                ) : null}
-
-                {!scriptSummary && !generatedScript ? (
-                  <Alert
-                    type="info"
-                    showIcon
-                    message="当前使用的是手动输入剧本"
-                    description="这里不会显示自动生成摘要。继续下一步时，会先分析剧本里的角色并让你确认角色档案，再进入拆片阶段。"
-                  />
                 ) : null}
 
                 {characterResolution?.message ? (
@@ -1861,7 +1895,7 @@ export const ScriptPipelinePage: React.FC = () => {
                 disabled={!scriptDraft.trim()}
                 onClick={handleSplitScript}
               >
-                {isManualScriptMode ? '确认角色并拆分片段' : '继续拆分片段'}
+                继续拆分片段
               </Button>
             </Space>
           </div>
