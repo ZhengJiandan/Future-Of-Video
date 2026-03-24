@@ -462,15 +462,6 @@ docker compose --profile full up --build
 - `docker compose up --build` 的默认行为已经证明最小模式不把 `mysql` 当成前置依赖。
 - `mysql` 服务只会在 `--profile full` 下被显式启用。
 
-## 示例输入与回归样例
-
-对外样例已经整理到 `docs/examples/`：
-
-- `docs/examples/cat-pipeline-inputs.md`
-- `docs/examples/ancient-romance-pipeline-inputs.md`
-- `docs/examples/cat-character-entry-regression.md`
-
-这些文件适合本地回归测试、演示和 prompt 样例参考。
 
 
 ## 常见问题
@@ -564,3 +555,11 @@ DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
 - 相关模型服务商的使用条款
 - 你所在地区的法律法规
 - 你对素材、角色、音频和上传内容的授权边界
+
+## 联系我
+
+- QQ群：`1041169329`
+
+  ![QQ群二维码](./backend/img/qq_share.jpg)
+- 微信号：`wxid_xw0hc18v0icp12`
+- 邮箱：`494829832@qq.com`
