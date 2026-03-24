@@ -26,7 +26,7 @@
 - 这个项目主要解决的是当前视频模型单次生成时长较短、很难直接独立成片的问题。理论上可以通过分段串联生成超过 5 分钟的视频，但考虑到现阶段模型能力，实际更建议控制在 1 分钟以内，以降低角色漂移、风格漂移和连续性失真的风险。
 - 这个项目目前完全由个人在业余时间开发维护。我本身也是上班党，所以实现里难免会有疏漏、粗糙之处，欢迎基于实际使用问题一起讨论、交流和改进。
 - 当前仓库现已接入可灵视频生成。渲染 provider 为 `auto` 时，会优先使用可灵多图生视频；只有在未配置可灵 `AK/SK` 时，才会自动降级到豆包视频模型。由于 `Seedance 2.0` 的 API 目前还没有开放，再加上豆包视频模型近期受版权审核策略影响，实际可用性和通过率都不算稳定；如果你打算认真投入使用，更建议优先配置可灵 API 或其他更稳定的视频模型能力。
-- 图片模型方面，更推荐使用 `NanoBanana Pro`。项目里目前接的是第三方兼容接入，成本相对便宜；如果不配置 `NANOBANANA_API_KEY`，系统会默认回退到豆包图片模型。
+- 图片模型方面，更推荐使用 `NanoBanana Pro`。项目里当前的统一图片路由会优先使用 `NanoBanana`，未配置 `NANOBANANA_API_KEY` 时会回退到豆包 `Seedream 5.0`
 
 ## 功能概览
 
@@ -296,9 +296,14 @@ npm run dev
 
 如果后端启动阶段就报错，优先检查：
 
-- `DOUBAO_API_KEY` 是否已配置
 - `pip install -r requirements.txt` 是否已经执行，尤其要确认安装了 `aiosqlite`
 - `ffmpeg` 是否在 `PATH` 中可用
+- `backend/.env` 是否已经从 `.env.example` 复制，并继续保留 SQLite 配置
+
+如果不是启动时报错，而是在调用具体能力时失败，优先检查：
+
+- `DOUBAO_API_KEY` 是否可用
+- 或者 `NANOBANANA_API_KEY` 是否已配置
 
 ## 运行模式
 
@@ -379,10 +384,21 @@ alembic upgrade head
 角色 / 场景档案：
 
 - `GET /pipeline/characters`
+- `GET /pipeline/characters/{character_id}`
 - `POST /pipeline/characters`
+- `PUT /pipeline/characters/{character_id}`
+- `DELETE /pipeline/characters/{character_id}`
+- `POST /pipeline/characters/upload-reference`
+- `POST /pipeline/characters/generate-three-view`
+- `POST /pipeline/characters/generate-prototype`
 - `POST /pipeline/characters/analyze-reference`
 - `GET /pipeline/scenes`
+- `GET /pipeline/scenes/{scene_id}`
 - `POST /pipeline/scenes`
+- `PUT /pipeline/scenes/{scene_id}`
+- `DELETE /pipeline/scenes/{scene_id}`
+- `POST /pipeline/scenes/upload-reference`
+- `POST /pipeline/scenes/generate-prototype`
 - `POST /pipeline/scenes/analyze-reference`
 
 ## 测试与构建
@@ -506,6 +522,8 @@ DATABASE_URL=sqlite+aiosqlite:///./uploads/future_of_video.db
 
 - 剧本生成
 - 图片分析
+- 角色 / 场景原型图生成
+- 角色三视图生成
 - 豆包视频生成
 
 如果服务端没有预先配置，前端会提示缺少 key，并允许你在当前浏览器会话里临时填写后重试。
@@ -530,7 +548,8 @@ DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
 当前逻辑是：
 
 - 优先使用 `NANOBANANA_API_KEY`
-- 如果未配置，则回退到 `DOUBAO_API_KEY` 对应的 Doubao 图片模型
+- 如果未配置，则回退到 `DOUBAO_API_KEY` 对应的 Doubao `Seedream 5.0`
+- 角色原型图、场景原型图这类图生图链路在走豆包时，当前固定传 Base64 输入
 
 ### 7. 为什么“自动选择”视频引擎时会优先走可灵？
 
@@ -563,3 +582,4 @@ DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
   ![QQ群二维码](./backend/img/qq_share.jpg)
 - 微信号：`wxid_xw0hc18v0icp12`
 - 邮箱：`494829832@qq.com`
+- 联系备注 fov 即可。

@@ -25,7 +25,7 @@ The repository currently uses a separated frontend/backend architecture:
 - This project mainly addresses a practical limitation of current video models: a single generation is usually too short to become a complete standalone film. In theory, segmented generation can be chained into videos longer than 5 minutes, but given current model quality, keeping the final output within 1 minute is still the safer recommendation to reduce character drift, style drift, and continuity artifacts.
 - The project is currently developed and maintained by a single person in spare time. Rough edges and omissions are expected. Discussion, feedback, and practical improvements are welcome.
 - The repository now supports Kling video generation. When the render provider is set to `auto`, the system prefers Kling multi-image-to-video first and only falls back to Doubao video generation when Kling `AK/SK` credentials are missing. Since the `Seedance 2.0` API is not fully open yet, and recent policy changes have also affected Doubao video generation availability, production stability is not ideal. If you plan to rely on this seriously, configuring Kling first is the recommended path.
-- For image generation, `NanoBanana Pro` is generally the better choice. The current repository uses a third-party compatible integration at relatively low cost. If `NANOBANANA_API_KEY` is not configured, the system falls back to Doubao image generation.
+- For image generation, `NanoBanana Pro` is generally the better choice. The current unified image router prefers `NanoBanana` first and falls back to Doubao `Seedream 5.0` through the Ark-compatible image API when `NANOBANANA_API_KEY` is missing. For character and scene image-to-image flows, the current Doubao path uses image Base64 input directly instead of relying on a public image URL.
 
 ## Contact Me
 
@@ -304,9 +304,14 @@ In development, Vite proxies `/api/v1` and `/uploads` to `http://127.0.0.1:8080`
 
 If the backend fails during startup, check these first:
 
-- Whether `DOUBAO_API_KEY` is configured
 - Whether `pip install -r requirements.txt` has been executed, especially whether `aiosqlite` is installed
 - Whether `ffmpeg` is available in `PATH`
+- Whether `backend/.env` has been copied from `.env.example` and still keeps the SQLite configuration
+
+If startup is fine but specific capabilities fail later, check these first:
+
+- Whether `DOUBAO_API_KEY` is available
+- Or whether `NANOBANANA_API_KEY` is configured
 
 ## Runtime Modes
 
@@ -387,10 +392,21 @@ Both “confirm each segment before continuing” and “generate all at once”
 Character / scene profiles:
 
 - `GET /pipeline/characters`
+- `GET /pipeline/characters/{character_id}`
 - `POST /pipeline/characters`
+- `PUT /pipeline/characters/{character_id}`
+- `DELETE /pipeline/characters/{character_id}`
+- `POST /pipeline/characters/upload-reference`
+- `POST /pipeline/characters/generate-three-view`
+- `POST /pipeline/characters/generate-prototype`
 - `POST /pipeline/characters/analyze-reference`
 - `GET /pipeline/scenes`
+- `GET /pipeline/scenes/{scene_id}`
 - `POST /pipeline/scenes`
+- `PUT /pipeline/scenes/{scene_id}`
+- `DELETE /pipeline/scenes/{scene_id}`
+- `POST /pipeline/scenes/upload-reference`
+- `POST /pipeline/scenes/generate-prototype`
 - `POST /pipeline/scenes/analyze-reference`
 
 ## Testing and Build
@@ -524,6 +540,8 @@ Because validation is now lazy. The backend no longer fails immediately at start
 
 - script generation
 - image analysis
+- character / scene prototype generation
+- character three-view generation
 - Doubao video generation
 
 If the server has no key configured in advance, the frontend prompts for one and lets you provide a temporary key for the current browser session.
@@ -548,7 +566,8 @@ DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
 Current logic:
 
 - Prefer `NANOBANANA_API_KEY`
-- If missing, fall back to the Doubao image model associated with `DOUBAO_API_KEY`
+- If missing, fall back to Doubao `Seedream 5.0` associated with `DOUBAO_API_KEY`
+- In character and scene image-to-image flows, the current Doubao path sends Base64 input directly
 
 ### 7. Why does “auto” prefer Kling for video generation?
 
@@ -573,3 +592,12 @@ This project calls third-party model services and may generate media such as ima
 - the terms of the model providers you use
 - the laws and regulations in your jurisdiction
 - your authorization boundaries for materials, characters, audio, and uploaded content
+
+## Contact Me
+
+- QQ Group: `1041169329`
+
+  ![QQ Group QR Code](./backend/img/qq_share.jpg)
+- WeChat: `wxid_xw0hc18v0icp12`
+- Email: `494829832@qq.com`
+- Mention `fov` when you add me.
