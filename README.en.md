@@ -27,6 +27,14 @@ The repository currently uses a separated frontend/backend architecture:
 - The repository now supports Kling video generation. When the render provider is set to `auto`, the system prefers Kling multi-image-to-video first and only falls back to Doubao video generation when Kling `AK/SK` credentials are missing. Since the `Seedance 2.0` API is not fully open yet, and recent policy changes have also affected Doubao video generation availability, production stability is not ideal. If you plan to rely on this seriously, configuring Kling first is the recommended path.
 - For image generation, `NanoBanana Pro` is generally the better choice. The current repository uses a third-party compatible integration at relatively low cost. If `NANOBANANA_API_KEY` is not configured, the system falls back to Doubao image generation.
 
+## Contact Me
+
+- QQ Group: `1041169329`
+
+  ![QQ Group QR Code](./backend/img/qq_share.jpg)
+- WeChat: `wxid_xw0hc18v0icp12`
+- Email: `494829832@qq.com`
+
 ## Feature Overview
 
 - User registration, login, and current-project draft persistence
