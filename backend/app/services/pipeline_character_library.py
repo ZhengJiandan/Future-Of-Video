@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -13,10 +14,11 @@ from typing import Any, Dict, List, Optional
 
 from PIL import Image
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.db.base import AsyncSessionLocal
 from app.models.pipeline_character_profile import PipelineCharacterProfile
 from app.services.preferred_image_generation import PreferredImageGenerationClient
 from app.utils.image_variants import (
@@ -44,7 +46,9 @@ class PipelineCharacterLibraryService:
 
     async def list_profiles(self, db: AsyncSession) -> List[Dict[str, Any]]:
         result = await db.execute(
-            select(PipelineCharacterProfile).order_by(
+            select(PipelineCharacterProfile)
+            .where(PipelineCharacterProfile.deleted_at.is_(None))
+            .order_by(
                 PipelineCharacterProfile.updated_at.desc(),
                 PipelineCharacterProfile.created_at.desc(),
             )
@@ -59,7 +63,10 @@ class PipelineCharacterLibraryService:
             return None
 
         result = await db.execute(
-            select(PipelineCharacterProfile).where(PipelineCharacterProfile.id == normalized_id)
+            select(PipelineCharacterProfile).where(
+                PipelineCharacterProfile.id == normalized_id,
+                PipelineCharacterProfile.deleted_at.is_(None),
+            )
         )
         profile = result.scalar_one_or_none()
         if profile:
@@ -72,7 +79,10 @@ class PipelineCharacterLibraryService:
             return []
 
         result = await db.execute(
-            select(PipelineCharacterProfile).where(PipelineCharacterProfile.id.in_(normalized_ids))
+            select(PipelineCharacterProfile).where(
+                PipelineCharacterProfile.id.in_(normalized_ids),
+                PipelineCharacterProfile.deleted_at.is_(None),
+            )
         )
         profiles = result.scalars().all()
         await self._backfill_missing_face_closeups(db, profiles)
@@ -89,22 +99,11 @@ class PipelineCharacterLibraryService:
         generated_three_view_url = str(payload.get("three_view_image_url") or "").strip()
         generated_three_view_prompt = str(payload.get("three_view_prompt") or "").strip()
         generated_face_closeup_url = str(payload.get("face_closeup_image_url") or "").strip()
-        if auto_generate_identity_assets and final_reference_image_url and not generated_three_view_url:
-            try:
-                generated_three_view = await self.generate_three_view_asset(
-                    reference_image_url=final_reference_image_url,
-                    name=name,
-                    role=str(payload.get("role") or "").strip(),
-                    description=str(payload.get("description") or "").strip(),
-                    appearance=str(payload.get("appearance") or "").strip(),
-                    personality=str(payload.get("personality") or "").strip(),
-                    prompt_hint=str(payload.get("prompt_hint") or "").strip(),
-                )
-                generated_three_view_url = str(generated_three_view.get("asset_url") or "").strip()
-                generated_three_view_prompt = str(generated_three_view.get("prompt") or "").strip()
-            except Exception:
-                generated_three_view_url = ""
-                generated_three_view_prompt = ""
+        should_generate_three_view = bool(
+            auto_generate_identity_assets and final_reference_image_url and not generated_three_view_url
+        )
+        if not generated_three_view_url:
+            generated_three_view_prompt = ""
 
         if auto_generate_identity_assets and final_reference_image_url and not generated_face_closeup_url:
             try:
@@ -171,6 +170,19 @@ class PipelineCharacterLibraryService:
         db.add(profile)
         await db.commit()
         await db.refresh(profile)
+
+        if should_generate_three_view:
+            self._enqueue_three_view_generation(
+                profile_id=profile.id,
+                expected_reference_image_url=final_reference_image_url,
+                expected_current_three_view_url="",
+                name=name,
+                role=str(payload.get("role") or "").strip(),
+                description=str(payload.get("description") or "").strip(),
+                appearance=str(payload.get("appearance") or "").strip(),
+                personality=str(payload.get("personality") or "").strip(),
+                prompt_hint=str(payload.get("prompt_hint") or "").strip(),
+            )
         return profile.to_dict()
 
     async def update_profile(
@@ -184,7 +196,10 @@ class PipelineCharacterLibraryService:
             raise ValueError("角色档案不存在")
 
         result = await db.execute(
-            select(PipelineCharacterProfile).where(PipelineCharacterProfile.id == normalized_id)
+            select(PipelineCharacterProfile).where(
+                PipelineCharacterProfile.id == normalized_id,
+                PipelineCharacterProfile.deleted_at.is_(None),
+            )
         )
         profile = result.scalar_one_or_none()
         if not profile:
@@ -206,28 +221,14 @@ class PipelineCharacterLibraryService:
         generated_face_closeup_url = str(payload.get("face_closeup_image_url") or "").strip()
 
         reference_image_changed = final_reference_image_url != original_reference_image_url
-
-        if (
+        should_generate_three_view = bool(
             auto_generate_identity_assets
             and final_reference_image_url
+            and not generated_three_view_url
             and (reference_image_changed or not (profile.three_view_image_url or "").strip())
-        ):
-            try:
-                generated_three_view = await self.generate_three_view_asset(
-                    reference_image_url=final_reference_image_url,
-                    name=name,
-                    role=str(payload.get("role") or "").strip(),
-                    description=str(payload.get("description") or "").strip(),
-                    appearance=str(payload.get("appearance") or "").strip(),
-                    personality=str(payload.get("personality") or "").strip(),
-                    prompt_hint=str(payload.get("prompt_hint") or "").strip(),
-                )
-                generated_three_view_url = str(generated_three_view.get("asset_url") or "").strip()
-                generated_three_view_prompt = str(generated_three_view.get("prompt") or "").strip()
-            except Exception:
-                generated_three_view_url = profile.three_view_image_url or ""
-                generated_three_view_prompt = profile.three_view_prompt or ""
-        elif not final_reference_image_url:
+        )
+
+        if not final_reference_image_url:
             generated_three_view_url = ""
             generated_three_view_prompt = ""
         else:
@@ -304,9 +305,26 @@ class PipelineCharacterLibraryService:
         await db.commit()
         await db.refresh(profile)
 
+        if should_generate_three_view:
+            self._enqueue_three_view_generation(
+                profile_id=profile.id,
+                expected_reference_image_url=final_reference_image_url,
+                expected_current_three_view_url=generated_three_view_url,
+                name=name,
+                role=str(payload.get("role") or "").strip(),
+                description=str(payload.get("description") or "").strip(),
+                appearance=str(payload.get("appearance") or "").strip(),
+                personality=str(payload.get("personality") or "").strip(),
+                prompt_hint=str(payload.get("prompt_hint") or "").strip(),
+            )
+
         if reference_image_changed and original_reference_image_path and original_reference_image_path != profile.reference_image_path:
             self._delete_local_asset(original_reference_image_path)
-        if original_three_view_image_path and original_three_view_image_path != profile.three_view_image_path:
+        if (
+            not should_generate_three_view
+            and original_three_view_image_path
+            and original_three_view_image_path != profile.three_view_image_path
+        ):
             self._delete_local_asset(original_three_view_image_path)
         if original_face_closeup_image_path and original_face_closeup_image_path != profile.face_closeup_image_path:
             self._delete_local_asset(original_face_closeup_image_path)
@@ -315,17 +333,17 @@ class PipelineCharacterLibraryService:
 
     async def delete_profile(self, db: AsyncSession, profile_id: str) -> bool:
         result = await db.execute(
-            select(PipelineCharacterProfile).where(PipelineCharacterProfile.id == profile_id)
+            select(PipelineCharacterProfile).where(
+                PipelineCharacterProfile.id == profile_id,
+                PipelineCharacterProfile.deleted_at.is_(None),
+            )
         )
         profile = result.scalar_one_or_none()
         if not profile:
             return False
 
-        self._delete_local_asset(profile.reference_image_path)
-        self._delete_local_asset(profile.three_view_image_path)
-        self._delete_local_asset(profile.face_closeup_image_path)
-
-        await db.execute(delete(PipelineCharacterProfile).where(PipelineCharacterProfile.id == profile_id))
+        profile.deleted_at = datetime.utcnow()
+        profile.updated_at = profile.deleted_at
         await db.commit()
         return True
 
@@ -659,6 +677,142 @@ class PipelineCharacterLibraryService:
             "Neutral standing pose, arms relaxed, clean studio background, no extra characters, no collage clutter, "
             "high detail, production-ready concept art sheet."
         ).strip()
+
+    def _enqueue_three_view_generation(
+        self,
+        *,
+        profile_id: str,
+        expected_reference_image_url: str,
+        expected_current_three_view_url: str,
+        name: str,
+        role: str,
+        description: str,
+        appearance: str,
+        personality: str,
+        prompt_hint: str,
+    ) -> None:
+        worker = threading.Thread(
+            target=self._run_three_view_generation_task,
+            kwargs={
+                "profile_id": profile_id,
+                "expected_reference_image_url": expected_reference_image_url,
+                "expected_current_three_view_url": expected_current_three_view_url,
+                "name": name,
+                "role": role,
+                "description": description,
+                "appearance": appearance,
+                "personality": personality,
+                "prompt_hint": prompt_hint,
+            },
+            name=f"character-three-view-{profile_id[:8]}",
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_three_view_generation_task(
+        self,
+        *,
+        profile_id: str,
+        expected_reference_image_url: str,
+        expected_current_three_view_url: str,
+        name: str,
+        role: str,
+        description: str,
+        appearance: str,
+        personality: str,
+        prompt_hint: str,
+    ) -> None:
+        try:
+            asyncio.run(
+                self._generate_and_persist_three_view(
+                    profile_id=profile_id,
+                    expected_reference_image_url=expected_reference_image_url,
+                    expected_current_three_view_url=expected_current_three_view_url,
+                    name=name,
+                    role=role,
+                    description=description,
+                    appearance=appearance,
+                    personality=personality,
+                    prompt_hint=prompt_hint,
+                )
+            )
+        except Exception:
+            logger.exception("Background three-view task crashed: profile_id=%s", profile_id)
+
+    async def _generate_and_persist_three_view(
+        self,
+        *,
+        profile_id: str,
+        expected_reference_image_url: str,
+        expected_current_three_view_url: str,
+        name: str,
+        role: str,
+        description: str,
+        appearance: str,
+        personality: str,
+        prompt_hint: str,
+    ) -> None:
+        try:
+            generated_three_view = await self.generate_three_view_asset(
+                reference_image_url=expected_reference_image_url,
+                name=name,
+                role=role,
+                description=description,
+                appearance=appearance,
+                personality=personality,
+                prompt_hint=prompt_hint,
+            )
+        except Exception:
+            logger.warning(
+                "Generate three view failed in background: profile_id=%s reference=%s",
+                profile_id,
+                expected_reference_image_url,
+                exc_info=True,
+            )
+            return
+
+        generated_three_view_url = str(generated_three_view.get("asset_url") or "").strip()
+        generated_three_view_prompt = str(generated_three_view.get("prompt") or "").strip()
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(PipelineCharacterProfile).where(
+                    PipelineCharacterProfile.id == profile_id,
+                    PipelineCharacterProfile.deleted_at.is_(None),
+                )
+            )
+            profile = result.scalar_one_or_none()
+            if not profile:
+                self._delete_local_asset(self._asset_url_to_db_path(generated_three_view_url))
+                return
+
+            current_reference_image_url = str(profile.reference_image_url or "").strip()
+            current_three_view_url = str(profile.three_view_image_url or "").strip()
+            if (
+                current_reference_image_url != expected_reference_image_url
+                or current_three_view_url != expected_current_three_view_url
+            ):
+                logger.info(
+                    "Skip stale three-view update: profile_id=%s expected_reference=%s current_reference=%s",
+                    profile_id,
+                    expected_reference_image_url,
+                    current_reference_image_url,
+                )
+                self._delete_local_asset(self._asset_url_to_db_path(generated_three_view_url))
+                return
+
+            original_three_view_image_path = profile.three_view_image_path or ""
+            profile.three_view_image_url = generated_three_view_url or None
+            profile.three_view_image_path = self._asset_url_to_db_path(generated_three_view_url)
+            profile.three_view_prompt = generated_three_view_prompt or None
+            profile.updated_at = datetime.utcnow()
+            await db.commit()
+
+            if (
+                original_three_view_image_path
+                and original_three_view_image_path != profile.three_view_image_path
+            ):
+                self._delete_local_asset(original_three_view_image_path)
 
     def _build_character_image_prompt(
         self,

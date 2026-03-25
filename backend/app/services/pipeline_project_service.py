@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.pipeline_project import PipelineProject
@@ -27,7 +27,10 @@ class PipelineProjectService:
                 PipelineProject.created_at,
                 PipelineProject.updated_at,
             )
-            .where(PipelineProject.user_id == user_id)
+            .where(
+                PipelineProject.user_id == user_id,
+                PipelineProject.deleted_at.is_(None),
+            )
             .order_by(PipelineProject.updated_at.desc(), PipelineProject.created_at.desc())
         )
         items: List[Dict[str, Any]] = []
@@ -56,6 +59,7 @@ class PipelineProjectService:
             select(PipelineProject).where(
                 PipelineProject.user_id == user_id,
                 PipelineProject.id == project_id,
+                PipelineProject.deleted_at.is_(None),
             )
         )
         project = result.scalar_one_or_none()
@@ -64,7 +68,10 @@ class PipelineProjectService:
     async def get_current_project(self, db: AsyncSession, user_id: str) -> Optional[Dict[str, Any]]:
         result = await db.execute(
             select(PipelineProject)
-            .where(PipelineProject.user_id == user_id)
+            .where(
+                PipelineProject.user_id == user_id,
+                PipelineProject.deleted_at.is_(None),
+            )
             .limit(1)
             .order_by(PipelineProject.updated_at.desc(), PipelineProject.created_at.desc())
         )
@@ -120,13 +127,17 @@ class PipelineProjectService:
                 select(PipelineProject).where(
                     PipelineProject.user_id == user_id,
                     PipelineProject.id == project_id,
+                    PipelineProject.deleted_at.is_(None),
                 )
             )
             project = result.scalar_one_or_none()
         if project is None:
             result = await db.execute(
                 select(PipelineProject)
-                .where(PipelineProject.user_id == user_id)
+                .where(
+                    PipelineProject.user_id == user_id,
+                    PipelineProject.deleted_at.is_(None),
+                )
                 .limit(1)
                 .order_by(PipelineProject.updated_at.desc(), PipelineProject.created_at.desc())
             )
@@ -158,18 +169,15 @@ class PipelineProjectService:
             select(PipelineProject).where(
                 PipelineProject.user_id == user_id,
                 PipelineProject.id == project_id,
+                PipelineProject.deleted_at.is_(None),
             )
         )
         project = result.scalar_one_or_none()
         if not project:
             return False
 
-        await db.execute(
-            delete(PipelineProject).where(
-                PipelineProject.user_id == user_id,
-                PipelineProject.id == project_id,
-            )
-        )
+        project.deleted_at = datetime.utcnow()
+        project.updated_at = project.deleted_at
         await db.commit()
         return True
 

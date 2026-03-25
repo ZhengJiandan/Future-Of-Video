@@ -16,6 +16,7 @@ class PipelineProject(BaseModel):
     status = Column(String(50), nullable=False, default="draft")
     last_render_task_id = Column(String(100), nullable=True)
     summary = Column(Text, nullable=True)
+    deleted_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -44,6 +44,7 @@ class PipelineSceneProfile(BaseModel):
     reference_image_path = Column(String(500), nullable=True)
     reference_image_original_name = Column(String(255), nullable=True)
 
+    deleted_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

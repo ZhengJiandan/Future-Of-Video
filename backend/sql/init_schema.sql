@@ -36,10 +36,12 @@ CREATE TABLE IF NOT EXISTS `pipeline_projects` (
   `status` VARCHAR(50) NOT NULL DEFAULT 'draft',
   `last_render_task_id` VARCHAR(100) NULL,
   `summary` TEXT NULL,
+  `deleted_at` DATETIME NULL,
   `created_at` DATETIME NULL,
   `updated_at` DATETIME NULL,
   PRIMARY KEY (`id`),
-  KEY `ix_pipeline_projects_user_id` (`user_id`)
+  KEY `ix_pipeline_projects_user_id` (`user_id`),
+  KEY `ix_pipeline_projects_deleted_at` (`deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `pipeline_character_profiles` (
@@ -86,11 +88,13 @@ CREATE TABLE IF NOT EXISTS `pipeline_character_profiles` (
   `three_view_prompt` TEXT NULL,
   `face_closeup_image_url` VARCHAR(500) NULL,
   `face_closeup_image_path` VARCHAR(500) NULL,
+  `deleted_at` DATETIME NULL,
   `created_at` DATETIME NULL,
   `updated_at` DATETIME NULL,
   PRIMARY KEY (`id`),
   KEY `ix_pipeline_character_profiles_name` (`name`),
-  KEY `ix_pipeline_character_profiles_category` (`category`)
+  KEY `ix_pipeline_character_profiles_category` (`category`),
+  KEY `ix_pipeline_character_profiles_deleted_at` (`deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `pipeline_scene_profiles` (
@@ -125,11 +129,13 @@ CREATE TABLE IF NOT EXISTS `pipeline_scene_profiles` (
   `reference_image_url` VARCHAR(500) NULL,
   `reference_image_path` VARCHAR(500) NULL,
   `reference_image_original_name` VARCHAR(255) NULL,
+  `deleted_at` DATETIME NULL,
   `created_at` DATETIME NULL,
   `updated_at` DATETIME NULL,
   PRIMARY KEY (`id`),
   KEY `ix_pipeline_scene_profiles_name` (`name`),
-  KEY `ix_pipeline_scene_profiles_category` (`category`)
+  KEY `ix_pipeline_scene_profiles_category` (`category`),
+  KEY `ix_pipeline_scene_profiles_deleted_at` (`deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `pipeline_render_tasks` (

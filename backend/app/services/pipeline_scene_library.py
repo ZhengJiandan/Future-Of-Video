@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -34,7 +34,9 @@ class PipelineSceneLibraryService:
 
     async def list_profiles(self, db: AsyncSession) -> List[Dict[str, Any]]:
         result = await db.execute(
-            select(PipelineSceneProfile).order_by(
+            select(PipelineSceneProfile)
+            .where(PipelineSceneProfile.deleted_at.is_(None))
+            .order_by(
                 PipelineSceneProfile.updated_at.desc(),
                 PipelineSceneProfile.created_at.desc(),
             )
@@ -47,7 +49,10 @@ class PipelineSceneLibraryService:
             return None
 
         result = await db.execute(
-            select(PipelineSceneProfile).where(PipelineSceneProfile.id == normalized_id)
+            select(PipelineSceneProfile).where(
+                PipelineSceneProfile.id == normalized_id,
+                PipelineSceneProfile.deleted_at.is_(None),
+            )
         )
         profile = result.scalar_one_or_none()
         return profile.to_dict() if profile else None
@@ -58,7 +63,10 @@ class PipelineSceneLibraryService:
             return []
 
         result = await db.execute(
-            select(PipelineSceneProfile).where(PipelineSceneProfile.id.in_(normalized_ids))
+            select(PipelineSceneProfile).where(
+                PipelineSceneProfile.id.in_(normalized_ids),
+                PipelineSceneProfile.deleted_at.is_(None),
+            )
         )
         lookup = {item.id: item.to_dict() for item in result.scalars().all()}
         return [lookup[profile_id] for profile_id in normalized_ids if profile_id in lookup]
@@ -119,7 +127,12 @@ class PipelineSceneLibraryService:
         if not normalized_id:
             raise ValueError("场景档案不存在")
 
-        result = await db.execute(select(PipelineSceneProfile).where(PipelineSceneProfile.id == normalized_id))
+        result = await db.execute(
+            select(PipelineSceneProfile).where(
+                PipelineSceneProfile.id == normalized_id,
+                PipelineSceneProfile.deleted_at.is_(None),
+            )
+        )
         profile = result.scalar_one_or_none()
         if not profile:
             return None
@@ -179,13 +192,18 @@ class PipelineSceneLibraryService:
         return profile.to_dict()
 
     async def delete_profile(self, db: AsyncSession, profile_id: str) -> bool:
-        result = await db.execute(select(PipelineSceneProfile).where(PipelineSceneProfile.id == profile_id))
+        result = await db.execute(
+            select(PipelineSceneProfile).where(
+                PipelineSceneProfile.id == profile_id,
+                PipelineSceneProfile.deleted_at.is_(None),
+            )
+        )
         profile = result.scalar_one_or_none()
         if not profile:
             return False
 
-        self._delete_local_asset(profile.reference_image_path)
-        await db.execute(delete(PipelineSceneProfile).where(PipelineSceneProfile.id == profile_id))
+        profile.deleted_at = datetime.utcnow()
+        profile.updated_at = profile.deleted_at
         await db.commit()
         return True
 

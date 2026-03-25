@@ -1687,6 +1687,7 @@ class PipelineWorkflowService:
             select(PipelineProject).where(
                 PipelineProject.id == project_id,
                 PipelineProject.user_id == user_id,
+                PipelineProject.deleted_at.is_(None),
             )
         )
         project = result.scalar_one_or_none()

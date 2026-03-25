@@ -83,6 +83,15 @@ CHARACTER_PROFILE_COMPAT_COLUMNS = {
     "face_closeup_image_url": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `face_closeup_image_url` VARCHAR(500) NULL AFTER `three_view_prompt`",
     "face_closeup_image_path": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `face_closeup_image_path` VARCHAR(500) NULL AFTER `face_closeup_image_url`",
     "voice_description": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `voice_description` TEXT NULL AFTER `emotion_baseline`",
+    "deleted_at": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `deleted_at` DATETIME NULL AFTER `face_closeup_image_path`",
+}
+
+PROJECT_COMPAT_COLUMNS = {
+    "deleted_at": "ALTER TABLE `pipeline_projects` ADD COLUMN `deleted_at` DATETIME NULL AFTER `summary`",
+}
+
+SCENE_PROFILE_COMPAT_COLUMNS = {
+    "deleted_at": "ALTER TABLE `pipeline_scene_profiles` ADD COLUMN `deleted_at` DATETIME NULL AFTER `reference_image_original_name`",
 }
 
 
@@ -147,37 +156,53 @@ async def close_db():
 async def _ensure_schema_compatibility(conn: AsyncSession) -> None:
     """为旧版本数据库自动补齐新增但可兼容的字段。"""
     if settings.DATABASE_URL.startswith("mysql"):
-        for column_name, ddl in CHARACTER_PROFILE_COMPAT_COLUMNS.items():
-            result = await conn.execute(
-                text(
-                    """
-                    SELECT COUNT(*)
-                    FROM information_schema.COLUMNS
-                    WHERE TABLE_SCHEMA = DATABASE()
-                      AND TABLE_NAME = :table_name
-                      AND COLUMN_NAME = :column_name
-                    """
-                ),
-                {
-                    "table_name": "pipeline_character_profiles",
-                    "column_name": column_name,
-                },
-            )
-            exists = int(result.scalar() or 0) > 0
-            if not exists:
-                logger.warning("Auto-migrating missing column: pipeline_character_profiles.%s", column_name)
-                await conn.execute(text(ddl))
+        compat_columns = {
+            "pipeline_projects": PROJECT_COMPAT_COLUMNS,
+            "pipeline_character_profiles": CHARACTER_PROFILE_COMPAT_COLUMNS,
+            "pipeline_scene_profiles": SCENE_PROFILE_COMPAT_COLUMNS,
+        }
+        for table_name, columns in compat_columns.items():
+            for column_name, ddl in columns.items():
+                result = await conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM information_schema.COLUMNS
+                        WHERE TABLE_SCHEMA = DATABASE()
+                          AND TABLE_NAME = :table_name
+                          AND COLUMN_NAME = :column_name
+                        """
+                    ),
+                    {
+                        "table_name": table_name,
+                        "column_name": column_name,
+                    },
+                )
+                exists = int(result.scalar() or 0) > 0
+                if not exists:
+                    logger.warning("Auto-migrating missing column: %s.%s", table_name, column_name)
+                    await conn.execute(text(ddl))
         return
 
     if settings.DATABASE_URL.startswith("sqlite"):
-        result = await conn.execute(text("PRAGMA table_info('pipeline_character_profiles')"))
-        existing_columns = {str(row[1]) for row in result.fetchall()}
-        if "face_closeup_image_url" not in existing_columns:
-            logger.warning("Auto-migrating missing column: pipeline_character_profiles.face_closeup_image_url")
-            await conn.execute(text("ALTER TABLE pipeline_character_profiles ADD COLUMN face_closeup_image_url VARCHAR(500)"))
-        if "face_closeup_image_path" not in existing_columns:
-            logger.warning("Auto-migrating missing column: pipeline_character_profiles.face_closeup_image_path")
-            await conn.execute(text("ALTER TABLE pipeline_character_profiles ADD COLUMN face_closeup_image_path VARCHAR(500)"))
-        if "voice_description" not in existing_columns:
-            logger.warning("Auto-migrating missing column: pipeline_character_profiles.voice_description")
-            await conn.execute(text("ALTER TABLE pipeline_character_profiles ADD COLUMN voice_description TEXT"))
+        sqlite_compat_columns = {
+            "pipeline_projects": {
+                "deleted_at": "ALTER TABLE pipeline_projects ADD COLUMN deleted_at DATETIME",
+            },
+            "pipeline_character_profiles": {
+                "face_closeup_image_url": "ALTER TABLE pipeline_character_profiles ADD COLUMN face_closeup_image_url VARCHAR(500)",
+                "face_closeup_image_path": "ALTER TABLE pipeline_character_profiles ADD COLUMN face_closeup_image_path VARCHAR(500)",
+                "voice_description": "ALTER TABLE pipeline_character_profiles ADD COLUMN voice_description TEXT",
+                "deleted_at": "ALTER TABLE pipeline_character_profiles ADD COLUMN deleted_at DATETIME",
+            },
+            "pipeline_scene_profiles": {
+                "deleted_at": "ALTER TABLE pipeline_scene_profiles ADD COLUMN deleted_at DATETIME",
+            },
+        }
+        for table_name, columns in sqlite_compat_columns.items():
+            result = await conn.execute(text(f"PRAGMA table_info('{table_name}')"))
+            existing_columns = {str(row[1]) for row in result.fetchall()}
+            for column_name, ddl in columns.items():
+                if column_name not in existing_columns:
+                    logger.warning("Auto-migrating missing column: %s.%s", table_name, column_name)
+                    await conn.execute(text(ddl))
