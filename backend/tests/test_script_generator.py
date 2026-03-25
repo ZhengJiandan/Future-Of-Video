@@ -284,3 +284,47 @@ async def test_select_profiles_returns_empty_when_no_profile_scores_match(
     )
 
     assert result == []
+
+
+def test_estimate_desired_character_count_is_not_limited_to_three(generator: ScriptGenerator) -> None:
+    intent = {
+        "character_queries": [
+            {"name_hint": "角色1"},
+            {"name_hint": "角色2"},
+            {"name_hint": "角色3"},
+            {"name_hint": "角色4"},
+            {"name_hint": "角色5"},
+        ]
+    }
+
+    assert generator._estimate_desired_character_count(intent) == 5
+
+
+@pytest.mark.asyncio
+async def test_select_character_profiles_uses_dynamic_desired_count(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, int] = {}
+
+    async def fake_select_profiles(**kwargs):
+        captured["desired_count"] = kwargs["desired_count"]
+        return []
+
+    monkeypatch.setattr(generator, "_select_profiles", fake_select_profiles)
+
+    await generator._select_character_profiles(
+        user_input="五人群像戏",
+        intent={
+            "character_queries": [
+                {"name_hint": "角色1"},
+                {"name_hint": "角色2"},
+                {"name_hint": "角色3"},
+                {"name_hint": "角色4"},
+                {"name_hint": "角色5"},
+            ]
+        },
+        profiles=[],
+    )
+
+    assert captured["desired_count"] == 5

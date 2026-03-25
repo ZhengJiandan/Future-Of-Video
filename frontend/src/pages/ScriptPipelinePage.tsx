@@ -40,7 +40,7 @@ import {
   TeamOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   CharacterProfile,
   GeneratedScriptResponse,
@@ -435,12 +435,26 @@ const isGatewayTimeoutError = (error: unknown): boolean => {
   return responseError.response?.status === 504
 }
 
+const readRequestedProjectId = (state: unknown): string | null => {
+  if (!state || typeof state !== 'object') {
+    return null
+  }
+  const projectId = (state as { projectId?: unknown }).projectId
+  if (typeof projectId !== 'string') {
+    return null
+  }
+  const normalized = projectId.trim()
+  return normalized || null
+}
+
 export const ScriptPipelinePage: React.FC = () => {
   const navigate = useNavigate()
+  const location = useLocation()
   const flowTrackRef = useRef<HTMLDivElement | null>(null)
   const stepButtonRefs = useRef<Array<HTMLButtonElement | null>>([])
   const suppressProjectSaveRef = useRef(true)
   const creatingProjectRef = useRef(false)
+  const pendingRequestedProjectIdRef = useRef<string | null>(readRequestedProjectId(location.state))
   const selectedProjectId = useProjectStore((state) => state.currentProjectId)
   const projectStoreHydrated = useProjectStore((state) => state.hydrated)
   const setCurrentProjectId = useProjectStore((state) => state.setCurrentProjectId)
@@ -768,6 +782,10 @@ export const ScriptPipelinePage: React.FC = () => {
   }, [])
 
   useEffect(() => {
+    pendingRequestedProjectIdRef.current = readRequestedProjectId(location.state)
+  }, [location.key, location.state])
+
+  useEffect(() => {
     if (!projectStoreHydrated) {
       return
     }
@@ -778,16 +796,30 @@ export const ScriptPipelinePage: React.FC = () => {
       setProjectHydrating(true)
       try {
         let item: Record<string, unknown> | null = null
-        if (selectedProjectId) {
+        const requestedProjectId = pendingRequestedProjectIdRef.current || selectedProjectId
+        const hasExplicitRequestedProject = Boolean(pendingRequestedProjectIdRef.current)
+
+        if (requestedProjectId) {
           try {
-            const response = await scriptPipelineApi.getProject(selectedProjectId)
+            const response = await scriptPipelineApi.getProject(requestedProjectId)
             item = response.data.item as Record<string, unknown> | null
+            if (item?.id) {
+              setCurrentProjectId(String(item.id))
+            }
           } catch {
-            clearCurrentProjectId()
+            if (hasExplicitRequestedProject || requestedProjectId === selectedProjectId) {
+              clearCurrentProjectId()
+            }
           }
         }
 
         if (!item) {
+          if (hasExplicitRequestedProject) {
+            if (active) {
+              resetLocalState()
+            }
+            return
+          }
           const response = await scriptPipelineApi.getCurrentProject()
           item = response.data.item as Record<string, unknown> | null
           if (item?.id) {
@@ -807,6 +839,7 @@ export const ScriptPipelinePage: React.FC = () => {
         message.error('恢复当前项目失败')
       } finally {
         if (active) {
+          pendingRequestedProjectIdRef.current = null
           setProjectHydrating(false)
           suppressProjectSaveRef.current = false
         }

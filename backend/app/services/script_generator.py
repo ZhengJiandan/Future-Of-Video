@@ -397,12 +397,13 @@ class ScriptGenerator:
         intent: Dict[str, Any],
         profiles: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
+        desired_count = self._estimate_desired_character_count(intent)
         return await self._select_profiles(
             profile_type="character",
             user_input=user_input,
             intent_queries=intent.get("character_queries") or [],
             profiles=profiles,
-            desired_count=3,
+            desired_count=desired_count,
         )
 
     async def _select_scene_profiles(
@@ -424,7 +425,7 @@ class ScriptGenerator:
         queries = [query for query in (intent.get("character_queries") or []) if self._query_has_meaning(query)]
         if not queries:
             return 1
-        return max(1, min(len(queries), 3))
+        return max(1, len(queries))
 
     def _has_meaningful_character_intent(self, intent: Dict[str, Any]) -> bool:
         return any(self._query_has_meaning(query) for query in (intent.get("character_queries") or []))
@@ -546,7 +547,8 @@ class ScriptGenerator:
             scored.append((score, profile))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        shortlisted = [profile for score, profile in scored if score > 0][:6]
+        shortlist_limit = max(6, desired_count * 2)
+        shortlisted = [profile for score, profile in scored if score > 0][:shortlist_limit]
         if not shortlisted:
             return []
 
