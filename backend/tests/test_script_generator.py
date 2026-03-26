@@ -25,6 +25,14 @@ class _BrokenDoubaoLLM:
         raise RuntimeError("boom")
 
 
+class _StaticResponse:
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    def get_content(self) -> str:
+        return self._content
+
+
 @pytest.fixture
 def generator(monkeypatch: pytest.MonkeyPatch) -> ScriptGenerator:
     monkeypatch.setattr(script_generator_module, "DoubaoLLM", _DummyDoubaoLLM)
@@ -328,3 +336,36 @@ async def test_select_character_profiles_uses_dynamic_desired_count(
     )
 
     assert captured["desired_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_call_llm_for_script_retries_when_first_response_is_invalid_json(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            _StaticResponse('{"title":"坏掉的JSON"'),
+            _StaticResponse('{"title":"有效结果","synopsis":"","tone":"","themes":[],"characters":[],"scenes":[]}'),
+        ]
+    )
+    labels: list[str] = []
+
+    async def fake_chat_completion(messages, **kwargs):
+        labels.append(kwargs.get("request_label", ""))
+        return next(responses)
+
+    monkeypatch.setattr(generator.llm, "chat_completion", fake_chat_completion, raising=False)
+
+    result = await generator._call_llm_for_script(
+        user_input="测试",
+        style="",
+        target_total_duration=None,
+        reference_image_count=0,
+        intent={},
+        matched_characters=[],
+        matched_scenes=[],
+    )
+
+    assert result["title"] == "有效结果"
+    assert labels == ["generate_full_script", "generate_full_script_repair_json"]

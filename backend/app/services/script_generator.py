@@ -661,6 +661,9 @@ class ScriptGenerator:
 【输出要求】
 1. 输出必须是合法 JSON
 2. 绝不能输出 markdown 代码块、注释、解释文字
+2.1 只能输出一个完整的 JSON 对象，首字符必须是 {，末字符必须是 }
+2.2 宁可压缩措辞、减少冗余描述，也不能输出被截断的半截 JSON
+2.3 所有字符串中的双引号必须正确转义，禁止输出未闭合字符串
 3. 每个场景必须输出 scene_profile_id 和 scene_profile_version
 4. 每个镜头必须输出 scene_profile_id / scene_profile_version / character_profile_ids / character_profile_versions / prompt_focus
 5. characters 中每个角色必须输出 character_profile_id 和 profile_version
@@ -769,13 +772,14 @@ class ScriptGenerator:
             "target_total_duration": float(target_total_duration) if target_total_duration is not None else None,
             "correction_note": correction_note,
         }
+        request_messages = [
+            DoubaoMessage(role="system", content=system_prompt),
+            DoubaoMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False)),
+        ]
         response = await self.llm.chat_completion(
-            [
-                DoubaoMessage(role="system", content=system_prompt),
-                DoubaoMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False)),
-            ],
-            temperature=0.35,
-            max_tokens=4200,
+            request_messages,
+            temperature=0.2,
+            max_tokens=10000,
             timeout=httpx.Timeout(
                 connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
                 read=float(getattr(settings, "DOUBAO_SCRIPT_READ_TIMEOUT", 360.0)),
@@ -788,7 +792,50 @@ class ScriptGenerator:
         content = response.get_content().strip()
         if not content:
             raise ValueError("豆包返回内容为空")
-        return self._parse_llm_json(content)
+        try:
+            return self._parse_llm_json(content)
+        except ValueError as exc:
+            logger.warning("generate_full_script returned invalid JSON, retrying once: %s", exc)
+            repair_messages = [
+                DoubaoMessage(
+                    role="system",
+                    content=(
+                        "你是 JSON 修正器。请基于同一任务重新输出一个完整、合法、可解析的 JSON 对象。"
+                        "禁止输出解释、禁止 markdown、禁止代码块。"
+                        "输出必须只包含一个 JSON 对象，首字符是 {，末字符是 }。"
+                    ),
+                ),
+                DoubaoMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False)),
+                DoubaoMessage(
+                    role="assistant",
+                    content=content,
+                ),
+                DoubaoMessage(
+                    role="user",
+                    content=(
+                        "你上一次返回的内容不是合法 JSON。"
+                        "请保留原任务语义，重新输出完整 JSON。"
+                        "如果内容太长，请缩短描述文本，但必须保留字段结构完整。"
+                    ),
+                ),
+            ]
+            repair_response = await self.llm.chat_completion(
+                repair_messages,
+                temperature=0.05,
+                max_tokens=5600,
+                timeout=httpx.Timeout(
+                    connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
+                    read=float(getattr(settings, "DOUBAO_SCRIPT_READ_TIMEOUT", 360.0)),
+                    write=float(getattr(settings, "DOUBAO_WRITE_TIMEOUT", 60.0)),
+                    pool=float(getattr(settings, "DOUBAO_POOL_TIMEOUT", 60.0)),
+                ),
+                max_retries=max(1, int(getattr(settings, "DOUBAO_MAX_RETRIES", 2))),
+                request_label="generate_full_script_repair_json",
+            )
+            repaired_content = repair_response.get_content().strip()
+            if not repaired_content:
+                raise ValueError("豆包 JSON 修正返回内容为空") from exc
+            return self._parse_llm_json(repaired_content)
 
     async def _align_script_duration(
         self,

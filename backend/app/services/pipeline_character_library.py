@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +42,7 @@ class PipelineCharacterLibraryService:
         self.three_view_root.mkdir(parents=True, exist_ok=True)
         self.face_closeup_root.mkdir(parents=True, exist_ok=True)
         self.image_generator = PreferredImageGenerationClient()
+        self._background_three_view_tasks: set[asyncio.Task[Any]] = set()
 
     async def list_profiles(self, db: AsyncSession) -> List[Dict[str, Any]]:
         result = await db.execute(
@@ -691,51 +691,39 @@ class PipelineCharacterLibraryService:
         personality: str,
         prompt_hint: str,
     ) -> None:
-        worker = threading.Thread(
-            target=self._run_three_view_generation_task,
-            kwargs={
-                "profile_id": profile_id,
-                "expected_reference_image_url": expected_reference_image_url,
-                "expected_current_three_view_url": expected_current_three_view_url,
-                "name": name,
-                "role": role,
-                "description": description,
-                "appearance": appearance,
-                "personality": personality,
-                "prompt_hint": prompt_hint,
-            },
+        task = asyncio.create_task(
+            self._generate_and_persist_three_view(
+                profile_id=profile_id,
+                expected_reference_image_url=expected_reference_image_url,
+                expected_current_three_view_url=expected_current_three_view_url,
+                name=name,
+                role=role,
+                description=description,
+                appearance=appearance,
+                personality=personality,
+                prompt_hint=prompt_hint,
+            ),
             name=f"character-three-view-{profile_id[:8]}",
-            daemon=True,
         )
-        worker.start()
+        self._background_three_view_tasks.add(task)
+        task.add_done_callback(
+            lambda completed_task, task_profile_id=profile_id: self._finalize_three_view_generation_task(
+                completed_task,
+                profile_id=task_profile_id,
+            )
+        )
 
-    def _run_three_view_generation_task(
+    def _finalize_three_view_generation_task(
         self,
+        task: asyncio.Task[Any],
         *,
         profile_id: str,
-        expected_reference_image_url: str,
-        expected_current_three_view_url: str,
-        name: str,
-        role: str,
-        description: str,
-        appearance: str,
-        personality: str,
-        prompt_hint: str,
     ) -> None:
+        self._background_three_view_tasks.discard(task)
         try:
-            asyncio.run(
-                self._generate_and_persist_three_view(
-                    profile_id=profile_id,
-                    expected_reference_image_url=expected_reference_image_url,
-                    expected_current_three_view_url=expected_current_three_view_url,
-                    name=name,
-                    role=role,
-                    description=description,
-                    appearance=appearance,
-                    personality=personality,
-                    prompt_hint=prompt_hint,
-                )
-            )
+            task.result()
+        except asyncio.CancelledError:
+            logger.info("Background three-view task cancelled: profile_id=%s", profile_id)
         except Exception:
             logger.exception("Background three-view task crashed: profile_id=%s", profile_id)
 
