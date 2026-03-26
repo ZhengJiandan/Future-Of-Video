@@ -1,4 +1,3 @@
-import json
 import logging
 
 import pytest
@@ -24,14 +23,6 @@ class _MissingKeyDoubaoLLM:
 class _BrokenDoubaoLLM:
     async def chat_completion(self, *args, **kwargs):
         raise RuntimeError("boom")
-
-
-class _StaticResponse:
-    def __init__(self, content: str) -> None:
-        self._content = content
-
-    def get_content(self) -> str:
-        return self._content
 
 
 @pytest.fixture
@@ -337,79 +328,3 @@ async def test_select_character_profiles_uses_dynamic_desired_count(
     )
 
     assert captured["desired_count"] == 5
-
-
-def test_extract_structured_character_queries_handles_roster_and_aliases(
-    generator: ScriptGenerator,
-) -> None:
-    user_input = """
-主角：蜂医（本名：林逸风）
-
-角色校园身份表
-蜂医（主角）    生物课代表    校医室志愿者
-红狼    体育特长生    田径队/篮球队
-威龙    计算机系    电竞社
-深蓝    班长    学生会安保部
-
-发现红狼：
-红狼（凯·席尔瓦）穿着校服，正在和体育生比100米
-
-发现深蓝：
-深蓝（阿列克谢）坐在旁边，本能举起托盘
-
-发现威龙：
-威龙（王宇昊）站在摊位前发红包
-"""
-
-    result = generator._extract_structured_character_queries(user_input)
-    lookup = {item["name_hint"]: item for item in result}
-
-    assert set(lookup) >= {"蜂医", "红狼", "威龙", "深蓝"}
-    assert lookup["蜂医"]["role"] == "主角"
-    assert "林逸风" in lookup["蜂医"]["keywords"]
-    assert "凯·席尔瓦" in lookup["红狼"]["keywords"]
-    assert "阿列克谢" in lookup["深蓝"]["keywords"]
-    assert "王宇昊" in lookup["威龙"]["keywords"]
-
-
-@pytest.mark.asyncio
-async def test_extract_generation_intent_merges_structured_character_queries(
-    generator: ScriptGenerator,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fake_chat_completion(*args, **kwargs):
-        return _StaticResponse(
-            json.dumps(
-                {
-                    "character_queries": [
-                        {"name_hint": "蜂医", "category": "", "role": "主角", "archetype": "", "keywords": ["林逸风"]},
-                        {"name_hint": "红狼", "category": "", "role": "", "archetype": "", "keywords": []},
-                    ],
-                    "scene_queries": [],
-                    "style_keywords": ["校园"],
-                    "tone_keywords": ["群像"],
-                    "duration_preference": 60,
-                },
-                ensure_ascii=False,
-            )
-        )
-
-    monkeypatch.setattr(generator.llm, "chat_completion", fake_chat_completion, raising=False)
-
-    result = await generator._extract_generation_intent(
-        user_input="""
-主角：蜂医（本名：林逸风）
-角色校园身份表
-蜂医（主角）    生物课代表
-红狼    体育特长生
-威龙    计算机系
-深蓝    班长
-发现深蓝：
-深蓝（阿列克谢）坐在旁边
-""",
-        style="校园群像",
-        target_total_duration=60,
-    )
-
-    names = [item.get("name_hint") for item in result["character_queries"]]
-    assert names[:4] == ["蜂医", "红狼", "威龙", "深蓝"]

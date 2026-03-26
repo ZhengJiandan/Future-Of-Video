@@ -40,53 +40,6 @@ SHOT_LATE_ENTRY_KEYWORDS = (
     "出现在画面",
 )
 
-CHARACTER_QUERY_ROLE_HINTS = {
-    "主角": "主角",
-    "男主": "主角",
-    "女主": "主角",
-    "主角团": "主角",
-}
-
-CHARACTER_NAME_STOPWORDS = {
-    "主角",
-    "角色",
-    "干员",
-    "校园身份",
-    "社团",
-    "特长",
-    "维度",
-    "设定思路",
-    "核心事件",
-    "开篇场景",
-    "时间",
-    "课间",
-    "午餐时间",
-    "下午",
-    "放学",
-    "次日",
-    "考场",
-    "食堂",
-    "门外",
-    "广播站",
-    "化学实验室",
-    "计算机教室",
-    "无人机社团",
-    "射箭社团活动",
-    "第一次集结",
-    "章节结尾笑点",
-    "同桌",
-    "小胖",
-    "裁判",
-    "老师",
-    "社长",
-    "校长",
-    "保安",
-    "学生",
-    "全场",
-    "所有人",
-    "黑影",
-}
-
 
 @dataclass
 class CharacterInfo:
@@ -378,7 +331,6 @@ class ScriptGenerator:
         style: str,
         target_total_duration: Optional[float],
     ) -> Dict[str, Any]:
-        structured_character_queries = self._extract_structured_character_queries(user_input)
         system_prompt = """你是视频创作需求分析器。请从用户输入中抽取生成意图，不要创作剧本。
 
 输出必须是合法 JSON：
@@ -424,18 +376,12 @@ class ScriptGenerator:
             )
             payload = self._parse_llm_json(response.get_content().strip())
             llm_character_queries = payload.get("character_queries") or []
-            merged_character_queries = self._merge_character_queries(
-                structured_queries=structured_character_queries,
-                llm_queries=llm_character_queries,
-            )
             logger.info(
-                "角色识别结果 | structured=%s | llm=%s | merged=%s",
-                json.dumps(structured_character_queries, ensure_ascii=False),
+                "角色识别结果 | llm=%s",
                 json.dumps(llm_character_queries, ensure_ascii=False),
-                json.dumps(merged_character_queries, ensure_ascii=False),
             )
             return {
-                "character_queries": merged_character_queries,
+                "character_queries": llm_character_queries,
                 "scene_queries": payload.get("scene_queries") or [],
                 "style_keywords": payload.get("style_keywords") or self._tokenize(style),
                 "tone_keywords": payload.get("tone_keywords") or [],
@@ -449,182 +395,6 @@ class ScriptGenerator:
         except Exception as exc:
             logger.error("生成意图提取失败，终止自动角色分析: %s", exc, exc_info=True)
             raise RuntimeError("角色分析调用豆包失败，请检查临时 Key 或服务配置后重试。") from exc
-
-    def _extract_structured_character_queries(self, user_input: str) -> List[Dict[str, Any]]:
-        queries_by_name: Dict[str, Dict[str, Any]] = {}
-
-        def upsert_query(
-            name: str,
-            *,
-            role: str = "",
-            keywords: Optional[List[str]] = None,
-        ) -> None:
-            normalized_name = self._normalize_name(name)
-            if not normalized_name or not self._looks_like_character_name(name):
-                return
-
-            entry = queries_by_name.get(normalized_name)
-            if not entry:
-                entry = {
-                    "name_hint": str(name).strip(),
-                    "category": "",
-                    "role": "",
-                    "archetype": "",
-                    "keywords": [],
-                }
-                queries_by_name[normalized_name] = entry
-
-            if role and not entry["role"]:
-                entry["role"] = role
-
-            existing_keywords = {self._normalize_name(item) for item in (entry.get("keywords") or [])}
-            for keyword in keywords or []:
-                normalized_keyword = self._normalize_name(keyword)
-                if (
-                    normalized_keyword
-                    and normalized_keyword not in existing_keywords
-                    and normalized_keyword != normalized_name
-                ):
-                    entry["keywords"].append(str(keyword).strip())
-                    existing_keywords.add(normalized_keyword)
-
-        for raw_line in str(user_input or "").splitlines():
-            line = str(raw_line or "").strip()
-            if not line:
-                continue
-
-            columns = [item.strip() for item in re.split(r"\t+|\s{2,}", line) if item.strip()]
-            if len(columns) >= 2:
-                parsed = self._parse_character_name_and_note(columns[0])
-                if parsed:
-                    name, role, aliases = parsed
-                    upsert_query(name, role=role, keywords=aliases)
-
-        for pattern in [
-            r"(?:主角|角色|干员)[：:]\s*([A-Za-z\u4e00-\u9fff·]{1,16})(?:[（(]([^()（）\n]{1,32})[）)])?",
-            r"发现([A-Za-z\u4e00-\u9fff·]{1,16})(?:[（(]([^()（）\n]{1,32})[）)])?[:：]",
-            r"\b确认[：:\s]*([A-Za-z\u4e00-\u9fff·]{1,16})(?:[（(]([^()（）\n]{1,32})[）)])?",
-        ]:
-            for match in re.finditer(pattern, str(user_input or "")):
-                name = str(match.group(1) or "").strip()
-                note = str(match.group(2) or "").strip()
-                role, aliases = self._parse_character_note(note)
-                upsert_query(name, role=role, keywords=aliases)
-
-        for match in re.finditer(r"([A-Za-z\u4e00-\u9fff·]{1,16})[（(]([^()（）\n]{1,32})[）)]", str(user_input or "")):
-            name = str(match.group(1) or "").strip()
-            note = str(match.group(2) or "").strip()
-            if not self._looks_like_character_name(name):
-                continue
-            role, aliases = self._parse_character_note(note)
-            upsert_query(name, role=role, keywords=aliases)
-
-        return [query for query in queries_by_name.values() if self._query_has_meaning(query)]
-
-    def _merge_character_queries(
-        self,
-        *,
-        structured_queries: List[Dict[str, Any]],
-        llm_queries: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        merged: Dict[str, Dict[str, Any]] = {}
-
-        def merge_query(query: Dict[str, Any]) -> None:
-            if not isinstance(query, dict) or not self._query_has_meaning(query):
-                return
-
-            name_hint = str(query.get("name_hint") or "").strip()
-            key = self._normalize_name(name_hint)
-            if not key:
-                keywords = [str(item).strip() for item in (query.get("keywords") or []) if str(item).strip()]
-                key = self._normalize_name(keywords[0]) if keywords else ""
-            if not key:
-                key = f"query_{len(merged)}"
-
-            existing = merged.get(key)
-            if not existing:
-                merged[key] = {
-                    "name_hint": name_hint,
-                    "category": str(query.get("category") or "").strip(),
-                    "role": str(query.get("role") or "").strip(),
-                    "archetype": str(query.get("archetype") or "").strip(),
-                    "keywords": [str(item).strip() for item in (query.get("keywords") or []) if str(item).strip()],
-                }
-                return
-
-            if not existing["name_hint"] and name_hint:
-                existing["name_hint"] = name_hint
-            for field in ["category", "role", "archetype"]:
-                if not existing[field]:
-                    existing[field] = str(query.get(field) or "").strip()
-
-            existing_keywords = {self._normalize_name(item) for item in existing["keywords"]}
-            for keyword in [str(item).strip() for item in (query.get("keywords") or []) if str(item).strip()]:
-                normalized_keyword = self._normalize_name(keyword)
-                if normalized_keyword and normalized_keyword not in existing_keywords:
-                    existing["keywords"].append(keyword)
-                    existing_keywords.add(normalized_keyword)
-
-        for query in structured_queries:
-            merge_query(query)
-        for query in llm_queries:
-            merge_query(query)
-
-        return [query for query in merged.values() if self._query_has_meaning(query)]
-
-    def _parse_character_name_and_note(self, raw_value: str) -> Optional[tuple[str, str, List[str]]]:
-        normalized = str(raw_value or "").strip().strip("•*-")
-        if not normalized:
-            return None
-
-        match = re.match(r"^([A-Za-z\u4e00-\u9fff·]{1,16})(?:[（(]([^()（）\n]{1,32})[）)])?$", normalized)
-        if not match:
-            return None
-
-        name = str(match.group(1) or "").strip()
-        if not self._looks_like_character_name(name):
-            return None
-
-        role, aliases = self._parse_character_note(str(match.group(2) or "").strip())
-        return name, role, aliases
-
-    def _parse_character_note(self, note: str) -> tuple[str, List[str]]:
-        normalized_note = str(note or "").strip()
-        if not normalized_note:
-            return "", []
-
-        role = ""
-        aliases: List[str] = []
-        for item in re.split(r"[、,，/|]", normalized_note):
-            part = str(item or "").strip()
-            if not part:
-                continue
-
-            if part in CHARACTER_QUERY_ROLE_HINTS:
-                role = role or CHARACTER_QUERY_ROLE_HINTS[part]
-                continue
-
-            if part.startswith("本名"):
-                part = re.sub(r"^本名[：:]\s*", "", part).strip()
-
-            if self._looks_like_character_name(part):
-                aliases.append(part)
-
-        return role, aliases
-
-    def _looks_like_character_name(self, value: str) -> bool:
-        normalized = str(value or "").strip()
-        if not normalized:
-            return False
-        if len(normalized) > 16:
-            return False
-        if normalized in CHARACTER_NAME_STOPWORDS:
-            return False
-        if re.search(r"[0-9]", normalized):
-            return False
-        if not re.fullmatch(r"[A-Za-z\u4e00-\u9fff·]+", normalized):
-            return False
-        return True
 
     async def _select_character_profiles(
         self,
