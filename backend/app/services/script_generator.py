@@ -290,17 +290,47 @@ class ScriptGenerator:
             matched_scenes=matched_scenes,
         )
 
-        full_script = self._parse_script_data(
-            data=script_data,
-            original_input=user_input,
-            matched_characters=active_characters,
-            matched_scenes=matched_scenes,
-            intent=intent,
-            library_characters=matched_characters,
-            temporary_characters=temporary_characters,
-            character_resolution=character_resolution,
-        )
-        self._validate_full_script(full_script)
+        try:
+            full_script = self._parse_script_data(
+                data=script_data,
+                original_input=user_input,
+                matched_characters=active_characters,
+                matched_scenes=matched_scenes,
+                intent=intent,
+                library_characters=matched_characters,
+                temporary_characters=temporary_characters,
+                character_resolution=character_resolution,
+            )
+            self._validate_full_script(full_script)
+        except ValueError as exc:
+            if not self._should_retry_for_script_structure_error(exc):
+                raise
+            logger.warning("剧本结构不完整，准备重试一次: %s", exc)
+            retry_data = await self._call_llm_for_script(
+                user_input=user_input,
+                style=style,
+                target_total_duration=target_total_duration,
+                reference_image_count=len(reference_images or []),
+                intent=intent,
+                matched_characters=active_characters,
+                matched_scenes=matched_scenes,
+                correction_note=(
+                    f"上一次生成结果存在结构问题：{exc}。"
+                    " 请重新输出完整剧本，必须包含非空标题、至少 1 个场景，且每个场景至少 1 个镜头。"
+                    " scenes 不能为空，scene.shots 不能为空。"
+                ),
+            )
+            full_script = self._parse_script_data(
+                data=retry_data,
+                original_input=user_input,
+                matched_characters=active_characters,
+                matched_scenes=matched_scenes,
+                intent=intent,
+                library_characters=matched_characters,
+                temporary_characters=temporary_characters,
+                character_resolution=character_resolution,
+            )
+            self._validate_full_script(full_script)
         full_script = await self._align_script_duration(
             full_script,
             user_input=user_input,
@@ -673,6 +703,9 @@ class ScriptGenerator:
 9. 单个镜头默认只写首帧已经在画面中的角色及其动作、对白、互动，不要把“新角色中途走入/闯入/突然出现”写在同一镜头里
 10. 如果剧情需要新角色加入，必须从一个新镜头开始，并在该新镜头的 character_profile_ids / characters_in_shot 中明确包含该角色
 11. 尽量避免在同一镜头描述角色先不在场、后入场；角色登场要通过切新镜头解决，而不是在镜头中途补进来
+12. scenes 数组至少包含 1 个场景，禁止输出空数组
+13. 每个 scene.shots 数组至少包含 1 个镜头，禁止输出空数组
+14. title 必须是非空字符串，不能留空
 
 【JSON 结构】
 {
@@ -792,6 +825,7 @@ class ScriptGenerator:
         content = response.get_content().strip()
         if not content:
             raise ValueError("豆包返回内容为空")
+        logger.info("剧本生成模型原始返回 | repair=false | content=%s", content)
         try:
             return self._parse_llm_json(content)
         except ValueError as exc:
@@ -835,7 +869,17 @@ class ScriptGenerator:
             repaired_content = repair_response.get_content().strip()
             if not repaired_content:
                 raise ValueError("豆包 JSON 修正返回内容为空") from exc
+            logger.info("剧本生成模型原始返回 | repair=true | content=%s", repaired_content)
             return self._parse_llm_json(repaired_content)
+
+    def _should_retry_for_script_structure_error(self, exc: Exception) -> bool:
+        if not isinstance(exc, ValueError):
+            return False
+        return str(exc) in {
+            "生成结果缺少标题",
+            "生成结果缺少场景",
+            "生成结果缺少分镜",
+        }
 
     async def _align_script_duration(
         self,
