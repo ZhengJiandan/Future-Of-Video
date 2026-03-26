@@ -424,11 +424,18 @@ class ScriptGenerator:
             )
             payload = self._parse_llm_json(response.get_content().strip())
             llm_character_queries = payload.get("character_queries") or []
+            merged_character_queries = self._merge_character_queries(
+                structured_queries=structured_character_queries,
+                llm_queries=llm_character_queries,
+            )
+            logger.info(
+                "角色识别结果 | structured=%s | llm=%s | merged=%s",
+                json.dumps(structured_character_queries, ensure_ascii=False),
+                json.dumps(llm_character_queries, ensure_ascii=False),
+                json.dumps(merged_character_queries, ensure_ascii=False),
+            )
             return {
-                "character_queries": self._merge_character_queries(
-                    structured_queries=structured_character_queries,
-                    llm_queries=llm_character_queries,
-                ),
+                "character_queries": merged_character_queries,
                 "scene_queries": payload.get("scene_queries") or [],
                 "style_keywords": payload.get("style_keywords") or self._tokenize(style),
                 "tone_keywords": payload.get("tone_keywords") or [],
