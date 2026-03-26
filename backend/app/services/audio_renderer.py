@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import re
 import shutil
 import tempfile
@@ -29,6 +30,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -427,10 +430,61 @@ class DoubaoTTSProvider(MockSilentAudioProvider):
         self.cluster = cluster
         self.api_url = api_url
         self.default_voice_type = default_voice_type
+        self.debug_logging = bool(getattr(settings, "MODEL_DEBUG_LOGGING", True))
+        self.debug_max_chars = int(getattr(settings, "MODEL_DEBUG_MAX_CHARS", 20000))
 
     @property
     def name(self) -> str:
         return "doubao-tts"
+
+    def _truncate_for_log(self, value: str) -> str:
+        if len(value) <= self.debug_max_chars:
+            return value
+        return f"{value[:self.debug_max_chars]}\n...<truncated {len(value) - self.debug_max_chars} chars>"
+
+    def _sanitize_for_log(self, value: Any, *, parent_key: str = "") -> Any:
+        if isinstance(value, dict):
+            sanitized: Dict[str, Any] = {}
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if lowered in {"authorization", "token"}:
+                    sanitized[key] = "***"
+                    continue
+                if lowered == "data" and isinstance(item, str):
+                    sanitized[key] = f"<base64 length={len(item)}>"
+                    continue
+                sanitized[key] = self._sanitize_for_log(item, parent_key=lowered)
+            return sanitized
+        if isinstance(value, list):
+            return [self._sanitize_for_log(item, parent_key=parent_key) for item in value]
+        if isinstance(value, str):
+            return self._truncate_for_log(value)
+        return value
+
+    def _json_for_log(self, payload: Any) -> str:
+        try:
+            raw = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, indent=2)
+        except Exception:
+            raw = str(payload)
+        return self._truncate_for_log(raw)
+
+    def _log_request(self, *, payload: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "Doubao TTS request | url=%s\n%s",
+            self.api_url,
+            self._json_for_log(payload),
+        )
+
+    def _log_response(self, *, payload: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "Doubao TTS response | url=%s\n%s",
+            self.api_url,
+            self._json_for_log(payload),
+        )
 
     async def render_segment_layer(
         self,
@@ -531,10 +585,12 @@ class DoubaoTTSProvider(MockSilentAudioProvider):
             "Content-Type": "application/json",
         }
         timeout = httpx.Timeout(connect=20.0, read=120.0, write=60.0, pool=60.0)
+        self._log_request(payload=payload)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(self.api_url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
+        self._log_response(payload=data)
 
         audio_b64 = str(data.get("data") or "").strip()
         if not audio_b64:

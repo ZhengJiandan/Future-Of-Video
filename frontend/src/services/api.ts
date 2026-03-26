@@ -934,6 +934,8 @@ export const scriptPipelineApi = {
     character_profiles?: CharacterProfile[]
     scene_profiles?: SceneProfile[]
     reference_images?: ReferenceImageAsset[]
+    generation_intent?: Record<string, unknown>
+    character_resolution?: Record<string, unknown>
   }) => apiClient.post<GeneratedScriptResponse>('/pipeline/generate-script', data),
 
   prepareCharacters: (data: {

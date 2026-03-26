@@ -449,3 +449,79 @@ async def test_generate_full_script_retries_when_first_result_has_no_shots(
     assert len(call_notes) == 2
     assert call_notes[0] == ""
     assert "生成结果缺少分镜" in call_notes[1]
+
+
+@pytest.mark.asyncio
+async def test_generate_full_script_reuses_confirmed_character_resolution(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    valid_script = FullScript(
+        title="有效剧本",
+        scenes=[
+            SceneInfo(
+                scene_number=1,
+                shots=[
+                    ShotInfo(
+                        shot_number=1,
+                        duration=3.0,
+                        description="镜头一",
+                    )
+                ],
+            )
+        ],
+    )
+
+    async def fail_prepare_character_resolution(**kwargs):
+        raise AssertionError("should not re-run prepare_character_resolution")
+
+    async def fake_select_scene_profiles(**kwargs):
+        captured["intent"] = kwargs["intent"]
+        return []
+
+    async def fake_call_llm_for_script(**kwargs):
+        captured["matched_characters"] = kwargs["matched_characters"]
+        return {"title": "有效剧本"}
+
+    def fake_parse_script_data(**kwargs):
+        captured["library_characters"] = kwargs["library_characters"]
+        captured["temporary_characters"] = kwargs["temporary_characters"]
+        captured["character_resolution"] = kwargs["character_resolution"]
+        return valid_script
+
+    async def passthrough_align(full_script, **kwargs):
+        return full_script
+
+    async def passthrough_repair(full_script, **kwargs):
+        return full_script
+
+    monkeypatch.setattr(generator, "prepare_character_resolution", fail_prepare_character_resolution)
+    monkeypatch.setattr(generator, "_select_scene_profiles", fake_select_scene_profiles)
+    monkeypatch.setattr(generator, "_call_llm_for_script", fake_call_llm_for_script)
+    monkeypatch.setattr(generator, "_parse_script_data", fake_parse_script_data)
+    monkeypatch.setattr(generator, "_align_script_duration", passthrough_align)
+    monkeypatch.setattr(generator, "_repair_shot_late_entry_risks", passthrough_repair)
+
+    result = await generator.generate_full_script(
+        user_input="测试生成剧本",
+        character_profiles=[
+            {"id": "library-1", "name": "正式角色", "profile_version": 1},
+            {"id": "temp-1", "name": "临时角色", "profile_version": 1},
+        ],
+        generation_intent={"character_queries": [{"name_hint": "正式角色"}]},
+        character_resolution={"status": "matched", "message": "已确认"},
+        library_character_profiles=[
+            {"id": "library-1", "name": "正式角色", "profile_version": 1},
+        ],
+        temporary_character_profiles=[
+            {"id": "temp-1", "name": "临时角色", "profile_version": 1},
+        ],
+    )
+
+    assert result is valid_script
+    assert captured["intent"] == {"character_queries": [{"name_hint": "正式角色"}]}
+    assert [item["id"] for item in captured["matched_characters"]] == ["library-1", "temp-1"]
+    assert [item["id"] for item in captured["library_characters"]] == ["library-1"]
+    assert [item["id"] for item in captured["temporary_characters"]] == ["temp-1"]
+    assert captured["character_resolution"] == {"status": "matched", "message": "已确认"}

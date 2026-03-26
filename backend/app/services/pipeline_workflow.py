@@ -257,12 +257,25 @@ class PipelineWorkflowService:
         selected_scene_ids: Optional[List[str]] = None,
         scene_profiles: Optional[List[Dict[str, Any]]] = None,
         reference_images: Optional[List[Dict[str, Any]]] = None,
+        generation_intent: Optional[Dict[str, Any]] = None,
+        character_resolution: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """生成完整剧本，并转换成可编辑文本。"""
         resolved_character_profiles = self._resolve_character_profiles(
             selected_character_ids=selected_character_ids or [],
             character_profiles=character_profiles or [],
         )
+        selected_character_id_set = {
+            str(profile_id).strip()
+            for profile_id in (selected_character_ids or [])
+            if str(profile_id).strip()
+        }
+        resolved_library_character_profiles = [
+            profile for profile in resolved_character_profiles if str(profile.get("id") or "").strip() in selected_character_id_set
+        ]
+        resolved_temporary_character_profiles = [
+            profile for profile in resolved_character_profiles if str(profile.get("id") or "").strip() not in selected_character_id_set
+        ]
         resolved_scene_profiles = self._resolve_scene_profiles(
             selected_scene_ids=selected_scene_ids or [],
             scene_profiles=scene_profiles or [],
@@ -274,6 +287,10 @@ class PipelineWorkflowService:
             character_profiles=resolved_character_profiles,
             scene_profiles=resolved_scene_profiles,
             reference_images=reference_images or [],
+            generation_intent=generation_intent,
+            character_resolution=character_resolution,
+            library_character_profiles=resolved_library_character_profiles,
+            temporary_character_profiles=resolved_temporary_character_profiles,
         )
         script_text = self.format_full_script_text(full_script)
         matched_character_profiles = full_script.active_character_profiles or full_script.matched_character_profiles or resolved_character_profiles

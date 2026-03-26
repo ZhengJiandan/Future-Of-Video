@@ -280,6 +280,8 @@ class GenerateScriptRequest(BaseModel):
     character_profiles: List[CharacterProfilePayload] = Field(default_factory=list, description="直接传入的角色档案")
     scene_profiles: List[SceneProfilePayload] = Field(default_factory=list, description="直接传入的场景档案")
     reference_images: List[ReferenceAssetPayload] = Field(default_factory=list, description="参考图列表")
+    generation_intent: Dict[str, Any] = Field(default_factory=dict, description="确认角色阶段已生成的角色意图")
+    character_resolution: Dict[str, Any] = Field(default_factory=dict, description="确认角色阶段已生成的角色确认结果")
 
 
 class PrepareCharactersRequest(BaseModel):
@@ -805,6 +807,8 @@ async def generate_script(
             selected_scene_ids=request.selected_scene_ids,
             scene_profiles=resolved_scene_profiles,
             reference_images=[reference.model_dump() for reference in request.reference_images],
+            generation_intent=request.generation_intent,
+            character_resolution=request.character_resolution,
         )
         response_payload = {
             "success": True,

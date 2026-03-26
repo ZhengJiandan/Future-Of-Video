@@ -259,20 +259,45 @@ class ScriptGenerator:
         character_profiles: Optional[List[Dict[str, Any]]] = None,
         scene_profiles: Optional[List[Dict[str, Any]]] = None,
         reference_images: Optional[List[Dict[str, Any]]] = None,
+        generation_intent: Optional[Dict[str, Any]] = None,
+        character_resolution: Optional[Dict[str, Any]] = None,
+        library_character_profiles: Optional[List[Dict[str, Any]]] = None,
+        temporary_character_profiles: Optional[List[Dict[str, Any]]] = None,
     ) -> FullScript:
         logger.info("开始生成约束型剧本: %s", user_input[:120])
 
         normalized_scenes = [self._normalize_scene_profile(item) for item in (scene_profiles or [])]
-        character_resolution_result = await self.prepare_character_resolution(
-            user_input=user_input,
-            style=style,
-            target_total_duration=target_total_duration,
-            character_profiles=character_profiles,
-        )
-        intent = character_resolution_result["generation_intent"]
-        matched_characters = character_resolution_result["library_character_profiles"]
-        temporary_characters = character_resolution_result["temporary_character_profiles"]
-        character_resolution = character_resolution_result["character_resolution"]
+        normalized_characters = [self._normalize_character_profile(item) for item in (character_profiles or [])]
+        normalized_library_characters = [
+            self._normalize_character_profile(item) for item in (library_character_profiles or [])
+        ]
+        normalized_temporary_characters = [
+            self._normalize_character_profile(item) for item in (temporary_character_profiles or [])
+        ]
+
+        if generation_intent:
+            intent = dict(generation_intent or {})
+            matched_characters = normalized_library_characters
+            temporary_characters = normalized_temporary_characters
+            character_resolution = dict(character_resolution or {})
+            if not matched_characters and not temporary_characters:
+                matched_characters = normalized_characters
+            logger.info(
+                "复用已确认角色结果，跳过角色识别模型: library=%s temporary=%s",
+                len(matched_characters),
+                len(temporary_characters),
+            )
+        else:
+            character_resolution_result = await self.prepare_character_resolution(
+                user_input=user_input,
+                style=style,
+                target_total_duration=target_total_duration,
+                character_profiles=character_profiles,
+            )
+            intent = character_resolution_result["generation_intent"]
+            matched_characters = character_resolution_result["library_character_profiles"]
+            temporary_characters = character_resolution_result["temporary_character_profiles"]
+            character_resolution = character_resolution_result["character_resolution"]
         matched_scenes = await self._select_scene_profiles(
             user_input=user_input,
             intent=intent,
@@ -809,17 +834,10 @@ class ScriptGenerator:
             DoubaoMessage(role="system", content=system_prompt),
             DoubaoMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False)),
         ]
-        logger.info(
-            "剧本生成模型入参 | repair=false | messages=%s",
-            json.dumps(
-                [{"role": message.role, "content": message.content} for message in request_messages],
-                ensure_ascii=False,
-            ),
-        )
         response = await self.llm.chat_completion(
             request_messages,
             temperature=0.2,
-            max_tokens=10000,
+            max_tokens=20000,
             timeout=httpx.Timeout(
                 connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
                 read=float(getattr(settings, "DOUBAO_SCRIPT_READ_TIMEOUT", 360.0)),
@@ -832,7 +850,6 @@ class ScriptGenerator:
         content = response.get_content().strip()
         if not content:
             raise ValueError("豆包返回内容为空")
-        logger.info("剧本生成模型原始返回 | repair=false | content=%s", content)
         try:
             return self._parse_llm_json(content)
         except ValueError as exc:
@@ -860,13 +877,6 @@ class ScriptGenerator:
                     ),
                 ),
             ]
-            logger.info(
-                "剧本生成模型入参 | repair=true | messages=%s",
-                json.dumps(
-                    [{"role": message.role, "content": message.content} for message in repair_messages],
-                    ensure_ascii=False,
-                ),
-            )
             repair_response = await self.llm.chat_completion(
                 repair_messages,
                 temperature=0.05,
@@ -883,7 +893,6 @@ class ScriptGenerator:
             repaired_content = repair_response.get_content().strip()
             if not repaired_content:
                 raise ValueError("豆包 JSON 修正返回内容为空") from exc
-            logger.info("剧本生成模型原始返回 | repair=true | content=%s", repaired_content)
             return self._parse_llm_json(repaired_content)
 
     def _should_retry_for_script_structure_error(self, exc: Exception) -> bool:

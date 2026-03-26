@@ -1082,6 +1082,8 @@ export const ScriptPipelinePage: React.FC = () => {
         selected_scene_ids: constraintSceneIds,
         character_profiles: temporaryCharacters,
         reference_images: referenceImages,
+        generation_intent: characterPrepareResult?.generation_intent,
+        character_resolution: characterPrepareResult?.character_resolution as Record<string, unknown> | undefined,
       })
     setGeneratedScript(response.data)
     setCharacterPrepareResult(null)

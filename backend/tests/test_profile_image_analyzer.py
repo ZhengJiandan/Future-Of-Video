@@ -58,7 +58,7 @@ async def test_analyze_with_image_uses_doubao_multimodal_payload(
     service = ProfileImageAnalyzerService()
     monkeypatch.setattr(service, "api_key", "doubao-key")
     monkeypatch.setattr(service, "base_url", "https://ark.cn-beijing.volces.com/api/v3")
-    monkeypatch.setattr(service, "model", "doubao-seed-2-0-lite-260215")
+    monkeypatch.setattr(service, "model", "doubao-seed-2-0-pro-260215")
 
     captured: dict[str, object] = {}
 
@@ -83,7 +83,7 @@ async def test_analyze_with_image_uses_doubao_multimodal_payload(
     )
 
     request_body = captured["request_body"]
-    assert request_body["model"] == "doubao-seed-2-0-lite-260215"
+    assert request_body["model"] == "doubao-seed-2-0-pro-260215"
     assert request_body["messages"][0]["role"] == "system"
     assert request_body["messages"][1]["content"][0]["type"] == "text"
     assert request_body["messages"][1]["content"][1]["type"] == "image_url"
