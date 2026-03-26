@@ -809,6 +809,13 @@ class ScriptGenerator:
             DoubaoMessage(role="system", content=system_prompt),
             DoubaoMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False)),
         ]
+        logger.info(
+            "剧本生成模型入参 | repair=false | messages=%s",
+            json.dumps(
+                [{"role": message.role, "content": message.content} for message in request_messages],
+                ensure_ascii=False,
+            ),
+        )
         response = await self.llm.chat_completion(
             request_messages,
             temperature=0.2,
@@ -853,6 +860,13 @@ class ScriptGenerator:
                     ),
                 ),
             ]
+            logger.info(
+                "剧本生成模型入参 | repair=true | messages=%s",
+                json.dumps(
+                    [{"role": message.role, "content": message.content} for message in repair_messages],
+                    ensure_ascii=False,
+                ),
+            )
             repair_response = await self.llm.chat_completion(
                 repair_messages,
                 temperature=0.05,
