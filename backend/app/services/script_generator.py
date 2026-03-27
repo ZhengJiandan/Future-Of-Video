@@ -214,26 +214,40 @@ class ScriptGenerator:
             intent=intent,
             profiles=normalized_characters,
         )
-        desired_character_count = self._estimate_desired_character_count(intent)
         temporary_characters: List[Dict[str, Any]] = []
+        unmatched_character_queries = self._identify_unmatched_character_queries(
+            user_input=user_input,
+            intent=intent,
+            matched_characters=matched_characters,
+        )
         character_resolution = {
             "status": "matched" if matched_characters else "none",
             "message": "已匹配到角色档案" if matched_characters else "未匹配到角色档案",
             "needs_user_action": False,
         }
-        if not matched_characters and self._has_meaningful_character_intent(intent):
+        if unmatched_character_queries:
             temporary_characters = await self._generate_temporary_character_profiles(
                 user_input=user_input,
                 style=style,
-                intent=intent,
-                desired_count=desired_character_count,
+                intent={**intent, "character_queries": unmatched_character_queries},
+                desired_count=max(1, len(unmatched_character_queries)),
             )
             if temporary_characters:
-                character_resolution = {
-                    "status": "temporary_generated",
-                    "message": "未匹配到正式角色档案，已自动生成临时角色草稿",
-                    "needs_user_action": False,
-                }
+                if matched_characters:
+                    character_resolution = {
+                        "status": "partially_matched",
+                        "message": (
+                            f"已匹配 {len(matched_characters)} 个正式角色，"
+                            f"并为剩余 {len(temporary_characters)} 个未命中角色自动生成临时角色草稿"
+                        ),
+                        "needs_user_action": False,
+                    }
+                else:
+                    character_resolution = {
+                        "status": "temporary_generated",
+                        "message": "未匹配到正式角色档案，已自动生成临时角色草稿",
+                        "needs_user_action": False,
+                    }
         elif not matched_characters:
             character_resolution = {
                 "status": "needs_user_action",
@@ -487,6 +501,73 @@ class ScriptGenerator:
         if not queries:
             return 1
         return max(1, len(queries))
+
+    def _identify_unmatched_character_queries(
+        self,
+        *,
+        user_input: str,
+        intent: Dict[str, Any],
+        matched_characters: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        meaningful_queries = [
+            query
+            for query in (intent.get("character_queries") or [])
+            if self._query_has_meaning(query)
+        ]
+        if not meaningful_queries:
+            return []
+        if not matched_characters:
+            return meaningful_queries
+
+        unmatched: List[Dict[str, Any]] = []
+        for query in meaningful_queries:
+            if any(
+                self._query_matches_character_profile(
+                    query=query,
+                    profile=profile,
+                    user_input=user_input,
+                )
+                for profile in matched_characters
+            ):
+                continue
+            unmatched.append(query)
+        return unmatched
+
+    def _query_matches_character_profile(
+        self,
+        *,
+        query: Dict[str, Any],
+        profile: Dict[str, Any],
+        user_input: str,
+    ) -> bool:
+        normalized_haystack_parts = [
+            str(profile.get("name") or "").strip().lower(),
+            str(profile.get("category") or "").strip().lower(),
+            str(profile.get("role") or "").strip().lower(),
+            str(profile.get("archetype") or "").strip().lower(),
+            str(profile.get("description") or "").strip().lower(),
+            str(profile.get("llm_summary") or "").strip().lower(),
+        ]
+        normalized_haystack_parts.extend(str(item).strip().lower() for item in (profile.get("aliases") or []) if str(item).strip())
+        normalized_haystack = " ".join(part for part in normalized_haystack_parts if part)
+        if not normalized_haystack:
+            return False
+
+        for key in ["name_hint", "role", "archetype", "category"]:
+            normalized_value = str(query.get(key) or "").strip().lower()
+            if normalized_value and normalized_value in normalized_haystack:
+                return True
+
+        keywords = [str(item).strip().lower() for item in (query.get("keywords") or []) if str(item).strip()]
+        if keywords and any(keyword in normalized_haystack for keyword in keywords):
+            return True
+
+        return self._score_profile(
+            profile_type="character",
+            profile=profile,
+            query=query,
+            user_input=user_input,
+        ) >= 2.5
 
     def _has_meaningful_character_intent(self, intent: Dict[str, Any]) -> bool:
         return any(self._query_has_meaning(query) for query in (intent.get("character_queries") or []))

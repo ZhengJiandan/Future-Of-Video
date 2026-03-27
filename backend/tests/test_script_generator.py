@@ -271,6 +271,97 @@ async def test_prepare_character_resolution_raises_when_intent_extraction_fails(
         )
 
 
+def test_identify_unmatched_character_queries_returns_only_missing_queries(generator: ScriptGenerator) -> None:
+    intent = {
+        "character_queries": [
+            {"name_hint": "黑猫队长", "role": "队长", "keywords": ["黑猫", "潜入"]},
+            {"name_hint": "白猫医生", "role": "医生", "keywords": ["白猫", "包扎"]},
+            {"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫", "终端"]},
+        ]
+    }
+    matched_characters = [
+        {
+            "id": "char-black",
+            "name": "黑猫队长",
+            "role": "队长",
+            "llm_summary": "冷静的黑猫队长，擅长潜入。",
+            "aliases": [],
+        },
+        {
+            "id": "char-white",
+            "name": "白猫医生",
+            "role": "医生",
+            "llm_summary": "负责检查伤口和包扎。",
+            "aliases": [],
+        },
+    ]
+
+    result = generator._identify_unmatched_character_queries(
+        user_input="黑猫队长、白猫医生、灰蓝猫技术员一起回到据点。",
+        intent=intent,
+        matched_characters=matched_characters,
+    )
+
+    assert result == [{"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫", "终端"]}]
+
+
+@pytest.mark.asyncio
+async def test_prepare_character_resolution_generates_temporary_characters_for_unmatched_queries(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_extract_generation_intent(**kwargs):
+        return {
+            "character_queries": [
+                {"name_hint": "黑猫队长", "role": "队长", "keywords": ["黑猫"]},
+                {"name_hint": "白猫医生", "role": "医生", "keywords": ["白猫"]},
+                {"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫"]},
+            ]
+        }
+
+    async def fake_select_character_profiles(**kwargs):
+        return [
+            {
+                "id": "char-black",
+                "name": "黑猫队长",
+                "role": "队长",
+                "llm_summary": "冷静的黑猫队长。",
+                "aliases": [],
+            }
+        ]
+
+    captured: dict[str, object] = {}
+
+    async def fake_generate_temporary_character_profiles(**kwargs):
+        captured["intent"] = kwargs["intent"]
+        captured["desired_count"] = kwargs["desired_count"]
+        return [
+            {"id": "temp-white", "name": "白猫医生", "role": "医生"},
+            {"id": "temp-blue", "name": "灰蓝猫技术员", "role": "技术员"},
+        ]
+
+    monkeypatch.setattr(generator, "_extract_generation_intent", fake_extract_generation_intent)
+    monkeypatch.setattr(generator, "_select_character_profiles", fake_select_character_profiles)
+    monkeypatch.setattr(generator, "_generate_temporary_character_profiles", fake_generate_temporary_character_profiles)
+
+    result = await generator.prepare_character_resolution(
+        user_input="黑猫队长、白猫医生和灰蓝猫技术员一起回到据点。",
+        style="写实",
+        character_profiles=[],
+    )
+
+    assert result["character_resolution"]["status"] == "partially_matched"
+    assert result["selected_character_ids"] == ["char-black"]
+    assert [item["id"] for item in result["temporary_character_profiles"]] == ["temp-white", "temp-blue"]
+    assert captured["desired_count"] == 2
+    assert captured["intent"] == {
+        "character_queries": [
+            {"name_hint": "白猫医生", "role": "医生", "keywords": ["白猫"]},
+            {"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫"]},
+        ]
+    }
+
+
 def test_build_script_input_policy_uses_strict_mode_for_detailed_input(generator: ScriptGenerator) -> None:
     policy = generator._build_script_input_policy(
         """
