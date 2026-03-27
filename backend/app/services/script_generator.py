@@ -430,7 +430,7 @@ class ScriptGenerator:
 规则：
 1. 只抽取用户真正表达的需求，不脑补具体剧情
 2. 如果用户明确列出了角色名单、角色表、代号、本名或群像角色，必须完整抽取，不要擅自省略
-3. 如果用户没有明确指定角色或场景数量，给出合理的 1-3 个查询意图
+3. 如果用户没有明确指定角色或场景数量，给出合理的查询意图
 4. JSON key 和字符串值都必须使用双引号
 5. 不要输出 markdown 代码块或解释文字"""
         user_prompt = f"用户输入：{user_input}\n视觉风格：{style or '未指定'}\n目标时长：{target_total_duration or '未指定'}"
@@ -441,7 +441,7 @@ class ScriptGenerator:
                     DoubaoMessage(role="user", content=user_prompt),
                 ],
                 temperature=0.2,
-                max_tokens=1400,
+                max_tokens=5000,
             )
             payload = self._parse_llm_json(response.get_content().strip())
             llm_character_queries = payload.get("character_queries") or []
@@ -493,7 +493,7 @@ class ScriptGenerator:
             user_input=user_input,
             intent_queries=intent.get("scene_queries") or [],
             profiles=profiles,
-            desired_count=3,
+            desired_count=30,
         )
 
     def _estimate_desired_character_count(self, intent: Dict[str, Any]) -> int:

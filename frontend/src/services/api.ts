@@ -947,6 +947,7 @@ export const scriptPipelineApi = {
   }) => apiClient.post<PrepareCharactersResponse>('/pipeline/prepare-characters', data),
 
   splitScript: (data: {
+    project_id?: string
     script_text: string
     max_segment_duration?: number
     target_total_duration?: number

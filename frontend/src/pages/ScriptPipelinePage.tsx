@@ -454,6 +454,7 @@ export const ScriptPipelinePage: React.FC = () => {
   const stepButtonRefs = useRef<Array<HTMLButtonElement | null>>([])
   const suppressProjectSaveRef = useRef(true)
   const creatingProjectRef = useRef(false)
+  const splitRequestInFlightRef = useRef(false)
   const pendingRequestedProjectIdRef = useRef<string | null>(readRequestedProjectId(location.state))
   const selectedProjectId = useProjectStore((state) => state.currentProjectId)
   const projectStoreHydrated = useProjectStore((state) => state.hydrated)
@@ -739,6 +740,53 @@ export const ScriptPipelinePage: React.FC = () => {
           setSavedTemporaryCharacterIds([])
           setError(null)
           message.warning('生成剧本请求超时，但后端已完成生成，已自动恢复到剧本确认阶段')
+          return true
+        }
+      } catch {
+        // Ignore polling errors and keep retrying until timeout.
+      }
+    }
+
+    throw originalError
+  }
+
+  const recoverSplitScriptFromProject = async (
+    projectId: string,
+    requestMeta: {
+      scriptText: string
+      maxSegmentDuration: number
+      targetTotalDuration: number | null
+    },
+    originalError: unknown,
+  ) => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      try {
+        const response = await scriptPipelineApi.getProject(projectId)
+        const item = response.data.item as Record<string, unknown> | null
+        const state = (item?.state as Record<string, unknown>) || {}
+        const restoredSegments = Array.isArray(state.segments) ? (state.segments as SegmentItem[]) : []
+        const savedScriptDraft = String(state.scriptDraft || '').trim()
+        const savedMaxSegmentDuration = normalizeMaxSegmentDuration(
+          Number(state.maxSegmentDuration || MAX_SEGMENT_DURATION),
+        )
+        const savedTargetTotalDuration =
+          state.targetTotalDuration === null || state.targetTotalDuration === undefined
+            ? null
+            : Number(state.targetTotalDuration)
+
+        if (
+          item &&
+          restoredSegments.length > 0 &&
+          savedScriptDraft === requestMeta.scriptText &&
+          savedMaxSegmentDuration === requestMeta.maxSegmentDuration &&
+          savedTargetTotalDuration === requestMeta.targetTotalDuration
+        ) {
+          applyProjectState(item)
+          setCharacterPrepareResult(null)
+          setCharacterConfirmOpen(false)
+          setError(null)
+          message.warning('拆分片段请求超时，但后端已完成拆分，已自动恢复到片段确认阶段')
           return true
         }
       } catch {
@@ -1168,11 +1216,14 @@ export const ScriptPipelinePage: React.FC = () => {
   }
 
   const runSplitScript = async () => {
-    if (!scriptDraft.trim()) {
+    if (!scriptDraft.trim() || splitRequestInFlightRef.current) {
       return
     }
 
+    splitRequestInFlightRef.current = true
     const normalizedMaxSegmentDuration = normalizeMaxSegmentDuration(maxSegmentDuration)
+    const normalizedScriptDraft = scriptDraft.trim()
+    let ensuredProjectId: string | null = null
 
     setCurrentStep(2)
     setSplitLoading(true)
@@ -1185,8 +1236,10 @@ export const ScriptPipelinePage: React.FC = () => {
     setMaxSegmentDuration(normalizedMaxSegmentDuration)
 
     try {
+      ensuredProjectId = await ensureProjectExists()
       const response = await scriptPipelineApi.splitScript({
-        script_text: scriptDraft,
+        project_id: ensuredProjectId,
+        script_text: normalizedScriptDraft,
         max_segment_duration: normalizedMaxSegmentDuration,
         target_total_duration: targetTotalDuration || undefined,
       })
@@ -1195,9 +1248,30 @@ export const ScriptPipelinePage: React.FC = () => {
       setKeyframes([])
       setCurrentStep(2)
     } catch (requestError: unknown) {
+      if (ensuredProjectId && isGatewayTimeoutError(requestError)) {
+        try {
+          const recovered = await recoverSplitScriptFromProject(
+            ensuredProjectId,
+            {
+              scriptText: normalizedScriptDraft,
+              maxSegmentDuration: normalizedMaxSegmentDuration,
+              targetTotalDuration: targetTotalDuration ?? null,
+            },
+            requestError,
+          )
+          if (recovered) {
+            return
+          }
+        } catch (recoveryError) {
+          setError(extractApiErrorMessage(recoveryError, '视频片段拆分失败'))
+          setCurrentStep(1)
+          return
+        }
+      }
       setError(extractApiErrorMessage(requestError, '视频片段拆分失败'))
       setCurrentStep(1)
     } finally {
+      splitRequestInFlightRef.current = false
       setSplitLoading(false)
     }
   }

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -49,6 +50,77 @@ def _raise_provider_config_http_exception(exc: MissingProviderConfigError) -> No
         detail=str(exc),
         headers={"X-Error-Code": exc.code},
     ) from exc
+
+
+def _normalize_optional_duration(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(float(value), 2)
+
+
+def _split_request_matches_state(
+    state: Dict[str, Any],
+    *,
+    script_text: str,
+    max_segment_duration: float,
+    target_total_duration: Optional[float],
+) -> bool:
+    saved_script = str(state.get("scriptDraft") or "").strip()
+    if saved_script != str(script_text or "").strip():
+        return False
+    saved_max_duration = round(float(state.get("maxSegmentDuration") or 0.0), 2)
+    if saved_max_duration != round(float(max_segment_duration), 2):
+        return False
+    raw_saved_target_duration = state.get("targetTotalDuration")
+    try:
+        saved_target_duration = _normalize_optional_duration(
+            None if raw_saved_target_duration in {None, ""} else float(raw_saved_target_duration)
+        )
+    except (TypeError, ValueError):
+        saved_target_duration = None
+    return saved_target_duration == _normalize_optional_duration(target_total_duration)
+
+
+def _build_split_state_signature(
+    *,
+    script_text: str,
+    max_segment_duration: float,
+    target_total_duration: Optional[float],
+) -> str:
+    payload = (
+        f"{str(script_text or '').strip()}|"
+        f"{round(float(max_segment_duration), 2)}|"
+        f"{_normalize_optional_duration(target_total_duration)}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _build_split_response_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    segments = state.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return None
+
+    validation_report = state.get("splitValidationReport") if isinstance(state.get("splitValidationReport"), dict) else None
+    total_duration = 0.0
+    if validation_report and validation_report.get("actual_total_duration") is not None:
+        try:
+            total_duration = float(validation_report.get("actual_total_duration") or 0.0)
+        except (TypeError, ValueError):
+            total_duration = 0.0
+    if total_duration <= 0:
+        total_duration = round(
+            sum(float((segment or {}).get("duration") or 0.0) for segment in segments if isinstance(segment, dict)),
+            2,
+        )
+
+    return {
+        "script_text": str(state.get("scriptDraft") or ""),
+        "total_duration": total_duration,
+        "segment_count": len(segments),
+        "segments": segments,
+        "continuity_points": state.get("continuityPoints") if isinstance(state.get("continuityPoints"), list) else [],
+        "validation_report": validation_report,
+    }
 
 
 class ReferenceAssetPayload(BaseModel):
@@ -295,6 +367,7 @@ class PrepareCharactersRequest(BaseModel):
 class SplitScriptRequest(BaseModel):
     """剧本拆分请求。"""
 
+    project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
     script_text: str = Field(..., min_length=1, description="用户审核后的完整剧本文本")
     max_segment_duration: float = Field(default=10.0, ge=3.0, le=10.0)
     target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0)
@@ -909,16 +982,86 @@ async def prepare_characters(request: PrepareCharactersRequest, db: AsyncSession
 
 
 @router.post("/split-script")
-async def split_script(request: SplitScriptRequest):
+async def split_script(
+    request: SplitScriptRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     """对审核后的剧本进行拆分。"""
     start_time = time.time()
 
     try:
+        existing_project = None
+        if request.project_id:
+            existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
+        if existing_project is None:
+            existing_project = await pipeline_project_service.get_current_project(db, current_user.id)
+
+        existing_state = existing_project.get("state") if isinstance(existing_project, dict) else {}
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+
+        if existing_state and _split_request_matches_state(
+            existing_state,
+            script_text=request.script_text,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+        ):
+            cached_result = _build_split_response_from_state(existing_state)
+            if cached_result is not None:
+                return {
+                    "success": True,
+                    "message": "已直接复用上一次成功的剧本拆分结果，避免重复调用模型。",
+                    "processing_time": time.time() - start_time,
+                    **cached_result,
+                }
+
         result = await pipeline_workflow_service.split_script(
             request.script_text,
             max_segment_duration=request.max_segment_duration,
             target_total_duration=request.target_total_duration,
         )
+
+        project_title = str(
+            (existing_project or {}).get("project_title")
+            or existing_state.get("projectTitle")
+            or "未命名项目"
+        ).strip() or "未命名项目"
+        summary_payload = existing_state.get("scriptSummary") if isinstance(existing_state.get("scriptSummary"), dict) else {}
+        summary_text = str(summary_payload.get("synopsis") or (existing_project or {}).get("summary") or "").strip()
+        split_signature = _build_split_state_signature(
+            script_text=request.script_text,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+        )
+        project_state = {
+            **existing_state,
+            "currentStep": 2,
+            "transitionDirection": "forward",
+            "projectTitle": project_title,
+            "scriptDraft": request.script_text,
+            "maxSegmentDuration": request.max_segment_duration,
+            "targetTotalDuration": request.target_total_duration,
+            "segments": result.get("segments") or [],
+            "splitValidationReport": result.get("validation_report"),
+            "continuityPoints": result.get("continuity_points") or [],
+            "splitRequestSignature": split_signature,
+            "keyframes": [],
+            "renderTaskId": None,
+            "renderStatus": None,
+        }
+        await pipeline_project_service.save_current_project(
+            db,
+            project_id=request.project_id,
+            user_id=current_user.id,
+            project_title=project_title,
+            current_step=2,
+            state=project_state,
+            status="draft",
+            last_render_task_id="",
+            summary=summary_text,
+        )
+
         return {
             "success": True,
             "message": "剧本拆分完成，请审核片段后生成首尾帧",
