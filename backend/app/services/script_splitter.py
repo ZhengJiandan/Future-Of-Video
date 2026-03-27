@@ -1422,6 +1422,89 @@ class ScriptSplitter:
             return f"场景{first.scene_number} · {first.scene_title}"
         return f"场景{first.scene_number}-{last.scene_number}衔接段"
 
+    def _truncate_text(self, text: str, limit: int) -> str:
+        normalized = str(text or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit].rstrip() + "..."
+
+    def _build_segment_opening_clause(self, segment_shots: List[ParsedShot]) -> str:
+        if not segment_shots:
+            return ""
+        first = segment_shots[0]
+        opening_parts = self._collect_unique_items(
+            [
+                first.description,
+                first.environment,
+                first.prompt_focus,
+                "、".join(first.characters_in_shot[:3]) if first.characters_in_shot else "",
+            ],
+            limit=4,
+        )
+        return "，".join(item for item in opening_parts if item)
+
+    def _build_segment_action_progression(self, segment_shots: List[ParsedShot]) -> str:
+        if not segment_shots:
+            return ""
+        first = segment_shots[0]
+        last = segment_shots[-1]
+        middle_shots = segment_shots[1:-1]
+
+        start_bit = self._collect_unique_items([first.description, *first.actions], limit=2)
+        middle_bits = self._collect_unique_items(
+            [item for shot in middle_shots for item in [shot.description, *shot.actions] if item],
+            limit=2,
+        )
+        end_bit = self._collect_unique_items([last.description, *last.actions], limit=2)
+
+        clauses: List[str] = []
+        if start_bit:
+            clauses.append(f"开场 {start_bit[0]}")
+        for index, item in enumerate(middle_bits):
+            clauses.append(("随后 " if index == 0 else "接着 ") + item)
+        if end_bit:
+            ending = end_bit[0]
+            if not clauses or ending not in clauses[-1]:
+                clauses.append(f"结尾停在 {ending}")
+        return "；".join(clauses)
+
+    def _build_segment_camera_clause(self, segment_shots: List[ParsedShot]) -> str:
+        shot_types = self._collect_unique_items([shot.shot_type for shot in segment_shots if shot.shot_type], limit=3)
+        angles = self._collect_unique_items([shot.camera_angle for shot in segment_shots if shot.camera_angle], limit=2)
+        movements = self._collect_unique_items([shot.camera_movement for shot in segment_shots if shot.camera_movement], limit=3)
+        parts: List[str] = []
+        if shot_types:
+            parts.append(f"景别 {', '.join(shot_types)}")
+        if angles:
+            parts.append(f"角度 {', '.join(angles)}")
+        if movements:
+            parts.append(f"运镜 {', '.join(movements)}")
+        return "；".join(parts)
+
+    def _build_segment_dialogue_clause(self, segment_shots: List[ParsedShot]) -> str:
+        dialogue_lines = self._collect_unique_items(
+            [self._truncate_text(dialogue, 36) for shot in segment_shots for dialogue in shot.dialogues if dialogue],
+            limit=2,
+        )
+        if not dialogue_lines:
+            return ""
+        return "；".join(dialogue_lines)
+
+    def _build_segment_ending_clause(self, segment_shots: List[ParsedShot]) -> str:
+        if not segment_shots:
+            return ""
+        last = segment_shots[-1]
+        ending_parts = self._collect_unique_items(
+            [
+                last.description,
+                last.prompt_focus,
+                last.environment,
+                "、".join(last.characters_in_shot[:3]) if last.characters_in_shot else "",
+            ],
+            limit=4,
+        )
+        return "，".join(item for item in ending_parts if item)
+
     def _build_local_video_prompt(
         self,
         *,
@@ -1444,43 +1527,64 @@ class ScriptSplitter:
         lighting = self._collect_unique_items([shot.lighting for shot in segment_shots if shot.lighting], limit=2)
         atmosphere = self._collect_unique_items([shot.atmosphere for shot in segment_shots if shot.atmosphere], limit=2)
         prompt_focus = str(point.get("prompt_focus") or self._build_segment_prompt_focus(segment_shots) or "")
-        bound_character_ids = self._collect_unique_items(
-            [profile_id for shot in segment_shots for profile_id in shot.character_profile_ids if profile_id],
-            limit=8,
-        )
+        opening_clause = self._build_segment_opening_clause(segment_shots)
+        action_progression = self._build_segment_action_progression(segment_shots)
+        camera_clause = self._build_segment_camera_clause(segment_shots)
+        dialogue_clause = self._build_segment_dialogue_clause(segment_shots)
+        ending_clause = self._build_segment_ending_clause(segment_shots)
 
-        prompt_parts = [
-            "cinematic tactical action sequence",
-            f"time window {point['start_time']:.1f}s to {point['end_time']:.1f}s",
-            f"scene {first.scene_title}" if first and first.scene_title else "",
-            f"scene profile {first.scene_profile_id}" if first and first.scene_profile_id else "",
-            f"location {', '.join(locations)}" if locations else "",
-            f"characters {', '.join(characters)}" if characters else "",
-            f"character profile ids {', '.join(bound_character_ids)}" if bound_character_ids else "",
-            f"camera language {', '.join(movements)}" if movements else "",
-            f"lighting {', '.join(lighting)}" if lighting else "",
-            f"atmosphere {', '.join(atmosphere)}" if atmosphere else "",
-            f"focus {prompt_focus}" if prompt_focus else "",
-            f"key visuals {'; '.join(shot_descriptions)}" if shot_descriptions else "",
-            f"key actions {'; '.join(actions)}" if actions else "",
-            f"spoken lines {'; '.join(dialogues)}" if dialogues else "",
-            "preserve character identity consistency",
-            "high detail, coherent motion, cinematic realism, 4k, professional composition",
+        prompt_sentences = [
+            "电影感写实短视频，单段连续生成，不要做成信息罗列式分镜清单。",
+            f"时长约 {float(point['duration']):.1f} 秒。",
+            (
+                "场景设定："
+                + "，".join(
+                    item
+                    for item in [
+                        first.scene_title if first and first.scene_title else "",
+                        " / ".join(locations) if locations else "",
+                        " / ".join(lighting) if lighting else "",
+                        " / ".join(atmosphere) if atmosphere else "",
+                    ]
+                    if item
+                )
+                + "。"
+            )
+            if first and any([first.scene_title, locations, lighting, atmosphere])
+            else "",
+            f"出场主体：{'、'.join(characters)}。" if characters else "",
+            f"首帧画面：{opening_clause}。" if opening_clause else "",
+            f"动作推进：{action_progression}。" if action_progression else "",
+            f"镜头设计：{camera_clause}。" if camera_clause else "",
+            f"视觉重点：{prompt_focus}。" if prompt_focus else "",
+            f"对白或口型重点：{dialogue_clause}。" if dialogue_clause else "",
+            "保持角色身份、服装、体态、空间朝向和动作连贯，避免跳切、重复动作和主体漂移。",
         ]
+        if shot_descriptions:
+            prompt_sentences.append(f"关键画面参考：{'；'.join(shot_descriptions[:3])}。")
+        if actions and not action_progression:
+            prompt_sentences.append(f"关键动作：{'；'.join(actions[:3])}。")
+        if dialogues and not dialogue_clause:
+            prompt_sentences.append(f"对白重点：{'；'.join(dialogues[:2])}。")
         if has_previous:
-            prompt_parts.append("continuing naturally from the previous segment")
+            prompt_sentences.append("开头要自然承接上一段的动作和情绪，不要重新起势或突然换位。")
         if has_next:
-            prompt_parts.append("ending with a clear transition into the next segment")
+            prompt_sentences.append("结尾要留出清晰可延续的动作、视线或人物在位状态，方便下一段无缝接续。")
         if point.get("prefer_character_handoff_end_frame"):
-            prompt_parts.append("end with the continuing on-screen characters still clearly visible in frame for the next segment handoff")
+            prompt_sentences.append("结尾保持下一段仍会继续出现的角色清楚留在画面内，作为交接尾帧。")
         elif point.get("prefer_primary_character_end_frame"):
-            prompt_parts.append("end with the main character still clearly visible in frame for the next segment handoff")
+            prompt_sentences.append("结尾保持主角色清楚留在画面内，作为下一段承接尾帧。")
+        if ending_clause:
+            prompt_sentences.append(f"结尾画面：{ending_clause}。")
 
-        prompt = ", ".join(part for part in prompt_parts if part)
+        prompt = " ".join(sentence for sentence in prompt_sentences if sentence)
 
         return {
             "prompt": prompt,
-            "negative_prompt": "cartoon, anime, duplicate shot composition, repeated action loop, low quality, blurry, distorted anatomy, broken continuity, watermark, subtitle burn-in",
+            "negative_prompt": (
+                "卡通化, 二次元, 信息图排版, 分屏, 多宫格, 字幕烧录, 水印, 低清晰度, 模糊, 解剖错误, "
+                "角色漂移, 服装突变, 跳切, 重复动作循环, 镜头逻辑断裂, 空间关系错误"
+            ),
             "config": {
                 "duration": min(point["duration"], self.config.max_segment_duration),
                 "aspect_ratio": "16:9",
@@ -1544,7 +1648,7 @@ class ScriptSplitter:
 1. 每个片段时长尽量控制在 {self.config.min_segment_duration:.0f}-{self.config.max_segment_duration:.0f} 秒，并且优先靠近 {self.config.max_segment_duration:.0f} 秒
 2. 优先保证剧情节奏和镜头连续性，而不是机械平均切分
 3. 尽量不要截断一句完整对话、一个完整动作或同一镜头组内部的情绪推进
-4. 每个片段内部的镜头必须形成完整的小节奏，适合单段视频生成
+4. 每个片段内部的镜头必须形成一个“单次视频模型可理解、可直接生成”的完整小节奏
 5. 必须只使用候选边界中的时间点作为片段起止时间
 6. 输出每个片段的优化信息：标题、片段描述、关键动作、关键对话、与前后片段衔接说明、该片段视频生成 prompt_focus
 7. 除最后一个片段外，不要把片段平均切短。像 6 秒 + 7 秒 这种拆法不理想，应优先改成接近 10 秒 + 剩余片段时长
@@ -1552,6 +1656,7 @@ class ScriptSplitter:
 9. 任何新角色首次正式登场时，优先从该角色出镜镜头开始新起一段，让该段首帧可以清楚承载角色造型
 10. 除最后一个片段外，若下一段继续使用同一批角色，尽量让本段结尾仍保留这些角色在画面内，方便下一段延续角色一致性
 11. 尽量不要让首镜头里没有出现的角色在同一段中途入场；如果某角色会在段内首次出镜，优先从该角色出镜镜头开始新起一段
+12. 片段 description 和 prompt_focus 必须面向视频模型理解：写清楚首帧主体、动作推进、镜头运动、空间关系、结尾停点，不要写成抽象剧情总结
 
 输出必须是合法 JSON，格式：
 {{
@@ -2146,6 +2251,7 @@ class ScriptSplitter:
                 "continuity_from_prev": segment.continuity_from_prev,
                 "continuity_to_next": segment.continuity_to_next,
                 "prompt_focus": segment.prompt_focus,
+                "video_prompt": segment.video_prompt,
             }
             for segment in segments
         ]
@@ -2161,6 +2267,7 @@ class ScriptSplitter:
 6. 如果有新角色首次正式登场，审核时要判断该角色是否被单独起段，是否适合额外生成角色锚定首帧
 7. 除最后一段外，优先检查每段结尾是否仍保留下一段会继续出现的角色，避免下一段角色漂移
 8. 优先检查每一段是否存在“首镜头未出现的角色在段内中途入场”，如有则应建议在该角色首次出镜处切段
+9. 重点审核每一段的 video_prompt 是否真的适合视频模型：要像单次生成指令，能看出首帧、动作推进、镜头语言与结尾承接，而不是结构化摘要或调试字段
 
 输出必须是合法 JSON，格式：
 {{
@@ -2176,6 +2283,12 @@ class ScriptSplitter:
     {{
       "code": "content_fit",
       "label": "片段内容与时长匹配",
+      "status": "pass|warning|fail",
+      "detail": "说明"
+    }},
+    {{
+      "code": "video_prompt_fit",
+      "label": "片段 Prompt 可生成性",
       "status": "pass|warning|fail",
       "detail": "说明"
     }},
@@ -2323,6 +2436,35 @@ class ScriptSplitter:
             }
         )
 
+        prompt_fit_status = "pass"
+        for segment_review, segment in zip(segment_reviews, segments):
+            prompt_issues = self._estimate_video_prompt_fit_issues(segment)
+            if not prompt_issues:
+                continue
+            if prompt_fit_status == "pass":
+                prompt_fit_status = "warning"
+            if segment_review["status"] == "pass":
+                segment_review["status"] = "warning"
+                segment_review["summary"] = "该段的 video_prompt 仍偏像摘要，建议改成更像单次视频生成指令。"
+            segment_review["issues"] = self._dedupe_text_items([*segment_review["issues"], *prompt_issues])
+            segment_review["suggestions"] = self._dedupe_text_items(
+                [
+                    *segment_review["suggestions"],
+                    "把该段 prompt 改成单段视频生成指令，明确首帧主体、动作推进、镜头运动和结尾停点。",
+                ]
+            )
+
+        checks.append(
+            {
+                "code": "video_prompt_fit",
+                "label": "片段 Prompt 可生成性",
+                "status": prompt_fit_status,
+                "detail": "各片段 video_prompt 基本可直接用于视频模型生成。"
+                if prompt_fit_status == "pass"
+                else "存在 video_prompt 仍像摘要或调试字段，不够像单次视频生成指令的片段。",
+            }
+        )
+
         continuity_status = "pass"
         for index, segment in enumerate(segments):
             if index == 0:
@@ -2414,6 +2556,7 @@ class ScriptSplitter:
         allowed_codes = {
             "duration_limit": "单片段时长限制",
             "content_fit": "片段内容与时长匹配",
+            "video_prompt_fit": "片段 Prompt 可生成性",
             "continuity": "多段剧情连贯性",
             "target_total_duration": "总时长目标匹配",
         }
@@ -2510,6 +2653,44 @@ class ScriptSplitter:
 
         return issues
 
+    def _estimate_video_prompt_fit_issues(self, segment: VideoSegment) -> List[str]:
+        prompt = str(segment.video_prompt or "").strip()
+        if not prompt:
+            return ["该片段缺少 video_prompt，无法直接进入视频生成。"]
+
+        issues: List[str] = []
+        normalized = prompt.lower()
+        meta_keywords = (
+            "time window",
+            "scene profile",
+            "character profile ids",
+            "spoken lines",
+            "start_time",
+            "end_time",
+            "片段时间",
+            "片段标题",
+            "片段描述",
+            "镜头时间线",
+        )
+        if any(keyword in normalized or keyword in prompt for keyword in meta_keywords):
+            issues.append("video_prompt 仍包含结构化摘要或调试字段，更像给人读的说明，不像给视频模型的生成指令。")
+
+        start_keywords = ("首帧", "开场", "起始", "一开始", "画面开始", "opening frame", "opening shot", "start frame")
+        if not any(keyword in normalized or keyword in prompt for keyword in start_keywords):
+            issues.append("video_prompt 缺少明确首帧/开场状态，视频模型较难稳定起画。")
+
+        progression_keywords = ("动作推进", "随后", "接着", "然后", "先", "再", "最终", "结尾", "progression", "then", "finally")
+        if len(segment.key_actions) + len(segment.key_dialogues) >= 2 and not any(
+            keyword in normalized or keyword in prompt for keyword in progression_keywords
+        ):
+            issues.append("video_prompt 没有明确动作推进或段内节奏，视频模型较难理解这一段如何发展。")
+
+        camera_keywords = ("镜头", "运镜", "推近", "跟拍", "摇镜", "移镜", "景别", "camera", "tracking", "dolly", "pan")
+        if not any(keyword in normalized or keyword in prompt for keyword in camera_keywords):
+            issues.append("video_prompt 缺少镜头语言约束，不利于视频模型稳定生成画面组织。")
+
+        return self._dedupe_text_items(issues)
+
     def _target_duration_tolerance(self, target_duration: float) -> float:
         return max(1.0, min(3.0, float(target_duration) * 0.1))
 
@@ -2560,14 +2741,22 @@ class ScriptSplitter:
     ) -> Optional[Dict[str, Any]]:
         shot_timeline = self._build_shot_timeline_for_llm(segment_shots, point["end_time"])
         prompt_focus = str(point.get("prompt_focus") or "")
+        opening_clause = self._build_segment_opening_clause(segment_shots)
+        action_progression = self._build_segment_action_progression(segment_shots)
+        camera_clause = self._build_segment_camera_clause(segment_shots)
+        ending_clause = self._build_segment_ending_clause(segment_shots)
+        dialogue_clause = self._build_segment_dialogue_clause(segment_shots)
 
-        system_prompt = """你是一位 AI 视频导演，负责把一个视频片段整理成更适合视频生成模型的高质量 Prompt。
+        system_prompt = """你是一位 AI 视频导演，负责把一个视频片段整理成可直接喂给视频生成模型的高质量 Prompt。
 
 要求：
-1. Prompt 要体现片段内部镜头之间的动作连接和情绪推进
-2. 不要简单罗列镜头，要把片段整理成一个连续可生成的视频段落
-3. 重点强调角色一致性、空间连续性、动作连贯、镜头语言、光线氛围
-4. 输出 JSON：
+1. Prompt 必须像“单次视频生成指令”，而不是剧情摘要、字段清单或镜头笔记
+2. 必须明确首帧/开场状态、主体角色、场景环境、动作推进、镜头运动、结尾停点
+3. 要把多个镜头信息整理成一个连续可生成的视频段落，不要逐条复述“镜头1/镜头2”
+4. 重点强调角色一致性、空间连续性、动作连贯、镜头语言、光线氛围
+5. 如果存在上下段衔接，需要在 prompt 里明确“如何接上段、如何留给下段”
+6. 不要输出调试字段，不要出现 start_time、end_time、scene profile、character profile ids、spoken lines 这类元信息标签
+7. 输出 JSON：
 {
   "prompt": "...",
   "negative_prompt": "...",
@@ -2584,6 +2773,11 @@ class ScriptSplitter:
             f"前段衔接：{'是' if has_previous else '否'}\n"
             f"后段衔接：{'是' if has_next else '否'}\n"
             f"重点方向：{prompt_focus or '无'}\n\n"
+            f"建议首帧信息：{opening_clause or '无'}\n"
+            f"建议动作推进：{action_progression or '无'}\n"
+            f"建议镜头设计：{camera_clause or '无'}\n"
+            f"建议结尾停点：{ending_clause or '无'}\n"
+            f"对白重点：{dialogue_clause or '无'}\n\n"
             f"片段镜头时间线：\n{shot_timeline}\n\n"
             f"片段文本：\n{segment_script[:4000]}"
         )
@@ -2595,7 +2789,7 @@ class ScriptSplitter:
             ]
             response = await self.llm.chat_completion(
                 messages,
-                temperature=0.35,
+                temperature=0.2,
                 max_tokens=1800,
             )
             parsed = self._parse_llm_json(response.get_content().strip())
@@ -2610,7 +2804,10 @@ class ScriptSplitter:
             config.setdefault("source", "llm-script-splitter")
             return {
                 "prompt": prompt,
-                "negative_prompt": negative_prompt or "cartoon, anime, repeated action loop, low quality, blurry, distorted anatomy, broken continuity, watermark, subtitle burn-in",
+                "negative_prompt": negative_prompt or (
+                    "卡通化, 二次元, 信息图排版, 分屏, 多宫格, 字幕烧录, 水印, 低清晰度, 模糊, 解剖错误, "
+                    "角色漂移, 服装突变, 跳切, 重复动作循环, 镜头逻辑断裂, 空间关系错误"
+                ),
                 "config": config,
                 "segment_script": segment_script,
             }

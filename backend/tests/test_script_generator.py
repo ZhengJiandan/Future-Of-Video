@@ -1,3 +1,4 @@
+import json
 import logging
 
 import pytest
@@ -31,6 +32,16 @@ class _StaticResponse:
 
     def get_content(self) -> str:
         return self._content
+
+
+class _CapturingDoubaoLLM:
+    def __init__(self, content: str) -> None:
+        self._content = content
+        self.calls = []
+
+    async def chat_completion(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return _StaticResponse(self._content)
 
 
 @pytest.fixture
@@ -258,6 +269,114 @@ async def test_prepare_character_resolution_raises_when_intent_extraction_fails(
             style="电影感",
             character_profiles=[],
         )
+
+
+def test_build_script_input_policy_uses_strict_mode_for_detailed_input(generator: ScriptGenerator) -> None:
+    policy = generator._build_script_input_policy(
+        """
+        1. 角色关系：姐妹二人已经失联三年，重逢时不要立刻和解。
+        2. 时间地点：凌晨两点，老城区废弃照相馆，外面下雨。
+        3. 剧情顺序必须保留：姐姐先试探，妹妹再拿出底片，最后停在没有说破真相。
+        4. 不要新增旁白，不要增加第三个人，不要改成大团圆结局。
+        """.strip()
+    )
+
+    assert policy["fidelity_mode"] == "strict"
+    assert policy["is_user_input_detailed"] is True
+    assert policy["temperature"] == pytest.approx(0.1)
+    assert any("剧情顺序必须保留" in item for item in policy["preserve_points"])
+
+
+def test_build_script_input_policy_keeps_standard_mode_for_brief_input(generator: ScriptGenerator) -> None:
+    policy = generator._build_script_input_policy("一只猫在窗边看雨，气质安静。")
+
+    assert policy["fidelity_mode"] == "standard"
+    assert policy["is_user_input_detailed"] is False
+    assert policy["temperature"] == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+async def test_call_llm_for_script_passes_input_fidelity_policy(
+    generator: ScriptGenerator,
+) -> None:
+    llm = _CapturingDoubaoLLM(
+        json.dumps(
+            {
+                "title": "照相馆重逢",
+                "synopsis": "姐妹在雨夜照相馆重逢。",
+                "tone": "克制",
+                "themes": ["重逢"],
+                "characters": [],
+                "scenes": [
+                    {
+                        "scene_number": 1,
+                        "scene_profile_id": "",
+                        "scene_profile_version": 1,
+                        "scene_type": "对峙",
+                        "title": "雨夜照相馆",
+                        "description": "两姐妹在废弃照相馆对峙。",
+                        "story_function": "重逢",
+                        "location": "老城区废弃照相馆",
+                        "location_detail": "",
+                        "time": "凌晨",
+                        "weather": "雨夜",
+                        "lighting": "冷色霓虹",
+                        "atmosphere": "压抑",
+                        "mood": "克制",
+                        "shots": [
+                            {
+                                "shot_number": 1,
+                                "duration": 4.0,
+                                "scene_profile_id": "",
+                                "scene_profile_version": 1,
+                                "character_profile_ids": [],
+                                "character_profile_versions": {},
+                                "prompt_focus": "保持原始重逢关系",
+                                "shot_type": "中景",
+                                "camera_angle": "平视",
+                                "camera_movement": "轻推",
+                                "description": "姐姐先试探，妹妹沉默回应。",
+                                "environment": "旧照相馆内",
+                                "lighting": "冷色霓虹",
+                                "characters_in_shot": [],
+                                "actions": [],
+                                "dialogues": [],
+                                "sound_effects": ["雨声"],
+                                "music": "",
+                            }
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+    generator.llm = llm
+
+    await generator._call_llm_for_script(
+        user_input=(
+            "角色关系：姐妹二人已经失联三年，重逢时不要立刻和解。\n"
+            "时间地点：凌晨两点，老城区废弃照相馆，外面下雨。\n"
+            "剧情顺序必须保留：姐姐先试探，妹妹再拿出底片，最后停在没有说破真相。\n"
+            "不要新增旁白，不要增加第三个人，不要改成大团圆结局。"
+        ),
+        style="写实",
+        target_total_duration=12.0,
+        reference_image_count=0,
+        intent={},
+        matched_characters=[],
+        matched_scenes=[],
+        correction_note="请修正时长，但保持原意。",
+    )
+
+    assert len(llm.calls) == 1
+    payload = json.loads(llm.calls[0]["messages"][1].content)
+
+    assert payload["input_policy"]["fidelity_mode"] == "strict"
+    assert payload["input_policy"]["is_user_input_detailed"] is True
+    assert any("姐姐先试探" in item for item in payload["input_policy"]["preserve_points"])
+    assert "不要改写用户输入中已明确给出的剧情事实" in payload["correction_note"]
+    assert llm.calls[0]["kwargs"]["temperature"] == pytest.approx(0.1)
 
 
 @pytest.mark.asyncio

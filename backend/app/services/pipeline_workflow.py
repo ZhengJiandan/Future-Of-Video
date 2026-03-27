@@ -1067,7 +1067,9 @@ class PipelineWorkflowService:
             for task in queued_tasks:
                 current_step = str(task.current_step or "").strip()
                 if current_step in RECOVERABLE_QUEUED_STEPS:
-                    task.error = "服务启动时检测到任务尚未真正入队，已自动重新投递"
+                    task.status = "paused"
+                    task.current_step = "服务重启后已暂停，等待手动继续"
+                    task.error = "服务启动时检测到任务未完成，已恢复为暂停状态"
                     task.updated_at = datetime.utcnow()
                     recoverable_queued_ids.append(task.id)
 
@@ -1079,9 +1081,9 @@ class PipelineWorkflowService:
             dispatching_tasks = dispatching_result.scalars().all()
             recovered_dispatching_ids: List[str] = []
             for task in dispatching_tasks:
-                task.status = "queued"
-                task.current_step = "等待重新投递"
-                task.error = "服务启动时检测到任务卡在入队阶段，已自动重新投递"
+                task.status = "paused"
+                task.current_step = "服务重启后已暂停，等待手动继续"
+                task.error = "服务启动时检测到任务卡在入队阶段，已恢复为暂停状态"
                 task.updated_at = datetime.utcnow()
                 recovered_dispatching_ids.append(task.id)
 
@@ -1093,9 +1095,9 @@ class PipelineWorkflowService:
             processing_tasks = result.scalars().all()
             reset_processing_count = 0
             for task in processing_tasks:
-                task.status = "queued"
-                task.current_step = "任务中断"
-                task.error = "服务重启后自动恢复执行"
+                task.status = "paused"
+                task.current_step = "任务中断，等待手动继续"
+                task.error = "服务重启后已暂停，请手动继续"
                 task.updated_at = datetime.utcnow()
                 reset_processing_count += 1
 
@@ -1107,6 +1109,7 @@ class PipelineWorkflowService:
             if task_id not in task_ids:
                 task_ids.append(task_id)
         return {
+            "paused": len(task_ids),
             "requeued": len(task_ids),
             "reset_processing": reset_processing_count,
             "recovered_queued": len(recoverable_queued_ids),

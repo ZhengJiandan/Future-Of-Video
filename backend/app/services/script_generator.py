@@ -704,6 +704,11 @@ class ScriptGenerator:
     ) -> Dict[str, Any]:
         character_cards = [self._build_character_constraint_card(item) for item in matched_characters]
         scene_cards = [self._build_scene_constraint_card(item) for item in matched_scenes]
+        input_policy = self._build_script_input_policy(user_input)
+        correction_note = self._merge_correction_note_with_input_fidelity(
+            correction_note,
+            user_input=user_input,
+        )
         system_prompt = """你是一位顶级短视频编剧，但你的创作必须严格服从给定档案约束。
 
 【工作方式】
@@ -712,6 +717,13 @@ class ScriptGenerator:
 3. 新增细节不得违背 must_keep / must_have / forbidden
 4. 每个角色、每个场景都必须尽量绑定档案 ID 和版本
 5. 剧本阶段没有角色图片可用，角色恒定身份只能依赖 selected_characters 里的 llm_summary / must_keep / forbidden / speaking_style / voice_description / common_actions
+
+【用户输入保真】
+1. user_input 是剧情事实的第一来源，必须优先保留其中明确写出的角色关系、事件顺序、时间地点、冲突目标和结局
+2. 如果 user_input 已经很详细，默认执行“保守改写”：只把现有内容整理成可拍摄镜头与必要衔接，不新增支线、反转、前史、世界观补充、额外角色或额外场景
+3. 用户没有明确写出的心理动机、背景说明、象征隐喻、额外设定，宁可留白，也不要自行脑补
+4. correction_note 只允许修正结构、时长或镜头问题，不代表可以借机改写剧情主线
+5. 当 selected_characters / selected_scenes 与 user_input 同时存在时，剧情事实以 user_input 为准，角色命名和稳定外观约束以档案为准
 
 【输出要求】
 1. 输出必须是合法 JSON
@@ -731,6 +743,7 @@ class ScriptGenerator:
 12. scenes 数组至少包含 1 个场景，禁止输出空数组
 13. 每个 scene.shots 数组至少包含 1 个镜头，禁止输出空数组
 14. title 必须是非空字符串，不能留空
+15. 当 input_policy.fidelity_mode = "strict" 时，剧情改写幅度必须最小化；优先复用用户原始表述，不要擅自换剧情重心
 
 【JSON 结构】
 {
@@ -825,6 +838,12 @@ class ScriptGenerator:
             "style": style,
             "reference_image_count": reference_image_count,
             "intent": intent,
+            "input_policy": {
+                "fidelity_mode": input_policy["fidelity_mode"],
+                "is_user_input_detailed": input_policy["is_user_input_detailed"],
+                "expansion_scope": input_policy["expansion_scope"],
+                "preserve_points": input_policy["preserve_points"],
+            },
             "selected_characters": character_cards,
             "selected_scenes": scene_cards,
             "target_total_duration": float(target_total_duration) if target_total_duration is not None else None,
@@ -836,7 +855,7 @@ class ScriptGenerator:
         ]
         response = await self.llm.chat_completion(
             request_messages,
-            temperature=0.2,
+            temperature=float(input_policy["temperature"]),
             max_tokens=20000,
             timeout=httpx.Timeout(
                 connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
@@ -1256,6 +1275,143 @@ class ScriptGenerator:
             "forbidden": self._normalize_list(profile.get("forbidden_traits") or profile.get("forbidden_behaviors") or []),
             "script_stage_rule": "Use llm_summary + must_keep + forbidden + voice_description as the source of truth. Do not infer conflicting visual or vocal changes from free-form story text.",
         }
+
+    def _build_script_input_policy(self, user_input: str) -> Dict[str, Any]:
+        normalized_input = str(user_input or "").strip()
+        if not normalized_input:
+            return {
+                "fidelity_mode": "standard",
+                "is_user_input_detailed": False,
+                "expansion_scope": "可以做少量必要补全，但不要改写核心设定",
+                "preserve_points": [],
+                "temperature": 0.2,
+            }
+
+        lines = [line.strip() for line in re.split(r"\r?\n+", normalized_input) if line.strip()]
+        sentence_candidates = [
+            sentence.strip()
+            for sentence in re.split(r"[\n。！？!?；;]+", normalized_input)
+            if sentence.strip()
+        ]
+        bullet_lines = [
+            line
+            for line in lines
+            if re.match(r"^(?:[-*•]|\d+[.)、])\s*", line)
+        ]
+        constraint_keywords = (
+            "必须",
+            "不要",
+            "不能",
+            "保留",
+            "设定",
+            "关系",
+            "场景",
+            "地点",
+            "时间",
+            "结局",
+            "对白",
+            "镜头",
+            "分镜",
+            "角色",
+            "服装",
+            "道具",
+        )
+        constraint_hit_count = sum(1 for keyword in constraint_keywords if keyword in normalized_input)
+        detail_score = 0
+        if len(normalized_input) >= 120:
+            detail_score += 2
+        if len(lines) >= 4:
+            detail_score += 1
+        if len(sentence_candidates) >= 4:
+            detail_score += 1
+        if len(bullet_lines) >= 2:
+            detail_score += 2
+        if constraint_hit_count >= 4:
+            detail_score += 2
+
+        is_detailed = detail_score >= 3
+        return {
+            "fidelity_mode": "strict" if is_detailed else "standard",
+            "is_user_input_detailed": is_detailed,
+            "expansion_scope": (
+                "只允许镜头化整理、节奏压缩和必要衔接，不允许新增支线、反转、背景设定或额外角色"
+                if is_detailed
+                else "可以做少量必要补全，但不要改写核心设定"
+            ),
+            "preserve_points": self._extract_user_input_preserve_points(
+                normalized_input,
+                lines=lines,
+                sentence_candidates=sentence_candidates,
+            ),
+            "temperature": 0.1 if is_detailed else 0.2,
+        }
+
+    def _extract_user_input_preserve_points(
+        self,
+        user_input: str,
+        *,
+        lines: Optional[List[str]] = None,
+        sentence_candidates: Optional[List[str]] = None,
+    ) -> List[str]:
+        normalized_input = str(user_input or "").strip()
+        if not normalized_input:
+            return []
+
+        candidate_lines = list(lines or [line.strip() for line in re.split(r"\r?\n+", normalized_input) if line.strip()])
+        candidate_sentences = list(
+            sentence_candidates
+            or [sentence.strip() for sentence in re.split(r"[\n。！？!?；;]+", normalized_input) if sentence.strip()]
+        )
+        priority_keywords = (
+            "必须",
+            "不要",
+            "不能",
+            "角色",
+            "关系",
+            "地点",
+            "时间",
+            "结局",
+            "场景",
+            "对白",
+            "镜头",
+            "设定",
+        )
+        prioritized: List[str] = []
+        fallback: List[str] = []
+        for raw_candidate in [*candidate_lines, *candidate_sentences]:
+            normalized_candidate = self._normalize_preserve_point(raw_candidate)
+            if not normalized_candidate:
+                continue
+            target = prioritized if any(keyword in normalized_candidate for keyword in priority_keywords) else fallback
+            if normalized_candidate not in prioritized and normalized_candidate not in fallback:
+                target.append(normalized_candidate)
+
+        selected = [*prioritized, *fallback][:8]
+        if selected:
+            return selected
+        fallback_point = self._truncate_text(normalized_input, 80)
+        return [fallback_point] if fallback_point else []
+
+    def _normalize_preserve_point(self, text: str) -> str:
+        normalized = re.sub(r"^\s*(?:[-*•]|\d+[.)、])\s*", "", str(text or "").strip())
+        normalized = re.sub(r"\s+", " ", normalized).strip("，。；; ")
+        if len(normalized) < 4:
+            return ""
+        return self._truncate_text(normalized, 80)
+
+    def _merge_correction_note_with_input_fidelity(self, correction_note: str, *, user_input: str) -> str:
+        note = str(correction_note or "").strip()
+        if not note:
+            return ""
+        policy = self._build_script_input_policy(user_input)
+        if policy["fidelity_mode"] == "strict":
+            fidelity_note = (
+                "除本次必要修正外，不要改写用户输入中已明确给出的剧情事实、角色关系、时间地点、事件顺序和结局。"
+                " 当前输入信息较详细，按保守改写处理：只做镜头化整理和必要衔接，不新增支线、反转、前史、世界观补充或额外设定。"
+            )
+        else:
+            fidelity_note = "除本次必要修正外，不要改写用户输入中的核心设定和剧情主线。"
+        return f"{note} {fidelity_note}".strip()
 
     def _build_scene_constraint_card(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         return {
