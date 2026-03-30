@@ -156,6 +156,15 @@ def _stable_json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _should_use_all_library_profiles_when_unconstrained(
+    *,
+    selected_ids: List[str],
+    direct_profiles: List[Any],
+    auto_match_when_empty: bool,
+) -> bool:
+    return auto_match_when_empty and not selected_ids and not direct_profiles
+
+
 def _keyframe_request_matches_state(
     state: Dict[str, Any],
     *,
@@ -953,15 +962,17 @@ async def generate_script(
             selected_character_ids=request.selected_character_ids,
             direct_character_profiles=[profile.model_dump() for profile in request.character_profiles],
         )
-        if not resolved_profiles and not request.selected_character_ids and not request.character_profiles:
+        if _should_use_all_library_profiles_when_unconstrained(
+            selected_ids=request.selected_character_ids,
+            direct_profiles=request.character_profiles,
+            auto_match_when_empty=True,
+        ) and not resolved_profiles:
             resolved_profiles = await pipeline_character_library_service.list_profiles(db)
         resolved_scene_profiles = await _resolve_scene_profiles(
             db,
             selected_scene_ids=request.selected_scene_ids,
             direct_scene_profiles=[profile.model_dump() for profile in request.scene_profiles],
         )
-        if not resolved_scene_profiles and not request.selected_scene_ids and not request.scene_profiles:
-            resolved_scene_profiles = await pipeline_scene_library_service.list_profiles(db)
         result = await pipeline_workflow_service.generate_script(
             request.user_input,
             style=request.style,
