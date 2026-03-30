@@ -441,7 +441,7 @@ class ScriptGenerator:
                     DoubaoMessage(role="user", content=user_prompt),
                 ],
                 temperature=0.2,
-                max_tokens=5000,
+                max_tokens=15000,
             )
             payload = self._parse_llm_json(response.get_content().strip())
             llm_character_queries = payload.get("character_queries") or []
@@ -642,7 +642,7 @@ class ScriptGenerator:
                     DoubaoMessage(role="user", content=user_prompt),
                 ],
                 temperature=0.35,
-                max_tokens=2400,
+                max_tokens=12400,
             )
             payload = self._parse_llm_json(response.get_content().strip())
             drafts = []
@@ -752,7 +752,7 @@ class ScriptGenerator:
                     ),
                 ],
                 temperature=0.15,
-                max_tokens=800,
+                max_tokens=2800,
             )
             payload = self._parse_llm_json(response.get_content().strip())
             selected_ids = [str(item).strip() for item in (payload.get("selected_ids") or []) if str(item).strip()]
@@ -974,7 +974,7 @@ class ScriptGenerator:
             repair_response = await self.llm.chat_completion(
                 repair_messages,
                 temperature=0.05,
-                max_tokens=5600,
+                max_tokens=15600,
                 timeout=httpx.Timeout(
                     connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
                     read=float(getattr(settings, "DOUBAO_SCRIPT_READ_TIMEOUT", 360.0)),

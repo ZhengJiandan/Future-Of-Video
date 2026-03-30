@@ -379,7 +379,7 @@ class ScriptSplitter:
             response = await self.llm.chat_completion(
                 messages,
                 temperature=0.7,
-                max_tokens=2000
+                max_tokens=12000
             )
             
             content = response.get_content()
@@ -1694,7 +1694,7 @@ class ScriptSplitter:
             response = await self.llm.chat_completion(
                 messages,
                 temperature=0.35,
-                max_tokens=2600,
+                max_tokens=12600,
             )
             payload = self._parse_llm_json(response.get_content().strip())
             raw_segments = payload.get("segments") or []
@@ -2151,7 +2151,7 @@ class ScriptSplitter:
                     DoubaoMessage(role="user", content=user_prompt),
                 ],
                 temperature=0.2,
-                max_tokens=2600,
+                max_tokens=12600,
                 request_label="script_segment_repair",
             )
             payload = self._parse_llm_json(response.get_content().strip())
@@ -2333,7 +2333,7 @@ class ScriptSplitter:
                 DoubaoMessage(role="user", content=user_prompt),
             ],
             temperature=0.2,
-            max_tokens=2200,
+            max_tokens=12200,
             request_label="script_segment_review",
         )
         parsed = self._parse_llm_json(response.get_content().strip())
@@ -2790,7 +2790,7 @@ class ScriptSplitter:
             response = await self.llm.chat_completion(
                 messages,
                 temperature=0.2,
-                max_tokens=1800,
+                max_tokens=11800,
             )
             parsed = self._parse_llm_json(response.get_content().strip())
             prompt = str(parsed.get("prompt") or "").strip()
