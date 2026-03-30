@@ -305,6 +305,31 @@ def test_identify_unmatched_character_queries_returns_only_missing_queries(gener
     assert result == [{"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫", "终端"]}]
 
 
+def test_query_matches_character_profile_accepts_parenthesized_aliases_and_tags(generator: ScriptGenerator) -> None:
+    result = generator._query_matches_character_profile(
+        query={
+            "name_hint": "威龙（王宇昊）",
+            "role": "高二（3）班学生",
+            "archetype": "热情热血散财童子",
+            "category": "主角",
+            "keywords": ["王宇昊"],
+        },
+        profile={
+            "id": "char-weilong",
+            "name": "威龙",
+            "category": "主角",
+            "role": "高二（3）班学生",
+            "archetype": "热情热血散财童子",
+            "aliases": [],
+            "tags": ["王宇昊"],
+            "llm_summary": "威龙，本名王宇昊，是高二（3）班学生。",
+        },
+        user_input="威龙（王宇昊）和同学一起行动。",
+    )
+
+    assert result is True
+
+
 @pytest.mark.asyncio
 async def test_prepare_character_resolution_generates_temporary_characters_for_unmatched_queries(
     generator: ScriptGenerator,
@@ -360,6 +385,37 @@ async def test_prepare_character_resolution_generates_temporary_characters_for_u
             {"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫"]},
         ]
     }
+
+
+def test_align_temporary_character_drafts_with_queries_preserves_name_hint(generator: ScriptGenerator) -> None:
+    drafts = [
+        {
+            "id": "temp-1",
+            "name": "露娜",
+            "role": "高二（1）班学生，计算机竞赛保送预备队成员",
+            "archetype": "高冷毒舌技术宅",
+            "aliases": ["Luna"],
+        }
+    ]
+    queries = [
+        {
+            "name_hint": "麦晓雯（骇爪）",
+            "role": "高二（1）班学生，计算机竞赛保送预备队成员",
+            "archetype": "高冷毒舌技术宅",
+            "category": "CP",
+            "keywords": ["社恐", "广东腔"],
+        }
+    ]
+
+    result = generator._align_temporary_character_drafts_with_queries(
+        drafts=drafts,
+        queries=queries,
+    )
+
+    assert result[0]["name"] == "麦晓雯（骇爪）"
+    assert result[0]["category"] == "CP"
+    assert "露娜" in result[0]["aliases"]
+    assert "Luna" in result[0]["aliases"]
 
 
 def test_build_script_input_policy_uses_strict_mode_for_detailed_input(generator: ScriptGenerator) -> None:

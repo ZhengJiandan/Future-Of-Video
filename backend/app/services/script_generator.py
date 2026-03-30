@@ -540,22 +540,12 @@ class ScriptGenerator:
         profile: Dict[str, Any],
         user_input: str,
     ) -> bool:
-        normalized_haystack_parts = [
-            str(profile.get("name") or "").strip().lower(),
-            str(profile.get("category") or "").strip().lower(),
-            str(profile.get("role") or "").strip().lower(),
-            str(profile.get("archetype") or "").strip().lower(),
-            str(profile.get("description") or "").strip().lower(),
-            str(profile.get("llm_summary") or "").strip().lower(),
-        ]
-        normalized_haystack_parts.extend(str(item).strip().lower() for item in (profile.get("aliases") or []) if str(item).strip())
-        normalized_haystack = " ".join(part for part in normalized_haystack_parts if part)
+        normalized_haystack = self._build_profile_haystack(profile)
         if not normalized_haystack:
             return False
 
         for key in ["name_hint", "role", "archetype", "category"]:
-            normalized_value = str(query.get(key) or "").strip().lower()
-            if normalized_value and normalized_value in normalized_haystack:
+            if self._query_text_matches_haystack(query.get(key), normalized_haystack):
                 return True
 
         keywords = [str(item).strip().lower() for item in (query.get("keywords") or []) if str(item).strip()]
@@ -631,10 +621,11 @@ class ScriptGenerator:
 规则：
 1. 这是临时角色草稿，不要虚构复杂世界观背景
 2. 要优先保证外观稳定性、说话方式和行为约束清晰
-3. llm_summary 控制在 100-250 字以内
-4. image_prompt_base 聚焦静态外观
-5. video_prompt_base 聚焦动态表演和动作
-6. 只输出 JSON"""
+3. 如果 character_queries 中提供了 name_hint，characters 数组必须与 character_queries 一一对应，且每个角色的 name 必须沿用对应的 name_hint 原文，不允许改名；额外称呼只能放进 aliases
+4. llm_summary 控制在 100-250 字以内
+5. image_prompt_base 聚焦静态外观
+6. video_prompt_base 聚焦动态表演和动作
+7. 只输出 JSON"""
         user_prompt = json.dumps(
             {
                 "user_input": user_input,
@@ -661,7 +652,10 @@ class ScriptGenerator:
                 normalized["source"] = "ai-generated-draft"
                 normalized["profile_version"] = 1
                 drafts.append(normalized)
-            return drafts
+            return self._align_temporary_character_drafts_with_queries(
+                drafts=drafts,
+                queries=intent.get("character_queries") or [],
+            )
         except MissingProviderConfigError:
             raise
         except Exception as exc:
@@ -1527,6 +1521,80 @@ class ScriptGenerator:
         query: Dict[str, Any],
         user_input: str,
     ) -> float:
+        haystack = self._build_profile_haystack(profile)
+
+        score = 0.0
+        keywords = [str(item).strip().lower() for item in (query.get("keywords") or []) if str(item).strip()]
+        for key in keywords:
+            if key and key in haystack:
+                score += 2.0
+        if str(query.get("category") or "").strip().lower() and str(query.get("category")).strip().lower() == str(profile.get("category") or "").strip().lower():
+            score += 3.0
+        if profile_type == "character":
+            for key in [query.get("role"), query.get("archetype"), query.get("name_hint")]:
+                if self._query_text_matches_haystack(key, haystack):
+                    score += 2.5
+        else:
+            for key in [query.get("scene_type"), query.get("story_function"), query.get("name_hint")]:
+                if self._query_text_matches_haystack(key, haystack):
+                    score += 2.5
+
+        if not score:
+            user_tokens = self._tokenize(user_input)
+            overlap = sum(1 for token in user_tokens if token and token in haystack)
+            score += overlap * 0.3
+        return score
+
+    def _align_temporary_character_drafts_with_queries(
+        self,
+        *,
+        drafts: List[Dict[str, Any]],
+        queries: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not drafts or not queries:
+            return drafts
+
+        aligned: List[Dict[str, Any]] = []
+        remaining_queries = list(queries)
+
+        for draft in drafts:
+            best_query_index: Optional[int] = None
+            best_score: Optional[float] = None
+            for query_index, query in enumerate(remaining_queries):
+                score = self._score_profile(
+                    profile_type="character",
+                    profile=draft,
+                    query=query,
+                    user_input="",
+                )
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_query_index = query_index
+
+            if best_query_index is None:
+                aligned.append(draft)
+                continue
+
+            query = remaining_queries.pop(best_query_index)
+            merged = dict(draft)
+            hinted_name = str(query.get("name_hint") or "").strip()
+            generated_name = str(merged.get("name") or "").strip()
+            if hinted_name:
+                if generated_name and self._normalize_name(generated_name) != self._normalize_name(hinted_name):
+                    aliases = self._normalize_list(merged.get("aliases") or [])
+                    if generated_name not in aliases:
+                        aliases.append(generated_name)
+                    merged["aliases"] = aliases
+                merged["name"] = hinted_name
+
+            for key in ["category", "role", "archetype"]:
+                if not str(merged.get(key) or "").strip() and str(query.get(key) or "").strip():
+                    merged[key] = str(query.get(key) or "").strip()
+            aligned.append(merged)
+
+        return aligned
+
+    def _build_profile_haystack(self, profile: Dict[str, Any]) -> str:
         haystack_fields = [
             profile.get("name"),
             profile.get("category"),
@@ -1539,35 +1607,26 @@ class ScriptGenerator:
             profile.get("tags"),
             profile.get("aliases"),
         ]
-        haystack = " ".join(
+        return " ".join(
             item if isinstance(item, str) else " ".join(str(v) for v in (item or []))
             for item in haystack_fields
             if item
         ).lower()
 
-        score = 0.0
-        keywords = [str(item).strip().lower() for item in (query.get("keywords") or []) if str(item).strip()]
-        for key in keywords:
-            if key and key in haystack:
-                score += 2.0
-        if str(query.get("category") or "").strip().lower() and str(query.get("category")).strip().lower() == str(profile.get("category") or "").strip().lower():
-            score += 3.0
-        if profile_type == "character":
-            for key in [query.get("role"), query.get("archetype"), query.get("name_hint")]:
-                key_text = str(key or "").strip().lower()
-                if key_text and key_text in haystack:
-                    score += 2.5
-        else:
-            for key in [query.get("scene_type"), query.get("story_function"), query.get("name_hint")]:
-                key_text = str(key or "").strip().lower()
-                if key_text and key_text in haystack:
-                    score += 2.5
+    def _query_text_matches_haystack(self, value: Any, haystack: str) -> bool:
+        return any(candidate in haystack for candidate in self._expand_query_text_candidates(value))
 
-        if not score:
-            user_tokens = self._tokenize(user_input)
-            overlap = sum(1 for token in user_tokens if token and token in haystack)
-            score += overlap * 0.3
-        return score
+    def _expand_query_text_candidates(self, value: Any) -> List[str]:
+        raw_value = str(value or "").strip().lower()
+        if not raw_value:
+            return []
+
+        candidates: List[str] = []
+        for item in [raw_value, *re.split(r"[()（）/|,，、]+", raw_value)]:
+            normalized = re.sub(r"\s+", " ", str(item or "").strip())
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+        return candidates
 
     def _normalize_character_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         normalized = dict(profile)
