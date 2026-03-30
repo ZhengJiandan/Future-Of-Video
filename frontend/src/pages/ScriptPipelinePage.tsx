@@ -447,6 +447,20 @@ const readRequestedProjectId = (state: unknown): string | null => {
   return normalized || null
 }
 
+const stableSerialize = (value: unknown): string => {
+  if (value === null || value === undefined) {
+    return 'null'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(',')}]`
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
 export const ScriptPipelinePage: React.FC = () => {
   const navigate = useNavigate()
   const location = useLocation()
@@ -455,6 +469,7 @@ export const ScriptPipelinePage: React.FC = () => {
   const suppressProjectSaveRef = useRef(true)
   const creatingProjectRef = useRef(false)
   const splitRequestInFlightRef = useRef(false)
+  const keyframeRequestInFlightRef = useRef(false)
   const pendingRequestedProjectIdRef = useRef<string | null>(readRequestedProjectId(location.state))
   const selectedProjectId = useProjectStore((state) => state.currentProjectId)
   const projectStoreHydrated = useProjectStore((state) => state.hydrated)
@@ -787,6 +802,62 @@ export const ScriptPipelinePage: React.FC = () => {
           setCharacterConfirmOpen(false)
           setError(null)
           message.warning('拆分片段请求超时，但后端已完成拆分，已自动恢复到片段确认阶段')
+          return true
+        }
+      } catch {
+        // Ignore polling errors and keep retrying until timeout.
+      }
+    }
+
+    throw originalError
+  }
+
+  const recoverKeyframesFromProject = async (
+    projectId: string,
+    requestMeta: {
+      style: string
+      selectedCharacterIds: string[]
+      selectedSceneIds: string[]
+      referenceImages: ReferenceImageAsset[]
+      segments: SegmentItem[]
+    },
+    originalError: unknown,
+  ) => {
+    const expectedSegments = stableSerialize(requestMeta.segments)
+    const expectedCharacterIds = stableSerialize(requestMeta.selectedCharacterIds)
+    const expectedSceneIds = stableSerialize(requestMeta.selectedSceneIds)
+    const expectedReferenceImages = stableSerialize(requestMeta.referenceImages)
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      try {
+        const response = await scriptPipelineApi.getProject(projectId)
+        const item = response.data.item as Record<string, unknown> | null
+        const state = (item?.state as Record<string, unknown>) || {}
+        const restoredKeyframes = Array.isArray(state.keyframes) ? (state.keyframes as SegmentKeyframes[]) : []
+        const restoredSegments = Array.isArray(state.segments) ? normalizeSegmentItems(state.segments as SegmentItem[]) : []
+        const restoredStyle = String(state.stylePreference || '').trim()
+        const restoredCharacterIds = Array.isArray(state.selectedCharacterIds)
+          ? (state.selectedCharacterIds as string[])
+          : []
+        const restoredSceneIds = Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : []
+        const restoredReferenceImages = Array.isArray(state.referenceImages)
+          ? (state.referenceImages as ReferenceImageAsset[])
+          : []
+
+        if (
+          item &&
+          restoredKeyframes.length > 0 &&
+          restoredKeyframes.length === requestMeta.segments.length &&
+          restoredStyle === requestMeta.style &&
+          stableSerialize(restoredSegments) === expectedSegments &&
+          stableSerialize(restoredCharacterIds) === expectedCharacterIds &&
+          stableSerialize(restoredSceneIds) === expectedSceneIds &&
+          stableSerialize(restoredReferenceImages) === expectedReferenceImages
+        ) {
+          applyProjectState(item)
+          setError(null)
+          message.warning('首帧生成请求超时，但后端已完成生成，已自动恢复到首尾帧审核阶段')
           return true
         }
       } catch {
@@ -1412,11 +1483,16 @@ export const ScriptPipelinePage: React.FC = () => {
   }
 
   const handleGenerateKeyframes = async () => {
-    if (!segments.length) {
+    if (!segments.length || keyframeRequestInFlightRef.current) {
       return
     }
 
+    keyframeRequestInFlightRef.current = true
     const normalizedSegments = normalizeSegmentItems(segments)
+    const normalizedStyle = stylePreference.trim()
+    const requestSelectedCharacterIds = [...selectedCharacterIds]
+    const requestSelectedSceneIds = [...selectedSceneIds]
+    let ensuredProjectId: string | null = null
 
     setCurrentStep(3)
     setKeyframeLoading(true)
@@ -1427,21 +1503,47 @@ export const ScriptPipelinePage: React.FC = () => {
     setSegments(normalizedSegments)
 
     try {
+      ensuredProjectId = await ensureProjectExists()
       const response = await scriptPipelineApi.generateKeyframes({
+        project_id: ensuredProjectId,
         project_title: projectTitle.trim() || '未命名项目',
-        style: stylePreference.trim(),
-        selected_character_ids: selectedCharacterIds,
-        selected_scene_ids: selectedSceneIds,
+        style: normalizedStyle,
+        selected_character_ids: requestSelectedCharacterIds,
+        selected_scene_ids: requestSelectedSceneIds,
         character_profiles: effectiveCharacterProfiles,
+        scene_profiles: generatedScript?.scene_profiles || [],
         reference_images: referenceImages,
         segments: normalizedSegments,
       })
       setKeyframes(response.data.keyframes)
       setCurrentStep(3)
     } catch (requestError: unknown) {
+      if (ensuredProjectId && isGatewayTimeoutError(requestError)) {
+        try {
+          const recovered = await recoverKeyframesFromProject(
+            ensuredProjectId,
+            {
+              style: normalizedStyle,
+              selectedCharacterIds: requestSelectedCharacterIds,
+              selectedSceneIds: requestSelectedSceneIds,
+              referenceImages,
+              segments: normalizedSegments,
+            },
+            requestError,
+          )
+          if (recovered) {
+            return
+          }
+        } catch (recoveryError) {
+          setError(extractApiErrorMessage(recoveryError, '首尾帧生成失败'))
+          setCurrentStep(2)
+          return
+        }
+      }
       setError(extractApiErrorMessage(requestError, '首尾帧生成失败'))
       setCurrentStep(2)
     } finally {
+      keyframeRequestInFlightRef.current = false
       setKeyframeLoading(false)
     }
   }

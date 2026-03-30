@@ -954,6 +954,7 @@ export const scriptPipelineApi = {
   }) => apiClient.post<SplitScriptResponse>('/pipeline/split-script', data),
 
   generateKeyframes: (data: {
+    project_id?: string
     project_title: string
     style?: string
     selected_character_ids?: string[]

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -120,6 +121,95 @@ def _build_split_response_from_state(state: Dict[str, Any]) -> Optional[Dict[str
         "segments": segments,
         "continuity_points": state.get("continuityPoints") if isinstance(state.get("continuityPoints"), list) else [],
         "validation_report": validation_report,
+    }
+
+
+def _normalize_id_list(values: List[Any]) -> List[str]:
+    normalized: List[str] = []
+    for value in values or []:
+        item = str(value or "").strip()
+        if item:
+            normalized.append(item)
+    return normalized
+
+
+def _build_keyframe_state_signature(
+    *,
+    style: str,
+    selected_character_ids: List[str],
+    selected_scene_ids: List[str],
+    segments: List[Dict[str, Any]],
+    reference_images: List[Dict[str, Any]],
+) -> str:
+    payload = {
+        "style": str(style or "").strip(),
+        "selected_character_ids": _normalize_id_list(selected_character_ids),
+        "selected_scene_ids": _normalize_id_list(selected_scene_ids),
+        "segments": segments or [],
+        "reference_images": reference_images or [],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _stable_json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _keyframe_request_matches_state(
+    state: Dict[str, Any],
+    *,
+    style: str,
+    selected_character_ids: List[str],
+    selected_scene_ids: List[str],
+    segments: List[Dict[str, Any]],
+    reference_images: List[Dict[str, Any]],
+) -> bool:
+    saved_signature = str(state.get("keyframeRequestSignature") or "").strip()
+    request_signature = _build_keyframe_state_signature(
+        style=style,
+        selected_character_ids=selected_character_ids,
+        selected_scene_ids=selected_scene_ids,
+        segments=segments,
+        reference_images=reference_images,
+    )
+    if saved_signature and saved_signature == request_signature:
+        return True
+
+    saved_keyframes = state.get("keyframes")
+    if not isinstance(saved_keyframes, list) or not saved_keyframes:
+        return False
+
+    saved_style = str(state.get("stylePreference") or "").strip()
+    saved_character_ids = _normalize_id_list(state.get("selectedCharacterIds") or [])
+    saved_scene_ids = _normalize_id_list(state.get("selectedSceneIds") or [])
+    saved_segments = state.get("segments") if isinstance(state.get("segments"), list) else []
+    saved_reference_images = state.get("referenceImages") if isinstance(state.get("referenceImages"), list) else []
+
+    return (
+        saved_style == str(style or "").strip()
+        and saved_character_ids == _normalize_id_list(selected_character_ids)
+        and saved_scene_ids == _normalize_id_list(selected_scene_ids)
+        and _stable_json_dumps(saved_segments) == _stable_json_dumps(segments or [])
+        and _stable_json_dumps(saved_reference_images) == _stable_json_dumps(reference_images or [])
+    )
+
+
+def _build_keyframes_response_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    keyframes = state.get("keyframes")
+    if not isinstance(keyframes, list) or not keyframes:
+        return None
+
+    generated_script = state.get("generatedScript") if isinstance(state.get("generatedScript"), dict) else {}
+    return {
+        "project_title": str(state.get("projectTitle") or "未命名项目").strip() or "未命名项目",
+        "style": str(state.get("stylePreference") or "").strip(),
+        "selected_character_ids": _normalize_id_list(state.get("selectedCharacterIds") or []),
+        "selected_scene_ids": _normalize_id_list(state.get("selectedSceneIds") or []),
+        "character_profiles": generated_script.get("character_profiles") if isinstance(generated_script.get("character_profiles"), list) else [],
+        "scene_profiles": generated_script.get("scene_profiles") if isinstance(generated_script.get("scene_profiles"), list) else [],
+        "reference_images": state.get("referenceImages") if isinstance(state.get("referenceImages"), list) else [],
+        "keyframes": keyframes,
     }
 
 
@@ -439,6 +529,7 @@ class KeyframeBundlePayload(BaseModel):
 
 
 class GenerateKeyframesRequest(BaseModel):
+    project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
     project_title: str = Field(default="未命名项目")
     style: str = Field(default="", description="视觉风格偏好")
     selected_character_ids: List[str] = Field(default_factory=list, description="已选角色档案 ID")
@@ -1076,11 +1167,44 @@ async def split_script(
 
 
 @router.post("/generate-keyframes")
-async def generate_keyframes(request: GenerateKeyframesRequest, db: AsyncSession = Depends(get_db)):
+async def generate_keyframes(
+    request: GenerateKeyframesRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     """为审核后的片段生成首尾帧。"""
     start_time = time.time()
 
     try:
+        existing_project = None
+        if request.project_id:
+            existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
+        if existing_project is None:
+            existing_project = await pipeline_project_service.get_current_project(db, current_user.id)
+
+        existing_state = existing_project.get("state") if isinstance(existing_project, dict) else {}
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+
+        request_segments = [segment.model_dump() for segment in request.segments]
+        request_reference_images = [reference.model_dump() for reference in request.reference_images]
+        if existing_state and _keyframe_request_matches_state(
+            existing_state,
+            style=request.style,
+            selected_character_ids=request.selected_character_ids,
+            selected_scene_ids=request.selected_scene_ids,
+            segments=request_segments,
+            reference_images=request_reference_images,
+        ):
+            cached_result = _build_keyframes_response_from_state(existing_state)
+            if cached_result is not None:
+                return {
+                    "success": True,
+                    "message": "已直接复用上一次成功的首尾帧结果，避免重复调用模型。",
+                    "processing_time": time.time() - start_time,
+                    **cached_result,
+                }
+
         resolved_profiles = await _resolve_character_profiles(
             db,
             selected_character_ids=request.selected_character_ids,
@@ -1093,15 +1217,59 @@ async def generate_keyframes(request: GenerateKeyframesRequest, db: AsyncSession
         )
         result = await pipeline_workflow_service.generate_keyframes(
             project_title=request.project_title,
-            segments=[segment.model_dump() for segment in request.segments],
+            segments=request_segments,
             style=request.style,
             selected_character_ids=request.selected_character_ids,
             character_profiles=resolved_profiles,
             selected_scene_ids=request.selected_scene_ids,
             scene_profiles=resolved_scene_profiles,
-            reference_images=[reference.model_dump() for reference in request.reference_images],
+            reference_images=request_reference_images,
+        )
+        project_title = str(
+            result.get("project_title")
+            or (existing_project or {}).get("project_title")
+            or existing_state.get("projectTitle")
+            or request.project_title
+            or "未命名项目"
+        ).strip() or "未命名项目"
+        summary_payload = existing_state.get("scriptSummary") if isinstance(existing_state.get("scriptSummary"), dict) else {}
+        summary_text = str(summary_payload.get("synopsis") or (existing_project or {}).get("summary") or "").strip()
+        keyframe_signature = _build_keyframe_state_signature(
+            style=request.style,
+            selected_character_ids=request.selected_character_ids,
+            selected_scene_ids=request.selected_scene_ids,
+            segments=request_segments,
+            reference_images=request_reference_images,
+        )
+        project_state = {
+            **existing_state,
+            "currentStep": 3,
+            "transitionDirection": "forward",
+            "projectTitle": project_title,
+            "stylePreference": request.style,
+            "selectedCharacterIds": result.get("selected_character_ids") or request.selected_character_ids,
+            "selectedSceneIds": result.get("selected_scene_ids") or request.selected_scene_ids,
+            "referenceImages": request_reference_images,
+            "segments": request_segments,
+            "keyframes": result.get("keyframes") or [],
+            "keyframeRequestSignature": keyframe_signature,
+            "renderTaskId": None,
+            "renderStatus": None,
+        }
+        await pipeline_project_service.save_current_project(
+            db,
+            project_id=request.project_id,
+            user_id=current_user.id,
+            project_title=project_title,
+            current_step=3,
+            state=project_state,
+            status="draft",
+            last_render_task_id="",
+            summary=summary_text,
         )
         return {
+            "success": True,
+            "message": result.get("message") or "关键帧生成完成，请审核首尾帧后再开始生成视频",
             "processing_time": time.time() - start_time,
             **result,
         }

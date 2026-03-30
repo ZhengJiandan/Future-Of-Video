@@ -408,6 +408,10 @@ class PipelineWorkflowService:
         generated_start_frame_count = 0
 
         for index, segment in enumerate(normalized_segments):
+            segment_character_profiles = self._select_character_profiles_for_segment(
+                segment=segment,
+                character_profiles=resolved_character_profiles,
+            )
             should_pre_generate_start_frame = bool(segment.get("pre_generate_start_frame", False) or index == 0)
             start_frame_reason = str(segment.get("start_frame_generation_reason") or "")
             if should_pre_generate_start_frame:
@@ -416,7 +420,7 @@ class PipelineWorkflowService:
                     segment=segment,
                     frame_kind="start",
                     style=style,
-                    character_profiles=resolved_character_profiles,
+                    character_profiles=segment_character_profiles,
                     scene_profiles=resolved_scene_profiles,
                     reference_images=normalized_references,
                     base_asset=None,
@@ -732,6 +736,11 @@ class PipelineWorkflowService:
                 state.touch()
                 await self._persist_render_task_state(state=state)
 
+                segment_character_profiles = self._select_character_profiles_for_segment(
+                    segment=segment,
+                    character_profiles=state.character_profiles,
+                )
+
                 runtime_bundle = keyframe_map.get(clip_number)
                 if previous_last_frame and self._should_reuse_previous_last_frame(runtime_bundle):
                     runtime_bundle = self._with_runtime_start_frame(
@@ -750,7 +759,7 @@ class PipelineWorkflowService:
                     task_dir=task_dir,
                     segment=segment,
                     keyframe_bundle=runtime_bundle,
-                    character_profiles=state.character_profiles,
+                    character_profiles=segment_character_profiles,
                     scene_profiles=state.scene_profiles,
                     render_config=state.render_config,
                 )
@@ -3432,7 +3441,7 @@ class PipelineWorkflowService:
         character_profiles: List[Dict[str, Any]],
         scene_profiles: List[Dict[str, Any]],
     ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        character_ids = {str(item).strip() for item in (segment.get("character_profile_ids") or []) if str(item).strip()}
+        character_ids = set(self._collect_segment_character_ids_for_context(segment))
         scene_profile_id = str(segment.get("scene_profile_id") or "").strip()
         filtered_characters = [
             profile for profile in character_profiles
@@ -3443,6 +3452,43 @@ class PipelineWorkflowService:
             scene_profiles[0] if scene_profiles else None,
         )
         return filtered_characters or character_profiles, filtered_scene
+
+    def _collect_segment_character_ids_for_context(self, segment: Dict[str, Any]) -> List[str]:
+        candidate_values: List[Any] = []
+        candidate_values.extend(segment.get("character_profile_ids") or [])
+        candidate_values.extend(segment.get("new_character_profile_ids") or [])
+        candidate_values.extend(segment.get("late_entry_character_profile_ids") or [])
+        candidate_values.extend(segment.get("handoff_character_profile_ids") or [])
+        for dialogue in self._normalize_segment_dialogues(segment.get("key_dialogues") or []):
+            speaker_character_id = str(dialogue.get("speaker_character_id") or "").strip()
+            if speaker_character_id:
+                candidate_values.append(speaker_character_id)
+
+        seen: set[str] = set()
+        result: List[str] = []
+        for value in candidate_values:
+            normalized = str(value or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    def _select_character_profiles_for_segment(
+        self,
+        *,
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        segment_character_ids = set(self._collect_segment_character_ids_for_context(segment))
+        if not segment_character_ids:
+            return list(character_profiles or [])
+        filtered = [
+            profile
+            for profile in (character_profiles or [])
+            if str(profile.get("id") or "").strip() in segment_character_ids
+        ]
+        return filtered or list(character_profiles or [])
 
     def _build_keyframe_reference_images(
         self,
