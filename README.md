@@ -583,3 +583,21 @@ DATABASE_URL=sqlite+aiosqlite:///./future_of_video.db
 - 微信号：`wxid_xw0hc18v0icp12`
 - 邮箱：`494829832@qq.com`
 - 联系备注 fov 即可。
+
+## ⭐ Star History
+
+如果 future-of-video 帮到了你，给个 Star 吧！⭐
+
+<!-- Uncomment when published:
+<div align="center">
+  <a href="https://star-history.com/#HKUDS/CLI-Anything&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=HKUDS/CLI-Anything&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=HKUDS/CLI-Anything&type=Date" />
+      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=HKUDS/CLI-Anything&type=Date" />
+    </picture>
+  </a>
+</div>
+-->
+
+---
