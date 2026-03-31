@@ -185,7 +185,8 @@ class ScriptSplitter:
     async def split_script(
         self,
         script: str,
-        target_duration: Optional[float] = None
+        target_duration: Optional[float] = None,
+        include_review: bool = True,
     ) -> SplitResult:
         """
         拆分剧本
@@ -246,26 +247,28 @@ class ScriptSplitter:
         logger.info("步骤4: 生成衔接信息...")
         continuity_points = self._generate_continuity_points(segments)
 
-        # 步骤5: 对拆分结果做二次校验
-        logger.info("步骤5: 校验视频片段...")
-        validation_report = await self._review_segments(
-            script=script,
-            segments=segments,
-            target_duration=target_duration,
-        )
+        validation_report: Dict[str, Any] = {}
+        if include_review:
+            # 步骤5: 对拆分结果做二次校验
+            logger.info("步骤5: 校验视频片段...")
+            validation_report = await self._review_segments(
+                script=script,
+                segments=segments,
+                target_duration=target_duration,
+            )
 
-        # 步骤6: 自动修复校验发现的问题，并返回修复后的更优结果
-        logger.info("步骤6: 修复视频片段问题...")
-        segments, continuity_points, validation_report = await self._auto_fix_segments_if_needed(
-            script=script,
-            analysis=analysis,
-            effective_target_duration=effective_target_duration,
-            current_split_points=split_points,
-            current_segments=segments,
-            current_continuity_points=continuity_points,
-            current_validation_report=validation_report,
-            requested_target_duration=target_duration,
-        )
+            # 步骤6: 自动修复校验发现的问题，并返回修复后的更优结果
+            logger.info("步骤6: 修复视频片段问题...")
+            segments, continuity_points, validation_report = await self._auto_fix_segments_if_needed(
+                script=script,
+                analysis=analysis,
+                effective_target_duration=effective_target_duration,
+                current_split_points=split_points,
+                current_segments=segments,
+                current_continuity_points=continuity_points,
+                current_validation_report=validation_report,
+                requested_target_duration=target_duration,
+            )
         # 组装结果
         total_duration = sum(seg.duration for seg in segments)
         result = SplitResult(
@@ -281,6 +284,104 @@ class ScriptSplitter:
         logger.info(f"剧本拆分完成，共 {len(segments)} 个片段，总时长 {total_duration:.1f}秒")
         
         return result
+
+    async def review_existing_segments(
+        self,
+        *,
+        script: str,
+        segments: List[Dict[str, Any]],
+        target_duration: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        normalized_segments = self._hydrate_segments_from_payload(segments)
+        continuity_points = self._generate_continuity_points(normalized_segments)
+        validation_report = await self._review_segments(
+            script=script,
+            segments=normalized_segments,
+            target_duration=target_duration,
+        )
+        return {
+            "segments": [asdict(segment) for segment in normalized_segments],
+            "continuity_points": continuity_points,
+            "validation_report": validation_report,
+        }
+
+    def _hydrate_segments_from_payload(self, segments: List[Dict[str, Any]]) -> List[VideoSegment]:
+        normalized: List[VideoSegment] = []
+        for index, raw in enumerate(segments or [], start=1):
+            if not isinstance(raw, dict):
+                continue
+            character_profile_versions: Dict[str, int] = {}
+            for key, value in dict(raw.get("character_profile_versions") or {}).items():
+                normalized_key = str(key).strip()
+                if not normalized_key:
+                    continue
+                try:
+                    character_profile_versions[normalized_key] = int(value)
+                except (TypeError, ValueError):
+                    character_profile_versions[normalized_key] = 1
+
+            normalized.append(
+                VideoSegment(
+                    segment_number=int(raw.get("segment_number") or index),
+                    title=str(raw.get("title") or "").strip(),
+                    description=str(raw.get("description") or "").strip(),
+                    start_time=float(raw.get("start_time") or 0.0),
+                    end_time=float(raw.get("end_time") or 0.0),
+                    duration=float(raw.get("duration") or 0.0),
+                    shots_summary=str(raw.get("shots_summary") or "").strip(),
+                    key_actions=[str(item).strip() for item in (raw.get("key_actions") or []) if str(item).strip()],
+                    key_dialogues=self._hydrate_segment_dialogues(raw.get("key_dialogues") or []),
+                    transition_in=str(raw.get("transition_in") or "").strip(),
+                    transition_out=str(raw.get("transition_out") or "").strip(),
+                    continuity_from_prev=str(raw.get("continuity_from_prev") or "").strip(),
+                    continuity_to_next=str(raw.get("continuity_to_next") or "").strip(),
+                    video_prompt=str(raw.get("video_prompt") or "").strip(),
+                    negative_prompt=str(raw.get("negative_prompt") or "").strip(),
+                    generation_config=dict(raw.get("generation_config") or {}),
+                    scene_profile_id=str(raw.get("scene_profile_id") or "").strip(),
+                    scene_profile_version=int(raw.get("scene_profile_version") or 1),
+                    character_profile_ids=[str(item).strip() for item in (raw.get("character_profile_ids") or []) if str(item).strip()],
+                    character_profile_versions=character_profile_versions,
+                    prompt_focus=str(raw.get("prompt_focus") or "").strip(),
+                    contains_primary_character=bool(raw.get("contains_primary_character")),
+                    ending_contains_primary_character=bool(raw.get("ending_contains_primary_character")),
+                    pre_generate_start_frame=bool(raw.get("pre_generate_start_frame")),
+                    start_frame_generation_reason=str(raw.get("start_frame_generation_reason") or "").strip(),
+                    prefer_primary_character_end_frame=bool(raw.get("prefer_primary_character_end_frame")),
+                    new_character_profile_ids=[str(item).strip() for item in (raw.get("new_character_profile_ids") or []) if str(item).strip()],
+                    late_entry_character_profile_ids=[str(item).strip() for item in (raw.get("late_entry_character_profile_ids") or []) if str(item).strip()],
+                    handoff_character_profile_ids=[str(item).strip() for item in (raw.get("handoff_character_profile_ids") or []) if str(item).strip()],
+                    ending_contains_handoff_characters=bool(raw.get("ending_contains_handoff_characters")),
+                    prefer_character_handoff_end_frame=bool(raw.get("prefer_character_handoff_end_frame")),
+                    video_url=str(raw.get("video_url") or "").strip(),
+                    status=str(raw.get("status") or "ready").strip() or "ready",
+                )
+            )
+        return normalized
+
+    def _hydrate_segment_dialogues(self, raw_dialogues: Any) -> List[SegmentDialogue]:
+        if not isinstance(raw_dialogues, list):
+            return []
+
+        dialogues: List[SegmentDialogue] = []
+        for item in raw_dialogues:
+            if isinstance(item, SegmentDialogue):
+                dialogues.append(item)
+            elif isinstance(item, dict):
+                dialogues.append(
+                    SegmentDialogue(
+                        text=str(item.get("text") or "").strip(),
+                        speaker_name=str(item.get("speaker_name") or item.get("speaker") or "").strip(),
+                        speaker_character_id=str(item.get("speaker_character_id") or item.get("character_id") or "").strip(),
+                        emotion=str(item.get("emotion") or "").strip(),
+                        tone=str(item.get("tone") or "").strip(),
+                    )
+                )
+            else:
+                text = str(item or "").strip()
+                if text:
+                    dialogues.append(SegmentDialogue(text=text))
+        return dialogues
     
     async def _analyze_script(self, script: str) -> dict:
         """使用LLM分析剧本结构"""

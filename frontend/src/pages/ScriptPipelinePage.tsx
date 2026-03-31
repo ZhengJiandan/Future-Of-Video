@@ -505,6 +505,7 @@ export const ScriptPipelinePage: React.FC = () => {
 
   const [scriptLoading, setScriptLoading] = useState(false)
   const [splitLoading, setSplitLoading] = useState(false)
+  const [splitReviewLoading, setSplitReviewLoading] = useState(false)
   const [keyframeLoading, setKeyframeLoading] = useState(false)
   const [renderStarting, setRenderStarting] = useState(false)
   const [renderActionLoading, setRenderActionLoading] = useState(false)
@@ -567,6 +568,7 @@ export const ScriptPipelinePage: React.FC = () => {
     setScriptSummary(null)
     setSegments([])
     setSplitValidationReport(null)
+    setSplitReviewLoading(false)
     setKeyframes([])
     setRenderTaskId(null)
     setRenderStatus(null)
@@ -648,6 +650,7 @@ export const ScriptPipelinePage: React.FC = () => {
     setScriptSummary(restoredScriptSummary)
     setSegments(restoredSegments)
     setSplitValidationReport(restoredSplitValidationReport)
+    setSplitReviewLoading(false)
     setKeyframes(restoredKeyframes)
     setRenderTaskId(
       typeof state.renderTaskId === 'string' && state.renderTaskId
@@ -1286,6 +1289,46 @@ export const ScriptPipelinePage: React.FC = () => {
     return [...selectedLibraryProfiles, ...selectedTemporaryProfiles]
   }
 
+  const runReviewSplitScript = async ({
+    projectId,
+    scriptText,
+    segmentsToReview,
+    maxDuration,
+    targetDuration,
+    silentOnError = false,
+  }: {
+    projectId?: string | null
+    scriptText: string
+    segmentsToReview: SegmentItem[]
+    maxDuration: number
+    targetDuration: number | null
+    silentOnError?: boolean
+  }) => {
+    if (!scriptText.trim() || !segmentsToReview.length || splitReviewLoading) {
+      return
+    }
+
+    setSplitReviewLoading(true)
+    try {
+      const response = await scriptPipelineApi.reviewSplitScript({
+        project_id: projectId || undefined,
+        script_text: scriptText.trim(),
+        max_segment_duration: maxDuration,
+        target_total_duration: targetDuration || undefined,
+        segments: segmentsToReview,
+      })
+      setSegments(normalizeSegmentItems(response.data.segments || segmentsToReview))
+      setSplitValidationReport(response.data.validation_report || null)
+    } catch (requestError: unknown) {
+      setSplitValidationReport(null)
+      if (!silentOnError) {
+        message.error(extractApiErrorMessage(requestError, '片段审核失败'))
+      }
+    } finally {
+      setSplitReviewLoading(false)
+    }
+  }
+
   const runSplitScript = async () => {
     if (!scriptDraft.trim() || splitRequestInFlightRef.current) {
       return
@@ -1298,6 +1341,7 @@ export const ScriptPipelinePage: React.FC = () => {
 
     setCurrentStep(2)
     setSplitLoading(true)
+    setSplitReviewLoading(false)
     setError(null)
     setSegments([])
     setSplitValidationReport(null)
@@ -1314,10 +1358,19 @@ export const ScriptPipelinePage: React.FC = () => {
         max_segment_duration: normalizedMaxSegmentDuration,
         target_total_duration: targetTotalDuration || undefined,
       })
-      setSegments(normalizeSegmentItems(response.data.segments))
+      const normalizedSegments = normalizeSegmentItems(response.data.segments)
+      setSegments(normalizedSegments)
       setSplitValidationReport(response.data.validation_report || null)
       setKeyframes([])
       setCurrentStep(2)
+      void runReviewSplitScript({
+        projectId: ensuredProjectId,
+        scriptText: normalizedScriptDraft,
+        segmentsToReview: normalizedSegments,
+        maxDuration: normalizedMaxSegmentDuration,
+        targetDuration: targetTotalDuration ?? null,
+        silentOnError: true,
+      })
     } catch (requestError: unknown) {
       if (ensuredProjectId && isGatewayTimeoutError(requestError)) {
         try {
@@ -2118,10 +2171,23 @@ export const ScriptPipelinePage: React.FC = () => {
       return (
         <Space direction="vertical" size={20} style={{ width: '100%' }}>
           <Alert
-            type="info"
+            type={splitReviewLoading ? 'warning' : 'info'}
             showIcon
-            message={`当前已拆分为 ${segments.length} 个片段。片段不做时间重叠，只保留画面连续性。`}
+            message={
+              splitReviewLoading
+                ? `当前已拆分为 ${segments.length} 个片段，正在后台审核片段质量。`
+                : `当前已拆分为 ${segments.length} 个片段。片段不做时间重叠，只保留画面连续性。`
+            }
+            description={splitReviewLoading ? '你可以先开始检查和编辑片段，审核报告会在完成后自动刷新。' : undefined}
           />
+          {splitReviewLoading ? (
+            <Card size="small" title="片段审核中">
+              <Space align="center" size={12}>
+                <Spin />
+                <Text type="secondary">正在补充片段审核报告，这一步已从“拆分接口”中拆出，不会阻塞片段显示。</Text>
+              </Space>
+            </Card>
+          ) : null}
           {splitValidationReport ? (
             <Card title="片段二次校验">
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -2365,6 +2431,21 @@ export const ScriptPipelinePage: React.FC = () => {
             <Space wrap>
               <Button loading={splitLoading} disabled={!scriptDraft.trim()} onClick={handleSplitScript}>
                 重新生成片段
+              </Button>
+              <Button
+                loading={splitReviewLoading}
+                disabled={!scriptDraft.trim() || !segments.length}
+                onClick={() =>
+                  void runReviewSplitScript({
+                    projectId: selectedProjectId || null,
+                    scriptText: scriptDraft,
+                    segmentsToReview: normalizeSegmentItems(segments),
+                    maxDuration: normalizeMaxSegmentDuration(maxSegmentDuration),
+                    targetDuration: targetTotalDuration ?? null,
+                  })
+                }
+              >
+                审核当前片段
               </Button>
               <Button type="primary" icon={<FileImageOutlined />} loading={keyframeLoading} onClick={handleGenerateKeyframes}>
                 通过片段并生成首尾帧

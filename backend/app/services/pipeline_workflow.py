@@ -365,6 +365,7 @@ class PipelineWorkflowService:
         split_result = await splitter.split_script(
             script=script_text,
             target_duration=target_total_duration,
+            include_review=False,
         )
 
         segments = [asdict(segment) for segment in split_result.segments]
@@ -375,6 +376,51 @@ class PipelineWorkflowService:
             "segments": segments,
             "continuity_points": split_result.continuity_points,
             "validation_report": split_result.validation_report,
+        }
+
+    async def review_split_script(
+        self,
+        script_text: str,
+        *,
+        segments: List[Dict[str, Any]],
+        max_segment_duration: float = 10.0,
+        target_total_duration: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        splitter = ScriptSplitter(
+            SplitConfig(
+                max_segment_duration=min(float(max_segment_duration), MAX_VIDEO_SEGMENT_DURATION),
+                min_segment_duration=3.0,
+                prefer_scene_boundary=True,
+                preserve_dialogue=True,
+                smooth_transition=True,
+            )
+        )
+        review_result = await splitter.review_existing_segments(
+            script=script_text,
+            segments=segments,
+            target_duration=target_total_duration,
+        )
+        normalized_segments = review_result.get("segments") or []
+        validation_report = review_result.get("validation_report") if isinstance(review_result.get("validation_report"), dict) else None
+        total_duration = 0.0
+        if validation_report and validation_report.get("actual_total_duration") is not None:
+            try:
+                total_duration = float(validation_report.get("actual_total_duration") or 0.0)
+            except (TypeError, ValueError):
+                total_duration = 0.0
+        if total_duration <= 0:
+            total_duration = round(
+                sum(float((segment or {}).get("duration") or 0.0) for segment in normalized_segments if isinstance(segment, dict)),
+                2,
+            )
+
+        return {
+            "script_text": script_text,
+            "total_duration": total_duration,
+            "segment_count": len(normalized_segments),
+            "segments": normalized_segments,
+            "continuity_points": review_result.get("continuity_points") or [],
+            "validation_report": validation_report,
         }
 
     async def generate_keyframes(

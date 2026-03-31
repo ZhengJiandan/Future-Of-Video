@@ -124,6 +124,72 @@ def _build_split_response_from_state(state: Dict[str, Any]) -> Optional[Dict[str
     }
 
 
+def _build_split_review_state_signature(
+    *,
+    script_text: str,
+    max_segment_duration: float,
+    target_total_duration: Optional[float],
+    segments: List[Dict[str, Any]],
+) -> str:
+    payload = {
+        "script_text": str(script_text or "").strip(),
+        "max_segment_duration": round(float(max_segment_duration), 2),
+        "target_total_duration": _normalize_optional_duration(target_total_duration),
+        "segments": segments or [],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _split_review_request_matches_state(
+    state: Dict[str, Any],
+    *,
+    script_text: str,
+    max_segment_duration: float,
+    target_total_duration: Optional[float],
+    segments: List[Dict[str, Any]],
+) -> bool:
+    saved_signature = str(state.get("splitReviewRequestSignature") or "").strip()
+    request_signature = _build_split_review_state_signature(
+        script_text=script_text,
+        max_segment_duration=max_segment_duration,
+        target_total_duration=target_total_duration,
+        segments=segments,
+    )
+    if saved_signature and saved_signature == request_signature:
+        return True
+
+    saved_report = state.get("splitValidationReport")
+    if not isinstance(saved_report, dict) or not saved_report:
+        return False
+
+    saved_script = str(state.get("scriptDraft") or "").strip()
+    saved_max_duration = round(float(state.get("maxSegmentDuration") or 0.0), 2)
+    raw_saved_target_duration = state.get("targetTotalDuration")
+    try:
+        saved_target_duration = _normalize_optional_duration(
+            None if raw_saved_target_duration in {None, ""} else float(raw_saved_target_duration)
+        )
+    except (TypeError, ValueError):
+        saved_target_duration = None
+    saved_segments = state.get("segments") if isinstance(state.get("segments"), list) else []
+    return (
+        saved_script == str(script_text or "").strip()
+        and saved_max_duration == round(float(max_segment_duration), 2)
+        and saved_target_duration == _normalize_optional_duration(target_total_duration)
+        and _stable_json_dumps(saved_segments) == _stable_json_dumps(segments or [])
+    )
+
+
+def _build_split_review_response_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    response = _build_split_response_from_state(state)
+    if response is None:
+        return None
+    if not isinstance(state.get("splitValidationReport"), dict):
+        return None
+    return response
+
+
 def _normalize_id_list(values: List[Any]) -> List[str]:
     normalized: List[str] = []
     for value in values or []:
@@ -516,6 +582,16 @@ class SegmentPayload(BaseModel):
     prefer_character_handoff_end_frame: bool = False
     video_url: str = ""
     status: str = "ready"
+
+
+class ReviewSplitScriptRequest(BaseModel):
+    """片段审核请求。"""
+
+    project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
+    script_text: str = Field(..., min_length=1, description="用户审核后的完整剧本文本")
+    max_segment_duration: float = Field(default=10.0, ge=3.0, le=10.0)
+    target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0)
+    segments: List[SegmentPayload] = Field(..., min_length=1, description="当前片段列表")
 
 
 class KeyframeAssetPayload(BaseModel):
@@ -1145,9 +1221,10 @@ async def split_script(
             "maxSegmentDuration": request.max_segment_duration,
             "targetTotalDuration": request.target_total_duration,
             "segments": result.get("segments") or [],
-            "splitValidationReport": result.get("validation_report"),
+            "splitValidationReport": None,
             "continuityPoints": result.get("continuity_points") or [],
             "splitRequestSignature": split_signature,
+            "splitReviewRequestSignature": "",
             "keyframes": [],
             "renderTaskId": None,
             "renderStatus": None,
@@ -1166,7 +1243,7 @@ async def split_script(
 
         return {
             "success": True,
-            "message": "剧本拆分完成，请审核片段后生成首尾帧",
+            "message": "剧本拆分完成，正在等待片段审核",
             "processing_time": time.time() - start_time,
             **result,
         }
@@ -1175,6 +1252,100 @@ async def split_script(
     except Exception as exc:
         logger.error("Split script failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="剧本拆分失败，请稍后重试") from exc
+
+
+@router.post("/review-split-script")
+async def review_split_script(
+    request: ReviewSplitScriptRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    start_time = time.time()
+
+    try:
+        existing_project = None
+        if request.project_id:
+            existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
+        if existing_project is None:
+            existing_project = await pipeline_project_service.get_current_project(db, current_user.id)
+
+        existing_state = existing_project.get("state") if isinstance(existing_project, dict) else {}
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+
+        request_segments = [segment.model_dump() for segment in request.segments]
+        if existing_state and _split_review_request_matches_state(
+            existing_state,
+            script_text=request.script_text,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+            segments=request_segments,
+        ):
+            cached_result = _build_split_review_response_from_state(existing_state)
+            if cached_result is not None:
+                return {
+                    "success": True,
+                    "message": "已直接复用上一次成功的片段审核结果。",
+                    "processing_time": time.time() - start_time,
+                    **cached_result,
+                }
+
+        result = await pipeline_workflow_service.review_split_script(
+            request.script_text,
+            segments=request_segments,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+        )
+
+        project_title = str(
+            (existing_project or {}).get("project_title")
+            or existing_state.get("projectTitle")
+            or "未命名项目"
+        ).strip() or "未命名项目"
+        summary_payload = existing_state.get("scriptSummary") if isinstance(existing_state.get("scriptSummary"), dict) else {}
+        summary_text = str(summary_payload.get("synopsis") or (existing_project or {}).get("summary") or "").strip()
+        review_signature = _build_split_review_state_signature(
+            script_text=request.script_text,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+            segments=request_segments,
+        )
+        project_state = {
+            **existing_state,
+            "currentStep": 2,
+            "transitionDirection": "forward",
+            "projectTitle": project_title,
+            "scriptDraft": request.script_text,
+            "maxSegmentDuration": request.max_segment_duration,
+            "targetTotalDuration": request.target_total_duration,
+            "segments": result.get("segments") or request_segments,
+            "splitValidationReport": result.get("validation_report"),
+            "continuityPoints": result.get("continuity_points") or [],
+            "splitReviewRequestSignature": review_signature,
+        }
+        await pipeline_project_service.save_current_project(
+            db,
+            project_id=request.project_id,
+            user_id=current_user.id,
+            project_title=project_title,
+            current_step=2,
+            state=project_state,
+            status="draft",
+            last_render_task_id="",
+            summary=summary_text,
+        )
+
+        return {
+            "success": True,
+            "message": "片段审核完成",
+            "processing_time": time.time() - start_time,
+            **result,
+        }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
+    except Exception as exc:
+        logger.error("Review split script failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="片段审核失败，请稍后重试") from exc
 
 
 @router.post("/generate-keyframes")

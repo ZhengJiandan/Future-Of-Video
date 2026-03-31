@@ -953,6 +953,14 @@ export const scriptPipelineApi = {
     target_total_duration?: number
   }) => apiClient.post<SplitScriptResponse>('/pipeline/split-script', data),
 
+  reviewSplitScript: (data: {
+    project_id?: string
+    script_text: string
+    max_segment_duration?: number
+    target_total_duration?: number
+    segments: SegmentItem[]
+  }) => apiClient.post<SplitScriptResponse>('/pipeline/review-split-script', data),
+
   generateKeyframes: (data: {
     project_id?: string
     project_title: string
