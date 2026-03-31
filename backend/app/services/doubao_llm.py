@@ -25,7 +25,7 @@ DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 # - doubao-lite-4k: 轻量级，响应更快
 # - doubao-1-5-pro-32k: 长上下文模型
 # 推荐使用 doubao-pro-4k 进行剧本生成
-DEFAULT_MODEL = "doubao-seed-2-0-lite-260215"
+DEFAULT_MODEL = "doubao-seed-2-0-pro-260215"
 
 # 备用：如果使用端点ID方式，可以设置具体的端点
 # DEFAULT_ENDPOINT = "ep-20250220-xxxxxxxxx-xxxxx"

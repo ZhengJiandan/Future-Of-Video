@@ -48,6 +48,71 @@ def test_auto_render_provider_falls_back_to_doubao_when_kling_missing(monkeypatc
     assert service._choose_render_provider({"provider": "auto"}) == "doubao-official"
 
 
+def test_select_character_profiles_for_segment_uses_segment_character_ids() -> None:
+    service = PipelineWorkflowService()
+    character_profiles = [
+        {"id": "char-a", "name": "角色A"},
+        {"id": "char-b", "name": "角色B"},
+        {"id": "char-c", "name": "角色C"},
+    ]
+    segment = {
+        "character_profile_ids": ["char-a"],
+        "late_entry_character_profile_ids": ["char-b"],
+        "key_dialogues": [{"text": "台词", "speaker_character_id": "char-c"}],
+    }
+
+    result = service._select_character_profiles_for_segment(
+        segment=segment,
+        character_profiles=character_profiles,
+    )
+
+    assert [item["id"] for item in result] == ["char-a", "char-b", "char-c"]
+
+
+@pytest.mark.asyncio
+async def test_generate_keyframes_passes_only_segment_characters(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = PipelineWorkflowService()
+    captured: list[list[str]] = []
+
+    async def fake_generate_keyframe_asset(**kwargs):
+        captured.append([str(item.get("id") or "") for item in kwargs["character_profiles"]])
+        from app.services.pipeline_workflow import KeyframeAsset
+
+        return KeyframeAsset(
+            asset_url="/uploads/generated/pipeline/keyframes/segment_01_start.png",
+            asset_type="image/png",
+            asset_filename="segment_01_start.png",
+            prompt="prompt",
+            source="test",
+        )
+
+    monkeypatch.setattr(service, "_generate_keyframe_asset", fake_generate_keyframe_asset)
+
+    result = await service.generate_keyframes(
+        project_title="测试项目",
+        segments=[
+            {
+                "segment_number": 1,
+                "title": "片段 1",
+                "duration": 5.0,
+                "character_profile_ids": ["char-b"],
+                "pre_generate_start_frame": True,
+            }
+        ],
+        style="写实",
+        character_profiles=[
+            {"id": "char-a", "name": "角色A"},
+            {"id": "char-b", "name": "角色B"},
+            {"id": "char-c", "name": "角色C"},
+        ],
+        scene_profiles=[],
+        reference_images=[],
+    )
+
+    assert captured == [["char-b"]]
+    assert result["keyframes"][0]["segment_number"] == 1
+
+
 @pytest.mark.asyncio
 async def test_start_render_task_runs_in_local_process_when_minimal_mode(
     monkeypatch: pytest.MonkeyPatch,

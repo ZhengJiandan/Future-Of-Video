@@ -49,20 +49,15 @@ async def lifespan(app: FastAPI):
         raise
 
     recovered = await pipeline_workflow_service.recover_interrupted_tasks()
-    for task_id in recovered.get("task_ids", []):
-        try:
-            await pipeline_workflow_service.start_render_task(task_id, mark_failed_on_enqueue_error=False)
-        except Exception as exc:
-            logger.error("Failed to restart recovered render task %s: %s", task_id, exc, exc_info=True)
     if (
-        recovered.get("requeued")
+        recovered.get("paused")
         or recovered.get("reset_processing")
         or recovered.get("recovered_queued")
         or recovered.get("recovered_dispatching")
     ):
         logger.warning(
-            "Render task recovery on startup: requeued=%s reset_processing=%s recovered_queued=%s recovered_dispatching=%s",
-            recovered.get("requeued", 0),
+            "Render task recovery on startup: paused=%s reset_processing=%s recovered_queued=%s recovered_dispatching=%s",
+            recovered.get("paused", 0),
             recovered.get("reset_processing", 0),
             recovered.get("recovered_queued", 0),
             recovered.get("recovered_dispatching", 0),

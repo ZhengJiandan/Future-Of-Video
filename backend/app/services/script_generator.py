@@ -214,26 +214,40 @@ class ScriptGenerator:
             intent=intent,
             profiles=normalized_characters,
         )
-        desired_character_count = self._estimate_desired_character_count(intent)
         temporary_characters: List[Dict[str, Any]] = []
+        unmatched_character_queries = self._identify_unmatched_character_queries(
+            user_input=user_input,
+            intent=intent,
+            matched_characters=matched_characters,
+        )
         character_resolution = {
             "status": "matched" if matched_characters else "none",
             "message": "已匹配到角色档案" if matched_characters else "未匹配到角色档案",
             "needs_user_action": False,
         }
-        if not matched_characters and self._has_meaningful_character_intent(intent):
+        if unmatched_character_queries:
             temporary_characters = await self._generate_temporary_character_profiles(
                 user_input=user_input,
                 style=style,
-                intent=intent,
-                desired_count=desired_character_count,
+                intent={**intent, "character_queries": unmatched_character_queries},
+                desired_count=max(1, len(unmatched_character_queries)),
             )
             if temporary_characters:
-                character_resolution = {
-                    "status": "temporary_generated",
-                    "message": "未匹配到正式角色档案，已自动生成临时角色草稿",
-                    "needs_user_action": False,
-                }
+                if matched_characters:
+                    character_resolution = {
+                        "status": "partially_matched",
+                        "message": (
+                            f"已匹配 {len(matched_characters)} 个正式角色，"
+                            f"并为剩余 {len(temporary_characters)} 个未命中角色自动生成临时角色草稿"
+                        ),
+                        "needs_user_action": False,
+                    }
+                else:
+                    character_resolution = {
+                        "status": "temporary_generated",
+                        "message": "未匹配到正式角色档案，已自动生成临时角色草稿",
+                        "needs_user_action": False,
+                    }
         elif not matched_characters:
             character_resolution = {
                 "status": "needs_user_action",
@@ -259,20 +273,45 @@ class ScriptGenerator:
         character_profiles: Optional[List[Dict[str, Any]]] = None,
         scene_profiles: Optional[List[Dict[str, Any]]] = None,
         reference_images: Optional[List[Dict[str, Any]]] = None,
+        generation_intent: Optional[Dict[str, Any]] = None,
+        character_resolution: Optional[Dict[str, Any]] = None,
+        library_character_profiles: Optional[List[Dict[str, Any]]] = None,
+        temporary_character_profiles: Optional[List[Dict[str, Any]]] = None,
     ) -> FullScript:
         logger.info("开始生成约束型剧本: %s", user_input[:120])
 
         normalized_scenes = [self._normalize_scene_profile(item) for item in (scene_profiles or [])]
-        character_resolution_result = await self.prepare_character_resolution(
-            user_input=user_input,
-            style=style,
-            target_total_duration=target_total_duration,
-            character_profiles=character_profiles,
-        )
-        intent = character_resolution_result["generation_intent"]
-        matched_characters = character_resolution_result["library_character_profiles"]
-        temporary_characters = character_resolution_result["temporary_character_profiles"]
-        character_resolution = character_resolution_result["character_resolution"]
+        normalized_characters = [self._normalize_character_profile(item) for item in (character_profiles or [])]
+        normalized_library_characters = [
+            self._normalize_character_profile(item) for item in (library_character_profiles or [])
+        ]
+        normalized_temporary_characters = [
+            self._normalize_character_profile(item) for item in (temporary_character_profiles or [])
+        ]
+
+        if generation_intent:
+            intent = dict(generation_intent or {})
+            matched_characters = normalized_library_characters
+            temporary_characters = normalized_temporary_characters
+            character_resolution = dict(character_resolution or {})
+            if not matched_characters and not temporary_characters:
+                matched_characters = normalized_characters
+            logger.info(
+                "复用已确认角色结果，跳过角色识别模型: library=%s temporary=%s",
+                len(matched_characters),
+                len(temporary_characters),
+            )
+        else:
+            character_resolution_result = await self.prepare_character_resolution(
+                user_input=user_input,
+                style=style,
+                target_total_duration=target_total_duration,
+                character_profiles=character_profiles,
+            )
+            intent = character_resolution_result["generation_intent"]
+            matched_characters = character_resolution_result["library_character_profiles"]
+            temporary_characters = character_resolution_result["temporary_character_profiles"]
+            character_resolution = character_resolution_result["character_resolution"]
         matched_scenes = await self._select_scene_profiles(
             user_input=user_input,
             intent=intent,
@@ -290,17 +329,47 @@ class ScriptGenerator:
             matched_scenes=matched_scenes,
         )
 
-        full_script = self._parse_script_data(
-            data=script_data,
-            original_input=user_input,
-            matched_characters=active_characters,
-            matched_scenes=matched_scenes,
-            intent=intent,
-            library_characters=matched_characters,
-            temporary_characters=temporary_characters,
-            character_resolution=character_resolution,
-        )
-        self._validate_full_script(full_script)
+        try:
+            full_script = self._parse_script_data(
+                data=script_data,
+                original_input=user_input,
+                matched_characters=active_characters,
+                matched_scenes=matched_scenes,
+                intent=intent,
+                library_characters=matched_characters,
+                temporary_characters=temporary_characters,
+                character_resolution=character_resolution,
+            )
+            self._validate_full_script(full_script)
+        except ValueError as exc:
+            if not self._should_retry_for_script_structure_error(exc):
+                raise
+            logger.warning("剧本结构不完整，准备重试一次: %s", exc)
+            retry_data = await self._call_llm_for_script(
+                user_input=user_input,
+                style=style,
+                target_total_duration=target_total_duration,
+                reference_image_count=len(reference_images or []),
+                intent=intent,
+                matched_characters=active_characters,
+                matched_scenes=matched_scenes,
+                correction_note=(
+                    f"上一次生成结果存在结构问题：{exc}。"
+                    " 请重新输出完整剧本，必须包含非空标题、至少 1 个场景，且每个场景至少 1 个镜头。"
+                    " scenes 不能为空，scene.shots 不能为空。"
+                ),
+            )
+            full_script = self._parse_script_data(
+                data=retry_data,
+                original_input=user_input,
+                matched_characters=active_characters,
+                matched_scenes=matched_scenes,
+                intent=intent,
+                library_characters=matched_characters,
+                temporary_characters=temporary_characters,
+                character_resolution=character_resolution,
+            )
+            self._validate_full_script(full_script)
         full_script = await self._align_script_duration(
             full_script,
             user_input=user_input,
@@ -360,9 +429,10 @@ class ScriptGenerator:
 
 规则：
 1. 只抽取用户真正表达的需求，不脑补具体剧情
-2. 如果用户没有明确指定角色或场景数量，给出合理的 1-3 个查询意图
-3. JSON key 和字符串值都必须使用双引号
-4. 不要输出 markdown 代码块或解释文字"""
+2. 如果用户明确列出了角色名单、角色表、代号、本名或群像角色，必须完整抽取，不要擅自省略
+3. 如果用户没有明确指定角色或场景数量，给出合理的查询意图
+4. JSON key 和字符串值都必须使用双引号
+5. 不要输出 markdown 代码块或解释文字"""
         user_prompt = f"用户输入：{user_input}\n视觉风格：{style or '未指定'}\n目标时长：{target_total_duration or '未指定'}"
         try:
             response = await self.llm.chat_completion(
@@ -371,11 +441,16 @@ class ScriptGenerator:
                     DoubaoMessage(role="user", content=user_prompt),
                 ],
                 temperature=0.2,
-                max_tokens=1400,
+                max_tokens=15000,
             )
             payload = self._parse_llm_json(response.get_content().strip())
+            llm_character_queries = payload.get("character_queries") or []
+            logger.info(
+                "角色识别结果 | llm=%s",
+                json.dumps(llm_character_queries, ensure_ascii=False),
+            )
             return {
-                "character_queries": payload.get("character_queries") or [],
+                "character_queries": llm_character_queries,
                 "scene_queries": payload.get("scene_queries") or [],
                 "style_keywords": payload.get("style_keywords") or self._tokenize(style),
                 "tone_keywords": payload.get("tone_keywords") or [],
@@ -397,12 +472,13 @@ class ScriptGenerator:
         intent: Dict[str, Any],
         profiles: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
+        desired_count = self._estimate_desired_character_count(intent)
         return await self._select_profiles(
             profile_type="character",
             user_input=user_input,
             intent_queries=intent.get("character_queries") or [],
             profiles=profiles,
-            desired_count=3,
+            desired_count=desired_count,
         )
 
     async def _select_scene_profiles(
@@ -417,14 +493,71 @@ class ScriptGenerator:
             user_input=user_input,
             intent_queries=intent.get("scene_queries") or [],
             profiles=profiles,
-            desired_count=3,
+            desired_count=30,
         )
 
     def _estimate_desired_character_count(self, intent: Dict[str, Any]) -> int:
         queries = [query for query in (intent.get("character_queries") or []) if self._query_has_meaning(query)]
         if not queries:
             return 1
-        return max(1, min(len(queries), 3))
+        return max(1, len(queries))
+
+    def _identify_unmatched_character_queries(
+        self,
+        *,
+        user_input: str,
+        intent: Dict[str, Any],
+        matched_characters: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        meaningful_queries = [
+            query
+            for query in (intent.get("character_queries") or [])
+            if self._query_has_meaning(query)
+        ]
+        if not meaningful_queries:
+            return []
+        if not matched_characters:
+            return meaningful_queries
+
+        unmatched: List[Dict[str, Any]] = []
+        for query in meaningful_queries:
+            if any(
+                self._query_matches_character_profile(
+                    query=query,
+                    profile=profile,
+                    user_input=user_input,
+                )
+                for profile in matched_characters
+            ):
+                continue
+            unmatched.append(query)
+        return unmatched
+
+    def _query_matches_character_profile(
+        self,
+        *,
+        query: Dict[str, Any],
+        profile: Dict[str, Any],
+        user_input: str,
+    ) -> bool:
+        normalized_haystack = self._build_profile_haystack(profile)
+        if not normalized_haystack:
+            return False
+
+        for key in ["name_hint", "role", "archetype", "category"]:
+            if self._query_text_matches_haystack(query.get(key), normalized_haystack):
+                return True
+
+        keywords = [str(item).strip().lower() for item in (query.get("keywords") or []) if str(item).strip()]
+        if keywords and any(keyword in normalized_haystack for keyword in keywords):
+            return True
+
+        return self._score_profile(
+            profile_type="character",
+            profile=profile,
+            query=query,
+            user_input=user_input,
+        ) >= 2.5
 
     def _has_meaningful_character_intent(self, intent: Dict[str, Any]) -> bool:
         return any(self._query_has_meaning(query) for query in (intent.get("character_queries") or []))
@@ -488,10 +621,11 @@ class ScriptGenerator:
 规则：
 1. 这是临时角色草稿，不要虚构复杂世界观背景
 2. 要优先保证外观稳定性、说话方式和行为约束清晰
-3. llm_summary 控制在 100-250 字以内
-4. image_prompt_base 聚焦静态外观
-5. video_prompt_base 聚焦动态表演和动作
-6. 只输出 JSON"""
+3. 如果 character_queries 中提供了 name_hint，characters 数组必须与 character_queries 一一对应，且每个角色的 name 必须沿用对应的 name_hint 原文，不允许改名；额外称呼只能放进 aliases
+4. llm_summary 控制在 100-250 字以内
+5. image_prompt_base 聚焦静态外观
+6. video_prompt_base 聚焦动态表演和动作
+7. 只输出 JSON"""
         user_prompt = json.dumps(
             {
                 "user_input": user_input,
@@ -508,7 +642,7 @@ class ScriptGenerator:
                     DoubaoMessage(role="user", content=user_prompt),
                 ],
                 temperature=0.35,
-                max_tokens=2400,
+                max_tokens=12400,
             )
             payload = self._parse_llm_json(response.get_content().strip())
             drafts = []
@@ -518,7 +652,10 @@ class ScriptGenerator:
                 normalized["source"] = "ai-generated-draft"
                 normalized["profile_version"] = 1
                 drafts.append(normalized)
-            return drafts
+            return self._align_temporary_character_drafts_with_queries(
+                drafts=drafts,
+                queries=intent.get("character_queries") or [],
+            )
         except MissingProviderConfigError:
             raise
         except Exception as exc:
@@ -546,7 +683,8 @@ class ScriptGenerator:
             scored.append((score, profile))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        shortlisted = [profile for score, profile in scored if score > 0][:6]
+        shortlist_limit = max(6, desired_count * 2)
+        shortlisted = [profile for score, profile in scored if score > 0][:shortlist_limit]
         if not shortlisted:
             return []
 
@@ -614,7 +752,7 @@ class ScriptGenerator:
                     ),
                 ],
                 temperature=0.15,
-                max_tokens=800,
+                max_tokens=2800,
             )
             payload = self._parse_llm_json(response.get_content().strip())
             selected_ids = [str(item).strip() for item in (payload.get("selected_ids") or []) if str(item).strip()]
@@ -641,6 +779,11 @@ class ScriptGenerator:
     ) -> Dict[str, Any]:
         character_cards = [self._build_character_constraint_card(item) for item in matched_characters]
         scene_cards = [self._build_scene_constraint_card(item) for item in matched_scenes]
+        input_policy = self._build_script_input_policy(user_input)
+        correction_note = self._merge_correction_note_with_input_fidelity(
+            correction_note,
+            user_input=user_input,
+        )
         system_prompt = """你是一位顶级短视频编剧，但你的创作必须严格服从给定档案约束。
 
 【工作方式】
@@ -650,9 +793,19 @@ class ScriptGenerator:
 4. 每个角色、每个场景都必须尽量绑定档案 ID 和版本
 5. 剧本阶段没有角色图片可用，角色恒定身份只能依赖 selected_characters 里的 llm_summary / must_keep / forbidden / speaking_style / voice_description / common_actions
 
+【用户输入保真】
+1. user_input 是剧情事实的第一来源，必须优先保留其中明确写出的角色关系、事件顺序、时间地点、冲突目标和结局
+2. 如果 user_input 已经很详细，默认执行“保守改写”：只把现有内容整理成可拍摄镜头与必要衔接，不新增支线、反转、前史、世界观补充、额外角色或额外场景
+3. 用户没有明确写出的心理动机、背景说明、象征隐喻、额外设定，宁可留白，也不要自行脑补
+4. correction_note 只允许修正结构、时长或镜头问题，不代表可以借机改写剧情主线
+5. 当 selected_characters / selected_scenes 与 user_input 同时存在时，剧情事实以 user_input 为准，角色命名和稳定外观约束以档案为准
+
 【输出要求】
 1. 输出必须是合法 JSON
 2. 绝不能输出 markdown 代码块、注释、解释文字
+2.1 只能输出一个完整的 JSON 对象，首字符必须是 {，末字符必须是 }
+2.2 宁可压缩措辞、减少冗余描述，也不能输出被截断的半截 JSON
+2.3 所有字符串中的双引号必须正确转义，禁止输出未闭合字符串
 3. 每个场景必须输出 scene_profile_id 和 scene_profile_version
 4. 每个镜头必须输出 scene_profile_id / scene_profile_version / character_profile_ids / character_profile_versions / prompt_focus
 5. characters 中每个角色必须输出 character_profile_id 和 profile_version
@@ -662,6 +815,10 @@ class ScriptGenerator:
 9. 单个镜头默认只写首帧已经在画面中的角色及其动作、对白、互动，不要把“新角色中途走入/闯入/突然出现”写在同一镜头里
 10. 如果剧情需要新角色加入，必须从一个新镜头开始，并在该新镜头的 character_profile_ids / characters_in_shot 中明确包含该角色
 11. 尽量避免在同一镜头描述角色先不在场、后入场；角色登场要通过切新镜头解决，而不是在镜头中途补进来
+12. scenes 数组至少包含 1 个场景，禁止输出空数组
+13. 每个 scene.shots 数组至少包含 1 个镜头，禁止输出空数组
+14. title 必须是非空字符串，不能留空
+15. 当 input_policy.fidelity_mode = "strict" 时，剧情改写幅度必须最小化；优先复用用户原始表述，不要擅自换剧情重心
 
 【JSON 结构】
 {
@@ -756,18 +913,25 @@ class ScriptGenerator:
             "style": style,
             "reference_image_count": reference_image_count,
             "intent": intent,
+            "input_policy": {
+                "fidelity_mode": input_policy["fidelity_mode"],
+                "is_user_input_detailed": input_policy["is_user_input_detailed"],
+                "expansion_scope": input_policy["expansion_scope"],
+                "preserve_points": input_policy["preserve_points"],
+            },
             "selected_characters": character_cards,
             "selected_scenes": scene_cards,
             "target_total_duration": float(target_total_duration) if target_total_duration is not None else None,
             "correction_note": correction_note,
         }
+        request_messages = [
+            DoubaoMessage(role="system", content=system_prompt),
+            DoubaoMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False)),
+        ]
         response = await self.llm.chat_completion(
-            [
-                DoubaoMessage(role="system", content=system_prompt),
-                DoubaoMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False)),
-            ],
-            temperature=0.35,
-            max_tokens=4200,
+            request_messages,
+            temperature=float(input_policy["temperature"]),
+            max_tokens=20000,
             timeout=httpx.Timeout(
                 connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
                 read=float(getattr(settings, "DOUBAO_SCRIPT_READ_TIMEOUT", 360.0)),
@@ -780,7 +944,59 @@ class ScriptGenerator:
         content = response.get_content().strip()
         if not content:
             raise ValueError("豆包返回内容为空")
-        return self._parse_llm_json(content)
+        try:
+            return self._parse_llm_json(content)
+        except ValueError as exc:
+            logger.warning("generate_full_script returned invalid JSON, retrying once: %s", exc)
+            repair_messages = [
+                DoubaoMessage(
+                    role="system",
+                    content=(
+                        "你是 JSON 修正器。请基于同一任务重新输出一个完整、合法、可解析的 JSON 对象。"
+                        "禁止输出解释、禁止 markdown、禁止代码块。"
+                        "输出必须只包含一个 JSON 对象，首字符是 {，末字符是 }。"
+                    ),
+                ),
+                DoubaoMessage(role="user", content=json.dumps(user_payload, ensure_ascii=False)),
+                DoubaoMessage(
+                    role="assistant",
+                    content=content,
+                ),
+                DoubaoMessage(
+                    role="user",
+                    content=(
+                        "你上一次返回的内容不是合法 JSON。"
+                        "请保留原任务语义，重新输出完整 JSON。"
+                        "如果内容太长，请缩短描述文本，但必须保留字段结构完整。"
+                    ),
+                ),
+            ]
+            repair_response = await self.llm.chat_completion(
+                repair_messages,
+                temperature=0.05,
+                max_tokens=15600,
+                timeout=httpx.Timeout(
+                    connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
+                    read=float(getattr(settings, "DOUBAO_SCRIPT_READ_TIMEOUT", 360.0)),
+                    write=float(getattr(settings, "DOUBAO_WRITE_TIMEOUT", 60.0)),
+                    pool=float(getattr(settings, "DOUBAO_POOL_TIMEOUT", 60.0)),
+                ),
+                max_retries=max(1, int(getattr(settings, "DOUBAO_MAX_RETRIES", 2))),
+                request_label="generate_full_script_repair_json",
+            )
+            repaired_content = repair_response.get_content().strip()
+            if not repaired_content:
+                raise ValueError("豆包 JSON 修正返回内容为空") from exc
+            return self._parse_llm_json(repaired_content)
+
+    def _should_retry_for_script_structure_error(self, exc: Exception) -> bool:
+        if not isinstance(exc, ValueError):
+            return False
+        return str(exc) in {
+            "生成结果缺少标题",
+            "生成结果缺少场景",
+            "生成结果缺少分镜",
+        }
 
     async def _align_script_duration(
         self,
@@ -1135,6 +1351,143 @@ class ScriptGenerator:
             "script_stage_rule": "Use llm_summary + must_keep + forbidden + voice_description as the source of truth. Do not infer conflicting visual or vocal changes from free-form story text.",
         }
 
+    def _build_script_input_policy(self, user_input: str) -> Dict[str, Any]:
+        normalized_input = str(user_input or "").strip()
+        if not normalized_input:
+            return {
+                "fidelity_mode": "standard",
+                "is_user_input_detailed": False,
+                "expansion_scope": "可以做少量必要补全，但不要改写核心设定",
+                "preserve_points": [],
+                "temperature": 0.2,
+            }
+
+        lines = [line.strip() for line in re.split(r"\r?\n+", normalized_input) if line.strip()]
+        sentence_candidates = [
+            sentence.strip()
+            for sentence in re.split(r"[\n。！？!?；;]+", normalized_input)
+            if sentence.strip()
+        ]
+        bullet_lines = [
+            line
+            for line in lines
+            if re.match(r"^(?:[-*•]|\d+[.)、])\s*", line)
+        ]
+        constraint_keywords = (
+            "必须",
+            "不要",
+            "不能",
+            "保留",
+            "设定",
+            "关系",
+            "场景",
+            "地点",
+            "时间",
+            "结局",
+            "对白",
+            "镜头",
+            "分镜",
+            "角色",
+            "服装",
+            "道具",
+        )
+        constraint_hit_count = sum(1 for keyword in constraint_keywords if keyword in normalized_input)
+        detail_score = 0
+        if len(normalized_input) >= 120:
+            detail_score += 2
+        if len(lines) >= 4:
+            detail_score += 1
+        if len(sentence_candidates) >= 4:
+            detail_score += 1
+        if len(bullet_lines) >= 2:
+            detail_score += 2
+        if constraint_hit_count >= 4:
+            detail_score += 2
+
+        is_detailed = detail_score >= 3
+        return {
+            "fidelity_mode": "strict" if is_detailed else "standard",
+            "is_user_input_detailed": is_detailed,
+            "expansion_scope": (
+                "只允许镜头化整理、节奏压缩和必要衔接，不允许新增支线、反转、背景设定或额外角色"
+                if is_detailed
+                else "可以做少量必要补全，但不要改写核心设定"
+            ),
+            "preserve_points": self._extract_user_input_preserve_points(
+                normalized_input,
+                lines=lines,
+                sentence_candidates=sentence_candidates,
+            ),
+            "temperature": 0.1 if is_detailed else 0.2,
+        }
+
+    def _extract_user_input_preserve_points(
+        self,
+        user_input: str,
+        *,
+        lines: Optional[List[str]] = None,
+        sentence_candidates: Optional[List[str]] = None,
+    ) -> List[str]:
+        normalized_input = str(user_input or "").strip()
+        if not normalized_input:
+            return []
+
+        candidate_lines = list(lines or [line.strip() for line in re.split(r"\r?\n+", normalized_input) if line.strip()])
+        candidate_sentences = list(
+            sentence_candidates
+            or [sentence.strip() for sentence in re.split(r"[\n。！？!?；;]+", normalized_input) if sentence.strip()]
+        )
+        priority_keywords = (
+            "必须",
+            "不要",
+            "不能",
+            "角色",
+            "关系",
+            "地点",
+            "时间",
+            "结局",
+            "场景",
+            "对白",
+            "镜头",
+            "设定",
+        )
+        prioritized: List[str] = []
+        fallback: List[str] = []
+        for raw_candidate in [*candidate_lines, *candidate_sentences]:
+            normalized_candidate = self._normalize_preserve_point(raw_candidate)
+            if not normalized_candidate:
+                continue
+            target = prioritized if any(keyword in normalized_candidate for keyword in priority_keywords) else fallback
+            if normalized_candidate not in prioritized and normalized_candidate not in fallback:
+                target.append(normalized_candidate)
+
+        selected = [*prioritized, *fallback][:8]
+        if selected:
+            return selected
+        fallback_point = self._truncate_text(normalized_input, 80)
+        return [fallback_point] if fallback_point else []
+
+    def _normalize_preserve_point(self, text: str) -> str:
+        normalized = re.sub(r"^\s*(?:[-*•]|\d+[.)、])\s*", "", str(text or "").strip())
+        normalized = re.sub(r"\s+", " ", normalized).strip("，。；; ")
+        if len(normalized) < 4:
+            return ""
+        return self._truncate_text(normalized, 80)
+
+    def _merge_correction_note_with_input_fidelity(self, correction_note: str, *, user_input: str) -> str:
+        note = str(correction_note or "").strip()
+        if not note:
+            return ""
+        policy = self._build_script_input_policy(user_input)
+        if policy["fidelity_mode"] == "strict":
+            fidelity_note = (
+                "除本次必要修正外，不要改写用户输入中已明确给出的剧情事实、角色关系、时间地点、事件顺序和结局。"
+                " 当前输入信息较详细，按保守改写处理：只做镜头化整理和必要衔接，不新增支线、反转、前史、世界观补充或额外设定。"
+            )
+        else:
+            fidelity_note = "除本次必要修正外，不要改写用户输入中的核心设定和剧情主线。"
+        return f"{note} {fidelity_note}".strip()
+
     def _build_scene_constraint_card(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "id": profile.get("id", ""),
@@ -1168,6 +1521,80 @@ class ScriptGenerator:
         query: Dict[str, Any],
         user_input: str,
     ) -> float:
+        haystack = self._build_profile_haystack(profile)
+
+        score = 0.0
+        keywords = [str(item).strip().lower() for item in (query.get("keywords") or []) if str(item).strip()]
+        for key in keywords:
+            if key and key in haystack:
+                score += 2.0
+        if str(query.get("category") or "").strip().lower() and str(query.get("category")).strip().lower() == str(profile.get("category") or "").strip().lower():
+            score += 3.0
+        if profile_type == "character":
+            for key in [query.get("role"), query.get("archetype"), query.get("name_hint")]:
+                if self._query_text_matches_haystack(key, haystack):
+                    score += 2.5
+        else:
+            for key in [query.get("scene_type"), query.get("story_function"), query.get("name_hint")]:
+                if self._query_text_matches_haystack(key, haystack):
+                    score += 2.5
+
+        if not score:
+            user_tokens = self._tokenize(user_input)
+            overlap = sum(1 for token in user_tokens if token and token in haystack)
+            score += overlap * 0.3
+        return score
+
+    def _align_temporary_character_drafts_with_queries(
+        self,
+        *,
+        drafts: List[Dict[str, Any]],
+        queries: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not drafts or not queries:
+            return drafts
+
+        aligned: List[Dict[str, Any]] = []
+        remaining_queries = list(queries)
+
+        for draft in drafts:
+            best_query_index: Optional[int] = None
+            best_score: Optional[float] = None
+            for query_index, query in enumerate(remaining_queries):
+                score = self._score_profile(
+                    profile_type="character",
+                    profile=draft,
+                    query=query,
+                    user_input="",
+                )
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_query_index = query_index
+
+            if best_query_index is None:
+                aligned.append(draft)
+                continue
+
+            query = remaining_queries.pop(best_query_index)
+            merged = dict(draft)
+            hinted_name = str(query.get("name_hint") or "").strip()
+            generated_name = str(merged.get("name") or "").strip()
+            if hinted_name:
+                if generated_name and self._normalize_name(generated_name) != self._normalize_name(hinted_name):
+                    aliases = self._normalize_list(merged.get("aliases") or [])
+                    if generated_name not in aliases:
+                        aliases.append(generated_name)
+                    merged["aliases"] = aliases
+                merged["name"] = hinted_name
+
+            for key in ["category", "role", "archetype"]:
+                if not str(merged.get(key) or "").strip() and str(query.get(key) or "").strip():
+                    merged[key] = str(query.get(key) or "").strip()
+            aligned.append(merged)
+
+        return aligned
+
+    def _build_profile_haystack(self, profile: Dict[str, Any]) -> str:
         haystack_fields = [
             profile.get("name"),
             profile.get("category"),
@@ -1180,35 +1607,26 @@ class ScriptGenerator:
             profile.get("tags"),
             profile.get("aliases"),
         ]
-        haystack = " ".join(
+        return " ".join(
             item if isinstance(item, str) else " ".join(str(v) for v in (item or []))
             for item in haystack_fields
             if item
         ).lower()
 
-        score = 0.0
-        keywords = [str(item).strip().lower() for item in (query.get("keywords") or []) if str(item).strip()]
-        for key in keywords:
-            if key and key in haystack:
-                score += 2.0
-        if str(query.get("category") or "").strip().lower() and str(query.get("category")).strip().lower() == str(profile.get("category") or "").strip().lower():
-            score += 3.0
-        if profile_type == "character":
-            for key in [query.get("role"), query.get("archetype"), query.get("name_hint")]:
-                key_text = str(key or "").strip().lower()
-                if key_text and key_text in haystack:
-                    score += 2.5
-        else:
-            for key in [query.get("scene_type"), query.get("story_function"), query.get("name_hint")]:
-                key_text = str(key or "").strip().lower()
-                if key_text and key_text in haystack:
-                    score += 2.5
+    def _query_text_matches_haystack(self, value: Any, haystack: str) -> bool:
+        return any(candidate in haystack for candidate in self._expand_query_text_candidates(value))
 
-        if not score:
-            user_tokens = self._tokenize(user_input)
-            overlap = sum(1 for token in user_tokens if token and token in haystack)
-            score += overlap * 0.3
-        return score
+    def _expand_query_text_candidates(self, value: Any) -> List[str]:
+        raw_value = str(value or "").strip().lower()
+        if not raw_value:
+            return []
+
+        candidates: List[str] = []
+        for item in [raw_value, *re.split(r"[()（）/|,，、]+", raw_value)]:
+            normalized = re.sub(r"\s+", " ", str(item or "").strip())
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+        return candidates
 
     def _normalize_character_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         normalized = dict(profile)

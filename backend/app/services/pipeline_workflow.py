@@ -257,12 +257,25 @@ class PipelineWorkflowService:
         selected_scene_ids: Optional[List[str]] = None,
         scene_profiles: Optional[List[Dict[str, Any]]] = None,
         reference_images: Optional[List[Dict[str, Any]]] = None,
+        generation_intent: Optional[Dict[str, Any]] = None,
+        character_resolution: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """生成完整剧本，并转换成可编辑文本。"""
         resolved_character_profiles = self._resolve_character_profiles(
             selected_character_ids=selected_character_ids or [],
             character_profiles=character_profiles or [],
         )
+        selected_character_id_set = {
+            str(profile_id).strip()
+            for profile_id in (selected_character_ids or [])
+            if str(profile_id).strip()
+        }
+        resolved_library_character_profiles = [
+            profile for profile in resolved_character_profiles if str(profile.get("id") or "").strip() in selected_character_id_set
+        ]
+        resolved_temporary_character_profiles = [
+            profile for profile in resolved_character_profiles if str(profile.get("id") or "").strip() not in selected_character_id_set
+        ]
         resolved_scene_profiles = self._resolve_scene_profiles(
             selected_scene_ids=selected_scene_ids or [],
             scene_profiles=scene_profiles or [],
@@ -274,6 +287,10 @@ class PipelineWorkflowService:
             character_profiles=resolved_character_profiles,
             scene_profiles=resolved_scene_profiles,
             reference_images=reference_images or [],
+            generation_intent=generation_intent,
+            character_resolution=character_resolution,
+            library_character_profiles=resolved_library_character_profiles,
+            temporary_character_profiles=resolved_temporary_character_profiles,
         )
         script_text = self.format_full_script_text(full_script)
         matched_character_profiles = full_script.active_character_profiles or full_script.matched_character_profiles or resolved_character_profiles
@@ -348,6 +365,7 @@ class PipelineWorkflowService:
         split_result = await splitter.split_script(
             script=script_text,
             target_duration=target_total_duration,
+            include_review=False,
         )
 
         segments = [asdict(segment) for segment in split_result.segments]
@@ -358,6 +376,51 @@ class PipelineWorkflowService:
             "segments": segments,
             "continuity_points": split_result.continuity_points,
             "validation_report": split_result.validation_report,
+        }
+
+    async def review_split_script(
+        self,
+        script_text: str,
+        *,
+        segments: List[Dict[str, Any]],
+        max_segment_duration: float = 10.0,
+        target_total_duration: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        splitter = ScriptSplitter(
+            SplitConfig(
+                max_segment_duration=min(float(max_segment_duration), MAX_VIDEO_SEGMENT_DURATION),
+                min_segment_duration=3.0,
+                prefer_scene_boundary=True,
+                preserve_dialogue=True,
+                smooth_transition=True,
+            )
+        )
+        review_result = await splitter.review_existing_segments(
+            script=script_text,
+            segments=segments,
+            target_duration=target_total_duration,
+        )
+        normalized_segments = review_result.get("segments") or []
+        validation_report = review_result.get("validation_report") if isinstance(review_result.get("validation_report"), dict) else None
+        total_duration = 0.0
+        if validation_report and validation_report.get("actual_total_duration") is not None:
+            try:
+                total_duration = float(validation_report.get("actual_total_duration") or 0.0)
+            except (TypeError, ValueError):
+                total_duration = 0.0
+        if total_duration <= 0:
+            total_duration = round(
+                sum(float((segment or {}).get("duration") or 0.0) for segment in normalized_segments if isinstance(segment, dict)),
+                2,
+            )
+
+        return {
+            "script_text": script_text,
+            "total_duration": total_duration,
+            "segment_count": len(normalized_segments),
+            "segments": normalized_segments,
+            "continuity_points": review_result.get("continuity_points") or [],
+            "validation_report": validation_report,
         }
 
     async def generate_keyframes(
@@ -391,6 +454,10 @@ class PipelineWorkflowService:
         generated_start_frame_count = 0
 
         for index, segment in enumerate(normalized_segments):
+            segment_character_profiles = self._select_character_profiles_for_segment(
+                segment=segment,
+                character_profiles=resolved_character_profiles,
+            )
             should_pre_generate_start_frame = bool(segment.get("pre_generate_start_frame", False) or index == 0)
             start_frame_reason = str(segment.get("start_frame_generation_reason") or "")
             if should_pre_generate_start_frame:
@@ -399,7 +466,7 @@ class PipelineWorkflowService:
                     segment=segment,
                     frame_kind="start",
                     style=style,
-                    character_profiles=resolved_character_profiles,
+                    character_profiles=segment_character_profiles,
                     scene_profiles=resolved_scene_profiles,
                     reference_images=normalized_references,
                     base_asset=None,
@@ -715,6 +782,11 @@ class PipelineWorkflowService:
                 state.touch()
                 await self._persist_render_task_state(state=state)
 
+                segment_character_profiles = self._select_character_profiles_for_segment(
+                    segment=segment,
+                    character_profiles=state.character_profiles,
+                )
+
                 runtime_bundle = keyframe_map.get(clip_number)
                 if previous_last_frame and self._should_reuse_previous_last_frame(runtime_bundle):
                     runtime_bundle = self._with_runtime_start_frame(
@@ -733,7 +805,7 @@ class PipelineWorkflowService:
                     task_dir=task_dir,
                     segment=segment,
                     keyframe_bundle=runtime_bundle,
-                    character_profiles=state.character_profiles,
+                    character_profiles=segment_character_profiles,
                     scene_profiles=state.scene_profiles,
                     render_config=state.render_config,
                 )
@@ -1050,7 +1122,9 @@ class PipelineWorkflowService:
             for task in queued_tasks:
                 current_step = str(task.current_step or "").strip()
                 if current_step in RECOVERABLE_QUEUED_STEPS:
-                    task.error = "服务启动时检测到任务尚未真正入队，已自动重新投递"
+                    task.status = "paused"
+                    task.current_step = "服务重启后已暂停，等待手动继续"
+                    task.error = "服务启动时检测到任务未完成，已恢复为暂停状态"
                     task.updated_at = datetime.utcnow()
                     recoverable_queued_ids.append(task.id)
 
@@ -1062,9 +1136,9 @@ class PipelineWorkflowService:
             dispatching_tasks = dispatching_result.scalars().all()
             recovered_dispatching_ids: List[str] = []
             for task in dispatching_tasks:
-                task.status = "queued"
-                task.current_step = "等待重新投递"
-                task.error = "服务启动时检测到任务卡在入队阶段，已自动重新投递"
+                task.status = "paused"
+                task.current_step = "服务重启后已暂停，等待手动继续"
+                task.error = "服务启动时检测到任务卡在入队阶段，已恢复为暂停状态"
                 task.updated_at = datetime.utcnow()
                 recovered_dispatching_ids.append(task.id)
 
@@ -1076,9 +1150,9 @@ class PipelineWorkflowService:
             processing_tasks = result.scalars().all()
             reset_processing_count = 0
             for task in processing_tasks:
-                task.status = "queued"
-                task.current_step = "任务中断"
-                task.error = "服务重启后自动恢复执行"
+                task.status = "paused"
+                task.current_step = "任务中断，等待手动继续"
+                task.error = "服务重启后已暂停，请手动继续"
                 task.updated_at = datetime.utcnow()
                 reset_processing_count += 1
 
@@ -1090,6 +1164,7 @@ class PipelineWorkflowService:
             if task_id not in task_ids:
                 task_ids.append(task_id)
         return {
+            "paused": len(task_ids),
             "requeued": len(task_ids),
             "reset_processing": reset_processing_count,
             "recovered_queued": len(recoverable_queued_ids),
@@ -1687,6 +1762,7 @@ class PipelineWorkflowService:
             select(PipelineProject).where(
                 PipelineProject.id == project_id,
                 PipelineProject.user_id == user_id,
+                PipelineProject.deleted_at.is_(None),
             )
         )
         project = result.scalar_one_or_none()
@@ -3411,7 +3487,7 @@ class PipelineWorkflowService:
         character_profiles: List[Dict[str, Any]],
         scene_profiles: List[Dict[str, Any]],
     ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        character_ids = {str(item).strip() for item in (segment.get("character_profile_ids") or []) if str(item).strip()}
+        character_ids = set(self._collect_segment_character_ids_for_context(segment))
         scene_profile_id = str(segment.get("scene_profile_id") or "").strip()
         filtered_characters = [
             profile for profile in character_profiles
@@ -3422,6 +3498,43 @@ class PipelineWorkflowService:
             scene_profiles[0] if scene_profiles else None,
         )
         return filtered_characters or character_profiles, filtered_scene
+
+    def _collect_segment_character_ids_for_context(self, segment: Dict[str, Any]) -> List[str]:
+        candidate_values: List[Any] = []
+        candidate_values.extend(segment.get("character_profile_ids") or [])
+        candidate_values.extend(segment.get("new_character_profile_ids") or [])
+        candidate_values.extend(segment.get("late_entry_character_profile_ids") or [])
+        candidate_values.extend(segment.get("handoff_character_profile_ids") or [])
+        for dialogue in self._normalize_segment_dialogues(segment.get("key_dialogues") or []):
+            speaker_character_id = str(dialogue.get("speaker_character_id") or "").strip()
+            if speaker_character_id:
+                candidate_values.append(speaker_character_id)
+
+        seen: set[str] = set()
+        result: List[str] = []
+        for value in candidate_values:
+            normalized = str(value or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    def _select_character_profiles_for_segment(
+        self,
+        *,
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        segment_character_ids = set(self._collect_segment_character_ids_for_context(segment))
+        if not segment_character_ids:
+            return list(character_profiles or [])
+        filtered = [
+            profile
+            for profile in (character_profiles or [])
+            if str(profile.get("id") or "").strip() in segment_character_ids
+        ]
+        return filtered or list(character_profiles or [])
 
     def _build_keyframe_reference_images(
         self,

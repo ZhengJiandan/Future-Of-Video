@@ -925,6 +925,7 @@ export const scriptPipelineApi = {
   deleteScene: (sceneId: string) => apiClient.delete<{ success: boolean; message: string }>(`/pipeline/scenes/${sceneId}`),
 
   generateScript: (data: {
+    project_id?: string
     user_input: string
     style?: string
     target_total_duration?: number
@@ -933,6 +934,8 @@ export const scriptPipelineApi = {
     character_profiles?: CharacterProfile[]
     scene_profiles?: SceneProfile[]
     reference_images?: ReferenceImageAsset[]
+    generation_intent?: Record<string, unknown>
+    character_resolution?: Record<string, unknown>
   }) => apiClient.post<GeneratedScriptResponse>('/pipeline/generate-script', data),
 
   prepareCharacters: (data: {
@@ -944,12 +947,22 @@ export const scriptPipelineApi = {
   }) => apiClient.post<PrepareCharactersResponse>('/pipeline/prepare-characters', data),
 
   splitScript: (data: {
+    project_id?: string
     script_text: string
     max_segment_duration?: number
     target_total_duration?: number
   }) => apiClient.post<SplitScriptResponse>('/pipeline/split-script', data),
 
+  reviewSplitScript: (data: {
+    project_id?: string
+    script_text: string
+    max_segment_duration?: number
+    target_total_duration?: number
+    segments: SegmentItem[]
+  }) => apiClient.post<SplitScriptResponse>('/pipeline/review-split-script', data),
+
   generateKeyframes: (data: {
+    project_id?: string
     project_title: string
     style?: string
     selected_character_ids?: string[]

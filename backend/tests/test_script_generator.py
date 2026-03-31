@@ -1,3 +1,4 @@
+import json
 import logging
 
 import pytest
@@ -23,6 +24,24 @@ class _MissingKeyDoubaoLLM:
 class _BrokenDoubaoLLM:
     async def chat_completion(self, *args, **kwargs):
         raise RuntimeError("boom")
+
+
+class _StaticResponse:
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    def get_content(self) -> str:
+        return self._content
+
+
+class _CapturingDoubaoLLM:
+    def __init__(self, content: str) -> None:
+        self._content = content
+        self.calls = []
+
+    async def chat_completion(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        return _StaticResponse(self._content)
 
 
 @pytest.fixture
@@ -252,6 +271,261 @@ async def test_prepare_character_resolution_raises_when_intent_extraction_fails(
         )
 
 
+def test_identify_unmatched_character_queries_returns_only_missing_queries(generator: ScriptGenerator) -> None:
+    intent = {
+        "character_queries": [
+            {"name_hint": "黑猫队长", "role": "队长", "keywords": ["黑猫", "潜入"]},
+            {"name_hint": "白猫医生", "role": "医生", "keywords": ["白猫", "包扎"]},
+            {"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫", "终端"]},
+        ]
+    }
+    matched_characters = [
+        {
+            "id": "char-black",
+            "name": "黑猫队长",
+            "role": "队长",
+            "llm_summary": "冷静的黑猫队长，擅长潜入。",
+            "aliases": [],
+        },
+        {
+            "id": "char-white",
+            "name": "白猫医生",
+            "role": "医生",
+            "llm_summary": "负责检查伤口和包扎。",
+            "aliases": [],
+        },
+    ]
+
+    result = generator._identify_unmatched_character_queries(
+        user_input="黑猫队长、白猫医生、灰蓝猫技术员一起回到据点。",
+        intent=intent,
+        matched_characters=matched_characters,
+    )
+
+    assert result == [{"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫", "终端"]}]
+
+
+def test_query_matches_character_profile_accepts_parenthesized_aliases_and_tags(generator: ScriptGenerator) -> None:
+    result = generator._query_matches_character_profile(
+        query={
+            "name_hint": "威龙（王宇昊）",
+            "role": "高二（3）班学生",
+            "archetype": "热情热血散财童子",
+            "category": "主角",
+            "keywords": ["王宇昊"],
+        },
+        profile={
+            "id": "char-weilong",
+            "name": "威龙",
+            "category": "主角",
+            "role": "高二（3）班学生",
+            "archetype": "热情热血散财童子",
+            "aliases": [],
+            "tags": ["王宇昊"],
+            "llm_summary": "威龙，本名王宇昊，是高二（3）班学生。",
+        },
+        user_input="威龙（王宇昊）和同学一起行动。",
+    )
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_character_resolution_generates_temporary_characters_for_unmatched_queries(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_extract_generation_intent(**kwargs):
+        return {
+            "character_queries": [
+                {"name_hint": "黑猫队长", "role": "队长", "keywords": ["黑猫"]},
+                {"name_hint": "白猫医生", "role": "医生", "keywords": ["白猫"]},
+                {"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫"]},
+            ]
+        }
+
+    async def fake_select_character_profiles(**kwargs):
+        return [
+            {
+                "id": "char-black",
+                "name": "黑猫队长",
+                "role": "队长",
+                "llm_summary": "冷静的黑猫队长。",
+                "aliases": [],
+            }
+        ]
+
+    captured: dict[str, object] = {}
+
+    async def fake_generate_temporary_character_profiles(**kwargs):
+        captured["intent"] = kwargs["intent"]
+        captured["desired_count"] = kwargs["desired_count"]
+        return [
+            {"id": "temp-white", "name": "白猫医生", "role": "医生"},
+            {"id": "temp-blue", "name": "灰蓝猫技术员", "role": "技术员"},
+        ]
+
+    monkeypatch.setattr(generator, "_extract_generation_intent", fake_extract_generation_intent)
+    monkeypatch.setattr(generator, "_select_character_profiles", fake_select_character_profiles)
+    monkeypatch.setattr(generator, "_generate_temporary_character_profiles", fake_generate_temporary_character_profiles)
+
+    result = await generator.prepare_character_resolution(
+        user_input="黑猫队长、白猫医生和灰蓝猫技术员一起回到据点。",
+        style="写实",
+        character_profiles=[],
+    )
+
+    assert result["character_resolution"]["status"] == "partially_matched"
+    assert result["selected_character_ids"] == ["char-black"]
+    assert [item["id"] for item in result["temporary_character_profiles"]] == ["temp-white", "temp-blue"]
+    assert captured["desired_count"] == 2
+    assert captured["intent"] == {
+        "character_queries": [
+            {"name_hint": "白猫医生", "role": "医生", "keywords": ["白猫"]},
+            {"name_hint": "灰蓝猫技术员", "role": "技术员", "keywords": ["灰蓝猫"]},
+        ]
+    }
+
+
+def test_align_temporary_character_drafts_with_queries_preserves_name_hint(generator: ScriptGenerator) -> None:
+    drafts = [
+        {
+            "id": "temp-1",
+            "name": "露娜",
+            "role": "高二（1）班学生，计算机竞赛保送预备队成员",
+            "archetype": "高冷毒舌技术宅",
+            "aliases": ["Luna"],
+        }
+    ]
+    queries = [
+        {
+            "name_hint": "麦晓雯（骇爪）",
+            "role": "高二（1）班学生，计算机竞赛保送预备队成员",
+            "archetype": "高冷毒舌技术宅",
+            "category": "CP",
+            "keywords": ["社恐", "广东腔"],
+        }
+    ]
+
+    result = generator._align_temporary_character_drafts_with_queries(
+        drafts=drafts,
+        queries=queries,
+    )
+
+    assert result[0]["name"] == "麦晓雯（骇爪）"
+    assert result[0]["category"] == "CP"
+    assert "露娜" in result[0]["aliases"]
+    assert "Luna" in result[0]["aliases"]
+
+
+def test_build_script_input_policy_uses_strict_mode_for_detailed_input(generator: ScriptGenerator) -> None:
+    policy = generator._build_script_input_policy(
+        """
+        1. 角色关系：姐妹二人已经失联三年，重逢时不要立刻和解。
+        2. 时间地点：凌晨两点，老城区废弃照相馆，外面下雨。
+        3. 剧情顺序必须保留：姐姐先试探，妹妹再拿出底片，最后停在没有说破真相。
+        4. 不要新增旁白，不要增加第三个人，不要改成大团圆结局。
+        """.strip()
+    )
+
+    assert policy["fidelity_mode"] == "strict"
+    assert policy["is_user_input_detailed"] is True
+    assert policy["temperature"] == pytest.approx(0.1)
+    assert any("剧情顺序必须保留" in item for item in policy["preserve_points"])
+
+
+def test_build_script_input_policy_keeps_standard_mode_for_brief_input(generator: ScriptGenerator) -> None:
+    policy = generator._build_script_input_policy("一只猫在窗边看雨，气质安静。")
+
+    assert policy["fidelity_mode"] == "standard"
+    assert policy["is_user_input_detailed"] is False
+    assert policy["temperature"] == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+async def test_call_llm_for_script_passes_input_fidelity_policy(
+    generator: ScriptGenerator,
+) -> None:
+    llm = _CapturingDoubaoLLM(
+        json.dumps(
+            {
+                "title": "照相馆重逢",
+                "synopsis": "姐妹在雨夜照相馆重逢。",
+                "tone": "克制",
+                "themes": ["重逢"],
+                "characters": [],
+                "scenes": [
+                    {
+                        "scene_number": 1,
+                        "scene_profile_id": "",
+                        "scene_profile_version": 1,
+                        "scene_type": "对峙",
+                        "title": "雨夜照相馆",
+                        "description": "两姐妹在废弃照相馆对峙。",
+                        "story_function": "重逢",
+                        "location": "老城区废弃照相馆",
+                        "location_detail": "",
+                        "time": "凌晨",
+                        "weather": "雨夜",
+                        "lighting": "冷色霓虹",
+                        "atmosphere": "压抑",
+                        "mood": "克制",
+                        "shots": [
+                            {
+                                "shot_number": 1,
+                                "duration": 4.0,
+                                "scene_profile_id": "",
+                                "scene_profile_version": 1,
+                                "character_profile_ids": [],
+                                "character_profile_versions": {},
+                                "prompt_focus": "保持原始重逢关系",
+                                "shot_type": "中景",
+                                "camera_angle": "平视",
+                                "camera_movement": "轻推",
+                                "description": "姐姐先试探，妹妹沉默回应。",
+                                "environment": "旧照相馆内",
+                                "lighting": "冷色霓虹",
+                                "characters_in_shot": [],
+                                "actions": [],
+                                "dialogues": [],
+                                "sound_effects": ["雨声"],
+                                "music": "",
+                            }
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+    generator.llm = llm
+
+    await generator._call_llm_for_script(
+        user_input=(
+            "角色关系：姐妹二人已经失联三年，重逢时不要立刻和解。\n"
+            "时间地点：凌晨两点，老城区废弃照相馆，外面下雨。\n"
+            "剧情顺序必须保留：姐姐先试探，妹妹再拿出底片，最后停在没有说破真相。\n"
+            "不要新增旁白，不要增加第三个人，不要改成大团圆结局。"
+        ),
+        style="写实",
+        target_total_duration=12.0,
+        reference_image_count=0,
+        intent={},
+        matched_characters=[],
+        matched_scenes=[],
+        correction_note="请修正时长，但保持原意。",
+    )
+
+    assert len(llm.calls) == 1
+    payload = json.loads(llm.calls[0]["messages"][1].content)
+
+    assert payload["input_policy"]["fidelity_mode"] == "strict"
+    assert payload["input_policy"]["is_user_input_detailed"] is True
+    assert any("姐姐先试探" in item for item in payload["input_policy"]["preserve_points"])
+    assert "不要改写用户输入中已明确给出的剧情事实" in payload["correction_note"]
+    assert llm.calls[0]["kwargs"]["temperature"] == pytest.approx(0.1)
+
+
 @pytest.mark.asyncio
 async def test_select_profiles_returns_empty_when_no_profile_scores_match(
     generator: ScriptGenerator,
@@ -284,3 +558,236 @@ async def test_select_profiles_returns_empty_when_no_profile_scores_match(
     )
 
     assert result == []
+
+
+def test_estimate_desired_character_count_is_not_limited_to_three(generator: ScriptGenerator) -> None:
+    intent = {
+        "character_queries": [
+            {"name_hint": "角色1"},
+            {"name_hint": "角色2"},
+            {"name_hint": "角色3"},
+            {"name_hint": "角色4"},
+            {"name_hint": "角色5"},
+        ]
+    }
+
+    assert generator._estimate_desired_character_count(intent) == 5
+
+
+@pytest.mark.asyncio
+async def test_select_character_profiles_uses_dynamic_desired_count(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, int] = {}
+
+    async def fake_select_profiles(**kwargs):
+        captured["desired_count"] = kwargs["desired_count"]
+        return []
+
+    monkeypatch.setattr(generator, "_select_profiles", fake_select_profiles)
+
+    await generator._select_character_profiles(
+        user_input="五人群像戏",
+        intent={
+            "character_queries": [
+                {"name_hint": "角色1"},
+                {"name_hint": "角色2"},
+                {"name_hint": "角色3"},
+                {"name_hint": "角色4"},
+                {"name_hint": "角色5"},
+            ]
+        },
+        profiles=[],
+    )
+
+    assert captured["desired_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_call_llm_for_script_retries_when_first_response_is_invalid_json(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        [
+            _StaticResponse('{"title":"坏掉的JSON"'),
+            _StaticResponse('{"title":"有效结果","synopsis":"","tone":"","themes":[],"characters":[],"scenes":[]}'),
+        ]
+    )
+    labels: list[str] = []
+
+    async def fake_chat_completion(messages, **kwargs):
+        labels.append(kwargs.get("request_label", ""))
+        return next(responses)
+
+    monkeypatch.setattr(generator.llm, "chat_completion", fake_chat_completion, raising=False)
+
+    result = await generator._call_llm_for_script(
+        user_input="测试",
+        style="",
+        target_total_duration=None,
+        reference_image_count=0,
+        intent={},
+        matched_characters=[],
+        matched_scenes=[],
+    )
+
+    assert result["title"] == "有效结果"
+    assert labels == ["generate_full_script", "generate_full_script_repair_json"]
+
+
+@pytest.mark.asyncio
+async def test_generate_full_script_retries_when_first_result_has_no_shots(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_notes: list[str] = []
+    responses = iter(
+        [
+            {"title": "空剧本"},
+            {"title": "有效剧本"},
+        ]
+    )
+    parsed_scripts = iter(
+        [
+            FullScript(
+                title="空剧本",
+                scenes=[
+                    SceneInfo(
+                        scene_number=1,
+                        shots=[],
+                    )
+                ],
+            ),
+            FullScript(
+                title="有效剧本",
+                scenes=[
+                    SceneInfo(
+                        scene_number=1,
+                        shots=[
+                            ShotInfo(
+                                shot_number=1,
+                                duration=3.0,
+                                description="镜头一",
+                            )
+                        ],
+                    )
+                ],
+            ),
+        ]
+    )
+
+    async def fake_prepare_character_resolution(**kwargs):
+        return {
+            "generation_intent": {},
+            "library_character_profiles": [],
+            "temporary_character_profiles": [],
+            "character_resolution": {},
+        }
+
+    async def fake_select_scene_profiles(**kwargs):
+        return []
+
+    async def fake_call_llm_for_script(**kwargs):
+        call_notes.append(kwargs.get("correction_note", ""))
+        return next(responses)
+
+    def fake_parse_script_data(**kwargs):
+        return next(parsed_scripts)
+
+    async def passthrough_align(full_script, **kwargs):
+        return full_script
+
+    async def passthrough_repair(full_script, **kwargs):
+        return full_script
+
+    monkeypatch.setattr(generator, "prepare_character_resolution", fake_prepare_character_resolution)
+    monkeypatch.setattr(generator, "_select_scene_profiles", fake_select_scene_profiles)
+    monkeypatch.setattr(generator, "_call_llm_for_script", fake_call_llm_for_script)
+    monkeypatch.setattr(generator, "_parse_script_data", fake_parse_script_data)
+    monkeypatch.setattr(generator, "_align_script_duration", passthrough_align)
+    monkeypatch.setattr(generator, "_repair_shot_late_entry_risks", passthrough_repair)
+
+    result = await generator.generate_full_script(user_input="测试生成剧本")
+
+    assert result.title == "有效剧本"
+    assert len(call_notes) == 2
+    assert call_notes[0] == ""
+    assert "生成结果缺少分镜" in call_notes[1]
+
+
+@pytest.mark.asyncio
+async def test_generate_full_script_reuses_confirmed_character_resolution(
+    generator: ScriptGenerator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    valid_script = FullScript(
+        title="有效剧本",
+        scenes=[
+            SceneInfo(
+                scene_number=1,
+                shots=[
+                    ShotInfo(
+                        shot_number=1,
+                        duration=3.0,
+                        description="镜头一",
+                    )
+                ],
+            )
+        ],
+    )
+
+    async def fail_prepare_character_resolution(**kwargs):
+        raise AssertionError("should not re-run prepare_character_resolution")
+
+    async def fake_select_scene_profiles(**kwargs):
+        captured["intent"] = kwargs["intent"]
+        return []
+
+    async def fake_call_llm_for_script(**kwargs):
+        captured["matched_characters"] = kwargs["matched_characters"]
+        return {"title": "有效剧本"}
+
+    def fake_parse_script_data(**kwargs):
+        captured["library_characters"] = kwargs["library_characters"]
+        captured["temporary_characters"] = kwargs["temporary_characters"]
+        captured["character_resolution"] = kwargs["character_resolution"]
+        return valid_script
+
+    async def passthrough_align(full_script, **kwargs):
+        return full_script
+
+    async def passthrough_repair(full_script, **kwargs):
+        return full_script
+
+    monkeypatch.setattr(generator, "prepare_character_resolution", fail_prepare_character_resolution)
+    monkeypatch.setattr(generator, "_select_scene_profiles", fake_select_scene_profiles)
+    monkeypatch.setattr(generator, "_call_llm_for_script", fake_call_llm_for_script)
+    monkeypatch.setattr(generator, "_parse_script_data", fake_parse_script_data)
+    monkeypatch.setattr(generator, "_align_script_duration", passthrough_align)
+    monkeypatch.setattr(generator, "_repair_shot_late_entry_risks", passthrough_repair)
+
+    result = await generator.generate_full_script(
+        user_input="测试生成剧本",
+        character_profiles=[
+            {"id": "library-1", "name": "正式角色", "profile_version": 1},
+            {"id": "temp-1", "name": "临时角色", "profile_version": 1},
+        ],
+        generation_intent={"character_queries": [{"name_hint": "正式角色"}]},
+        character_resolution={"status": "matched", "message": "已确认"},
+        library_character_profiles=[
+            {"id": "library-1", "name": "正式角色", "profile_version": 1},
+        ],
+        temporary_character_profiles=[
+            {"id": "temp-1", "name": "临时角色", "profile_version": 1},
+        ],
+    )
+
+    assert result is valid_script
+    assert captured["intent"] == {"character_queries": [{"name_hint": "正式角色"}]}
+    assert [item["id"] for item in captured["matched_characters"]] == ["library-1", "temp-1"]
+    assert [item["id"] for item in captured["library_characters"]] == ["library-1"]
+    assert [item["id"] for item in captured["temporary_characters"]] == ["temp-1"]
+    assert captured["character_resolution"] == {"status": "matched", "message": "已确认"}

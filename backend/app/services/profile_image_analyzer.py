@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 class ProfileImageAnalyzerService:
     def __init__(self) -> None:
         self.base_url = str(getattr(settings, "DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")).rstrip("/")
-        self.model = str(getattr(settings, "DOUBAO_MODEL", "doubao-seed-2-0-lite-260215")).strip() or "doubao-seed-2-0-lite-260215"
+        self.model = str(getattr(settings, "DOUBAO_MODEL", "doubao-seed-2-0-pro-260215")).strip() or "doubao-seed-2-0-lite-260215"
+        self.debug_logging = bool(getattr(settings, "MODEL_DEBUG_LOGGING", True))
+        self.debug_max_chars = int(getattr(settings, "MODEL_DEBUG_MAX_CHARS", 20000))
         self.timeout = httpx.Timeout(
             connect=float(getattr(settings, "DOUBAO_CONNECT_TIMEOUT", 20.0)),
             read=float(getattr(settings, "DOUBAO_READ_TIMEOUT", 240.0)),
@@ -178,7 +180,56 @@ class ProfileImageAnalyzerService:
             raise RuntimeError("图片分析模型返回为空")
         return self._parse_json_payload(content)
 
+    def _truncate_for_log(self, value: str) -> str:
+        if len(value) <= self.debug_max_chars:
+            return value
+        return f"{value[:self.debug_max_chars]}\n...<truncated {len(value) - self.debug_max_chars} chars>"
+
+    def _sanitize_for_log(self, value: Any, *, parent_key: str = "") -> Any:
+        if isinstance(value, dict):
+            sanitized: Dict[str, Any] = {}
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if lowered == "authorization":
+                    sanitized[key] = "***"
+                    continue
+                sanitized[key] = self._sanitize_for_log(item, parent_key=lowered)
+            return sanitized
+        if isinstance(value, list):
+            return [self._sanitize_for_log(item, parent_key=parent_key) for item in value]
+        if isinstance(value, str):
+            if value.startswith("data:"):
+                return f"<data-url length={len(value)}>"
+            return self._truncate_for_log(value)
+        return value
+
+    def _json_for_log(self, payload: Any) -> str:
+        try:
+            raw = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, indent=2)
+        except Exception:
+            raw = str(payload)
+        return self._truncate_for_log(raw)
+
+    def _log_request(self, *, request_body: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "Profile image analyzer request | model=%s\n%s",
+            self.model,
+            self._json_for_log(request_body),
+        )
+
+    def _log_response(self, *, response_body: Dict[str, Any]) -> None:
+        if not self.debug_logging:
+            return
+        logger.info(
+            "Profile image analyzer response | model=%s\n%s",
+            self.model,
+            self._json_for_log(response_body),
+        )
+
     async def _request_completion(self, request_body: Dict[str, Any], *, api_key: str) -> Dict[str, Any]:
+        self._log_request(request_body=request_body)
         async with httpx.AsyncClient(
             timeout=self.timeout,
             headers={
@@ -191,7 +242,9 @@ class ProfileImageAnalyzerService:
                 json=request_body,
             )
             response.raise_for_status()
-            return response.json()
+            response_body = response.json()
+            self._log_response(response_body=response_body)
+            return response_body
 
     def _extract_message_content(self, payload: Dict[str, Any]) -> str:
         content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")

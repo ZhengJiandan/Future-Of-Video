@@ -40,7 +40,7 @@ import {
   TeamOutlined,
   VideoCameraOutlined,
 } from '@ant-design/icons'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   CharacterProfile,
   GeneratedScriptResponse,
@@ -66,8 +66,8 @@ const { TextArea } = Input
 
 const stepItems = [
   { title: '输入需求', subtitle: '创意、角色、参考图', icon: <FileTextOutlined /> },
-  { title: '确认剧本', subtitle: '查看概要并继续拆分', icon: <EditOutlined /> },
-  { title: '审核片段', subtitle: '确认拆分和画面描述', icon: <CheckCircleOutlined /> },
+  { title: '确认剧本', subtitle: '确认内容并按约束分段', icon: <EditOutlined /> },
+  { title: '审核片段', subtitle: '审核分段结果与画面描述', icon: <CheckCircleOutlined /> },
   { title: '审核首尾帧', subtitle: '确认关键帧连续性', icon: <FileImageOutlined /> },
   { title: '生成视频', subtitle: '开始渲染并查看进度', icon: <VideoCameraOutlined /> },
   { title: '查看结果', subtitle: '成片与片段结果', icon: <EyeOutlined /> },
@@ -430,12 +430,47 @@ const downloadAsset = (assetUrl?: string, filename?: string) => {
   document.body.removeChild(link)
 }
 
+const isGatewayTimeoutError = (error: unknown): boolean => {
+  const responseError = error as { response?: { status?: number } }
+  return responseError.response?.status === 504
+}
+
+const readRequestedProjectId = (state: unknown): string | null => {
+  if (!state || typeof state !== 'object') {
+    return null
+  }
+  const projectId = (state as { projectId?: unknown }).projectId
+  if (typeof projectId !== 'string') {
+    return null
+  }
+  const normalized = projectId.trim()
+  return normalized || null
+}
+
+const stableSerialize = (value: unknown): string => {
+  if (value === null || value === undefined) {
+    return 'null'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(',')}]`
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
 export const ScriptPipelinePage: React.FC = () => {
   const navigate = useNavigate()
+  const location = useLocation()
   const flowTrackRef = useRef<HTMLDivElement | null>(null)
   const stepButtonRefs = useRef<Array<HTMLButtonElement | null>>([])
   const suppressProjectSaveRef = useRef(true)
   const creatingProjectRef = useRef(false)
+  const splitRequestInFlightRef = useRef(false)
+  const keyframeRequestInFlightRef = useRef(false)
+  const pendingRequestedProjectIdRef = useRef<string | null>(readRequestedProjectId(location.state))
   const selectedProjectId = useProjectStore((state) => state.currentProjectId)
   const projectStoreHydrated = useProjectStore((state) => state.hydrated)
   const setCurrentProjectId = useProjectStore((state) => state.setCurrentProjectId)
@@ -470,6 +505,7 @@ export const ScriptPipelinePage: React.FC = () => {
 
   const [scriptLoading, setScriptLoading] = useState(false)
   const [splitLoading, setSplitLoading] = useState(false)
+  const [splitReviewLoading, setSplitReviewLoading] = useState(false)
   const [keyframeLoading, setKeyframeLoading] = useState(false)
   const [renderStarting, setRenderStarting] = useState(false)
   const [renderActionLoading, setRenderActionLoading] = useState(false)
@@ -532,6 +568,7 @@ export const ScriptPipelinePage: React.FC = () => {
     setScriptSummary(null)
     setSegments([])
     setSplitValidationReport(null)
+    setSplitReviewLoading(false)
     setKeyframes([])
     setRenderTaskId(null)
     setRenderStatus(null)
@@ -539,6 +576,299 @@ export const ScriptPipelinePage: React.FC = () => {
     setSavingTemporaryCharacterIds([])
     setSavedTemporaryCharacterIds([])
     setError(null)
+  }
+
+  const applyProjectState = (item: Record<string, unknown>) => {
+    const state = (item.state as Record<string, unknown>) || {}
+    const restoredReferenceImages = Array.isArray(state.referenceImages)
+      ? (state.referenceImages as ReferenceImageAsset[])
+      : []
+    const restoredGeneratedScript =
+      state.generatedScript && typeof state.generatedScript === 'object'
+        ? (state.generatedScript as GeneratedScriptResponse)
+        : null
+    const restoredScriptSummary =
+      state.scriptSummary && typeof state.scriptSummary === 'object'
+        ? (state.scriptSummary as ScriptSummary)
+        : null
+    const restoredSegments = Array.isArray(state.segments)
+      ? normalizeSegmentItems(state.segments as SegmentItem[])
+      : []
+    const restoredSplitValidationReport =
+      state.splitValidationReport && typeof state.splitValidationReport === 'object'
+        ? (state.splitValidationReport as SplitValidationReport)
+        : null
+    const restoredKeyframes = Array.isArray(state.keyframes) ? (state.keyframes as SegmentKeyframes[]) : []
+    const restoredRenderStatus =
+      state.renderStatus && typeof state.renderStatus === 'object'
+        ? (state.renderStatus as RenderStatusResponse)
+        : null
+
+    setCurrentStep(Number(state.currentStep ?? item.current_step ?? 0))
+    setTransitionDirection(state.transitionDirection === 'backward' ? 'backward' : 'forward')
+    setUserInput(String(state.userInput || ''))
+    setStylePreference(String(state.stylePreference || '写实战术电影感'))
+    setProjectTitle(String(state.projectTitle || item.project_title || '未命名项目'))
+    setMaxSegmentDuration(normalizeMaxSegmentDuration(Number(state.maxSegmentDuration || MAX_SEGMENT_DURATION)))
+    setTargetTotalDuration(
+      state.targetTotalDuration === null || state.targetTotalDuration === undefined
+        ? null
+        : Number(state.targetTotalDuration),
+    )
+    setProvider(String(state.provider || 'auto'))
+    setResolution(String(state.resolution || '720p'))
+    setAspectRatio(String(state.aspectRatio || '16:9'))
+    setWatermark(Boolean(state.watermark))
+    setProviderModel(String(state.providerModel || 'doubao-seedance-1-5-pro-251215'))
+    setCameraFixed(Boolean(state.cameraFixed))
+    setGenerateAudio(state.generateAudio === false ? false : true)
+    setReturnLastFrame(Boolean(state.returnLastFrame))
+    setServiceTier(String(state.serviceTier || 'default'))
+    setSeedInput(
+      state.seedInput === null || state.seedInput === undefined || state.seedInput === ''
+        ? null
+        : Number(state.seedInput),
+    )
+    setReferenceImages(restoredReferenceImages)
+    setUploadFileList(buildUploadFileList(restoredReferenceImages))
+    setConstraintCharacterIds(
+      Array.isArray(state.constraintCharacterIds) ? (state.constraintCharacterIds as string[]) : [],
+    )
+    setSelectedCharacterIds(
+      Array.isArray(state.selectedCharacterIds) ? (state.selectedCharacterIds as string[]) : [],
+    )
+    setConstraintSceneIds(Array.isArray(state.constraintSceneIds) ? (state.constraintSceneIds as string[]) : [])
+    setSelectedSceneIds(Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : [])
+    setGeneratedScript(restoredGeneratedScript)
+    setManualCharacterProfiles(
+      Array.isArray(state.manualCharacterProfiles) ? (state.manualCharacterProfiles as CharacterProfile[]) : [],
+    )
+    setSavedTemporaryCharacterIds(
+      Array.isArray(state.savedTemporaryCharacterIds) ? (state.savedTemporaryCharacterIds as string[]) : [],
+    )
+    setScriptDraft(String(state.scriptDraft || ''))
+    setScriptSummary(restoredScriptSummary)
+    setSegments(restoredSegments)
+    setSplitValidationReport(restoredSplitValidationReport)
+    setSplitReviewLoading(false)
+    setKeyframes(restoredKeyframes)
+    setRenderTaskId(
+      typeof state.renderTaskId === 'string' && state.renderTaskId
+        ? state.renderTaskId
+        : String(item.last_render_task_id || '') || null,
+    )
+    setRenderStatus(restoredRenderStatus)
+  }
+
+  const buildProjectStateSnapshot = (overrides: Record<string, unknown> = {}) => ({
+    currentStep,
+    transitionDirection,
+    userInput,
+    stylePreference,
+    projectTitle,
+    maxSegmentDuration,
+    targetTotalDuration,
+    provider,
+    resolution,
+    aspectRatio,
+    watermark,
+    providerModel,
+    cameraFixed,
+    generateAudio,
+    returnLastFrame,
+    serviceTier,
+    seedInput,
+    referenceImages,
+    constraintCharacterIds,
+    constraintSceneIds,
+    selectedCharacterIds,
+    selectedSceneIds,
+    generatedScript,
+    manualCharacterProfiles,
+    savedTemporaryCharacterIds,
+    scriptDraft,
+    scriptSummary,
+    segments,
+    splitValidationReport,
+    keyframes,
+    renderTaskId,
+    renderStatus,
+    ...overrides,
+  })
+
+  const buildProjectPayload = (overrides: {
+    project_title?: string
+    current_step?: number
+    state?: Record<string, unknown>
+    status?: string
+    summary?: string
+    last_render_task_id?: string
+  } = {}) => ({
+    project_title: overrides.project_title ?? (projectTitle.trim() || '未命名项目'),
+    current_step: overrides.current_step ?? currentStep,
+    state: overrides.state ?? buildProjectStateSnapshot(),
+    status:
+      overrides.status ??
+      (renderStatus?.status === 'queued' || renderStatus?.status === 'dispatching' || renderStatus?.status === 'processing'
+        ? 'in_progress'
+        : renderStatus?.status === 'paused'
+          ? 'paused'
+          : renderStatus?.status === 'completed'
+            ? 'completed'
+            : renderStatus?.status === 'failed'
+              ? 'failed'
+              : renderStatus?.status === 'cancelled'
+                ? 'cancelled'
+                : renderTaskId
+                  ? 'in_progress'
+                  : (overrides.current_step ?? currentStep) >= 5
+                    ? 'completed'
+                    : 'draft'),
+    last_render_task_id: overrides.last_render_task_id ?? (renderTaskId || undefined),
+    summary: overrides.summary ?? (scriptSummary?.synopsis || ''),
+  })
+
+  const ensureProjectExists = async () => {
+    if (selectedProjectId) {
+      return selectedProjectId
+    }
+
+    const response = await scriptPipelineApi.createProject(
+      buildProjectPayload({
+        current_step: currentStep,
+        state: buildProjectStateSnapshot(),
+      }),
+    )
+    const projectId = response.data.item.id
+    setCurrentProjectId(projectId)
+    return projectId
+  }
+
+  const recoverGeneratedScriptFromProject = async (projectId: string, originalError: unknown) => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      try {
+        const response = await scriptPipelineApi.getProject(projectId)
+        const item = response.data.item as Record<string, unknown> | null
+        const state = (item?.state as Record<string, unknown>) || {}
+        if (item && (state.generatedScript || (typeof state.scriptDraft === 'string' && state.scriptDraft.trim()))) {
+          applyProjectState(item)
+          setCharacterPrepareResult(null)
+          setCharacterConfirmOpen(false)
+          setSavedTemporaryCharacterIds([])
+          setError(null)
+          message.warning('生成剧本请求超时，但后端已完成生成，已自动恢复到剧本确认阶段')
+          return true
+        }
+      } catch {
+        // Ignore polling errors and keep retrying until timeout.
+      }
+    }
+
+    throw originalError
+  }
+
+  const recoverSplitScriptFromProject = async (
+    projectId: string,
+    requestMeta: {
+      scriptText: string
+      maxSegmentDuration: number
+      targetTotalDuration: number | null
+    },
+    originalError: unknown,
+  ) => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      try {
+        const response = await scriptPipelineApi.getProject(projectId)
+        const item = response.data.item as Record<string, unknown> | null
+        const state = (item?.state as Record<string, unknown>) || {}
+        const restoredSegments = Array.isArray(state.segments) ? (state.segments as SegmentItem[]) : []
+        const savedScriptDraft = String(state.scriptDraft || '').trim()
+        const savedMaxSegmentDuration = normalizeMaxSegmentDuration(
+          Number(state.maxSegmentDuration || MAX_SEGMENT_DURATION),
+        )
+        const savedTargetTotalDuration =
+          state.targetTotalDuration === null || state.targetTotalDuration === undefined
+            ? null
+            : Number(state.targetTotalDuration)
+
+        if (
+          item &&
+          restoredSegments.length > 0 &&
+          savedScriptDraft === requestMeta.scriptText &&
+          savedMaxSegmentDuration === requestMeta.maxSegmentDuration &&
+          savedTargetTotalDuration === requestMeta.targetTotalDuration
+        ) {
+          applyProjectState(item)
+          setCharacterPrepareResult(null)
+          setCharacterConfirmOpen(false)
+          setError(null)
+          message.warning('拆分片段请求超时，但后端已完成拆分，已自动恢复到片段确认阶段')
+          return true
+        }
+      } catch {
+        // Ignore polling errors and keep retrying until timeout.
+      }
+    }
+
+    throw originalError
+  }
+
+  const recoverKeyframesFromProject = async (
+    projectId: string,
+    requestMeta: {
+      style: string
+      selectedCharacterIds: string[]
+      selectedSceneIds: string[]
+      referenceImages: ReferenceImageAsset[]
+      segments: SegmentItem[]
+    },
+    originalError: unknown,
+  ) => {
+    const expectedSegments = stableSerialize(requestMeta.segments)
+    const expectedCharacterIds = stableSerialize(requestMeta.selectedCharacterIds)
+    const expectedSceneIds = stableSerialize(requestMeta.selectedSceneIds)
+    const expectedReferenceImages = stableSerialize(requestMeta.referenceImages)
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      try {
+        const response = await scriptPipelineApi.getProject(projectId)
+        const item = response.data.item as Record<string, unknown> | null
+        const state = (item?.state as Record<string, unknown>) || {}
+        const restoredKeyframes = Array.isArray(state.keyframes) ? (state.keyframes as SegmentKeyframes[]) : []
+        const restoredSegments = Array.isArray(state.segments) ? normalizeSegmentItems(state.segments as SegmentItem[]) : []
+        const restoredStyle = String(state.stylePreference || '').trim()
+        const restoredCharacterIds = Array.isArray(state.selectedCharacterIds)
+          ? (state.selectedCharacterIds as string[])
+          : []
+        const restoredSceneIds = Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : []
+        const restoredReferenceImages = Array.isArray(state.referenceImages)
+          ? (state.referenceImages as ReferenceImageAsset[])
+          : []
+
+        if (
+          item &&
+          restoredKeyframes.length > 0 &&
+          restoredKeyframes.length === requestMeta.segments.length &&
+          restoredStyle === requestMeta.style &&
+          stableSerialize(restoredSegments) === expectedSegments &&
+          stableSerialize(restoredCharacterIds) === expectedCharacterIds &&
+          stableSerialize(restoredSceneIds) === expectedSceneIds &&
+          stableSerialize(restoredReferenceImages) === expectedReferenceImages
+        ) {
+          applyProjectState(item)
+          setError(null)
+          message.warning('首帧生成请求超时，但后端已完成生成，已自动恢复到首尾帧审核阶段')
+          return true
+        }
+      } catch {
+        // Ignore polling errors and keep retrying until timeout.
+      }
+    }
+
+    throw originalError
   }
 
   useEffect(() => {
@@ -574,107 +904,44 @@ export const ScriptPipelinePage: React.FC = () => {
   }, [])
 
   useEffect(() => {
+    pendingRequestedProjectIdRef.current = readRequestedProjectId(location.state)
+  }, [location.key, location.state])
+
+  useEffect(() => {
     if (!projectStoreHydrated) {
       return
     }
 
     let active = true
 
-    const applyProjectState = (item: Record<string, unknown>) => {
-      const state = (item.state as Record<string, unknown>) || {}
-      const restoredReferenceImages = Array.isArray(state.referenceImages)
-        ? (state.referenceImages as ReferenceImageAsset[])
-        : []
-      const restoredGeneratedScript =
-        state.generatedScript && typeof state.generatedScript === 'object'
-          ? (state.generatedScript as GeneratedScriptResponse)
-          : null
-      const restoredScriptSummary =
-        state.scriptSummary && typeof state.scriptSummary === 'object'
-          ? (state.scriptSummary as ScriptSummary)
-          : null
-      const restoredSegments = Array.isArray(state.segments)
-        ? normalizeSegmentItems(state.segments as SegmentItem[])
-        : []
-      const restoredSplitValidationReport =
-        state.splitValidationReport && typeof state.splitValidationReport === 'object'
-          ? (state.splitValidationReport as SplitValidationReport)
-          : null
-      const restoredKeyframes = Array.isArray(state.keyframes) ? (state.keyframes as SegmentKeyframes[]) : []
-      const restoredRenderStatus =
-        state.renderStatus && typeof state.renderStatus === 'object'
-          ? (state.renderStatus as RenderStatusResponse)
-          : null
-
-      setCurrentStep(Number(state.currentStep ?? item.current_step ?? 0))
-      setTransitionDirection(state.transitionDirection === 'backward' ? 'backward' : 'forward')
-      setUserInput(String(state.userInput || ''))
-      setStylePreference(String(state.stylePreference || '写实战术电影感'))
-      setProjectTitle(String(state.projectTitle || item.project_title || '未命名项目'))
-      setMaxSegmentDuration(normalizeMaxSegmentDuration(Number(state.maxSegmentDuration || MAX_SEGMENT_DURATION)))
-      setTargetTotalDuration(
-        state.targetTotalDuration === null || state.targetTotalDuration === undefined
-          ? null
-          : Number(state.targetTotalDuration),
-      )
-      setProvider(String(state.provider || 'auto'))
-      setResolution(String(state.resolution || '720p'))
-      setAspectRatio(String(state.aspectRatio || '16:9'))
-      setWatermark(Boolean(state.watermark))
-      setProviderModel(String(state.providerModel || 'doubao-seedance-1-5-pro-251215'))
-      setCameraFixed(Boolean(state.cameraFixed))
-      setGenerateAudio(state.generateAudio === false ? false : true)
-      setReturnLastFrame(Boolean(state.returnLastFrame))
-      setServiceTier(String(state.serviceTier || 'default'))
-      setSeedInput(
-        state.seedInput === null || state.seedInput === undefined || state.seedInput === ''
-          ? null
-          : Number(state.seedInput),
-      )
-      setReferenceImages(restoredReferenceImages)
-      setUploadFileList(buildUploadFileList(restoredReferenceImages))
-      setConstraintCharacterIds(
-        Array.isArray(state.constraintCharacterIds) ? (state.constraintCharacterIds as string[]) : [],
-      )
-      setSelectedCharacterIds(
-        Array.isArray(state.selectedCharacterIds) ? (state.selectedCharacterIds as string[]) : [],
-      )
-      setConstraintSceneIds(Array.isArray(state.constraintSceneIds) ? (state.constraintSceneIds as string[]) : [])
-      setSelectedSceneIds(Array.isArray(state.selectedSceneIds) ? (state.selectedSceneIds as string[]) : [])
-      setGeneratedScript(restoredGeneratedScript)
-      setManualCharacterProfiles(
-        Array.isArray(state.manualCharacterProfiles) ? (state.manualCharacterProfiles as CharacterProfile[]) : [],
-      )
-      setSavedTemporaryCharacterIds(
-        Array.isArray(state.savedTemporaryCharacterIds) ? (state.savedTemporaryCharacterIds as string[]) : [],
-      )
-      setScriptDraft(String(state.scriptDraft || ''))
-      setScriptSummary(restoredScriptSummary)
-      setSegments(restoredSegments)
-      setSplitValidationReport(restoredSplitValidationReport)
-      setKeyframes(restoredKeyframes)
-      setRenderTaskId(
-        typeof state.renderTaskId === 'string' && state.renderTaskId
-          ? state.renderTaskId
-          : String(item.last_render_task_id || '') || null,
-      )
-      setRenderStatus(restoredRenderStatus)
-    }
-
     const restoreProject = async () => {
       setProjectHydrating(true)
       try {
         let item: Record<string, unknown> | null = null
-        if (selectedProjectId) {
+        const requestedProjectId = pendingRequestedProjectIdRef.current || selectedProjectId
+        const hasExplicitRequestedProject = Boolean(pendingRequestedProjectIdRef.current)
+
+        if (requestedProjectId) {
           try {
-            const response = await scriptPipelineApi.getProject(selectedProjectId)
+            const response = await scriptPipelineApi.getProject(requestedProjectId)
             item = response.data.item as Record<string, unknown> | null
+            if (item?.id) {
+              setCurrentProjectId(String(item.id))
+            }
           } catch {
-            clearCurrentProjectId()
+            if (hasExplicitRequestedProject || requestedProjectId === selectedProjectId) {
+              clearCurrentProjectId()
+            }
           }
         }
 
         if (!item) {
+          if (hasExplicitRequestedProject) {
+            if (active) {
+              resetLocalState()
+            }
+            return
+          }
           const response = await scriptPipelineApi.getCurrentProject()
           item = response.data.item as Record<string, unknown> | null
           if (item?.id) {
@@ -694,6 +961,7 @@ export const ScriptPipelinePage: React.FC = () => {
         message.error('恢复当前项目失败')
       } finally {
         if (active) {
+          pendingRequestedProjectIdRef.current = null
           setProjectHydrating(false)
           suppressProjectSaveRef.current = false
         }
@@ -782,39 +1050,7 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
-    const stateForSave = {
-      currentStep,
-      transitionDirection,
-      userInput,
-      stylePreference,
-      projectTitle,
-      maxSegmentDuration,
-      targetTotalDuration,
-      provider,
-      resolution,
-      aspectRatio,
-      watermark,
-      providerModel,
-      cameraFixed,
-      generateAudio,
-      returnLastFrame,
-      serviceTier,
-      seedInput,
-      referenceImages,
-      constraintCharacterIds,
-      constraintSceneIds,
-      selectedCharacterIds,
-      selectedSceneIds,
-      generatedScript,
-      manualCharacterProfiles,
-      savedTemporaryCharacterIds,
-      scriptDraft,
-      scriptSummary,
-      segments,
-      splitValidationReport,
-      keyframes,
-      renderTaskId,
-    }
+    const stateForSave = buildProjectStateSnapshot()
 
     if (
       !hasMeaningfulProjectState({
@@ -836,29 +1072,7 @@ export const ScriptPipelinePage: React.FC = () => {
     }
 
     const timer = window.setTimeout(() => {
-      const payload = {
-        project_title: projectTitle.trim() || '未命名项目',
-        current_step: currentStep,
-        state: stateForSave,
-        status:
-          renderStatus?.status === 'queued' || renderStatus?.status === 'dispatching' || renderStatus?.status === 'processing'
-            ? 'in_progress'
-            : renderStatus?.status === 'paused'
-              ? 'paused'
-            : renderStatus?.status === 'completed'
-              ? 'completed'
-              : renderStatus?.status === 'failed'
-                ? 'failed'
-                : renderStatus?.status === 'cancelled'
-                  ? 'cancelled'
-                  : renderTaskId
-                    ? 'in_progress'
-                    : currentStep >= 5
-                      ? 'completed'
-                      : 'draft',
-        last_render_task_id: renderTaskId || undefined,
-        summary: scriptSummary?.synopsis || '',
-      }
+      const payload = buildProjectPayload({ state: stateForSave })
 
       const persist = async () => {
         try {
@@ -964,20 +1178,25 @@ export const ScriptPipelinePage: React.FC = () => {
       return
     }
 
-    setCurrentStep(1)
-    setScriptLoading(true)
-    setError(null)
-    setGeneratedScript(null)
-    setManualCharacterProfiles([])
-    setSavedTemporaryCharacterIds([])
-    setSegments([])
-    setSplitValidationReport(null)
-    setKeyframes([])
-    setRenderTaskId(null)
-    setRenderStatus(null)
+    let ensuredProjectId: string | null = null
 
     try {
+      ensuredProjectId = await ensureProjectExists()
+
+      setCurrentStep(1)
+      setScriptLoading(true)
+      setError(null)
+      setGeneratedScript(null)
+      setManualCharacterProfiles([])
+      setSavedTemporaryCharacterIds([])
+      setSegments([])
+      setSplitValidationReport(null)
+      setKeyframes([])
+      setRenderTaskId(null)
+      setRenderStatus(null)
+
       const response = await scriptPipelineApi.generateScript({
+        project_id: ensuredProjectId,
         user_input: userInput.trim(),
         style: stylePreference.trim(),
         target_total_duration: targetTotalDuration || undefined,
@@ -985,6 +1204,8 @@ export const ScriptPipelinePage: React.FC = () => {
         selected_scene_ids: constraintSceneIds,
         character_profiles: temporaryCharacters,
         reference_images: referenceImages,
+        generation_intent: characterPrepareResult?.generation_intent,
+        character_resolution: characterPrepareResult?.character_resolution as Record<string, unknown> | undefined,
       })
     setGeneratedScript(response.data)
     setCharacterPrepareResult(null)
@@ -997,6 +1218,18 @@ export const ScriptPipelinePage: React.FC = () => {
       setProjectTitle(response.data.summary.title || '未命名项目')
       setCurrentStep(1)
     } catch (requestError: unknown) {
+      if (ensuredProjectId && isGatewayTimeoutError(requestError)) {
+        try {
+          const recovered = await recoverGeneratedScriptFromProject(ensuredProjectId, requestError)
+          if (recovered) {
+            return
+          }
+        } catch (recoveryError) {
+          setError(extractApiErrorMessage(recoveryError, '完整剧本生成失败'))
+          setCurrentStep(0)
+          return
+        }
+      }
       setError(extractApiErrorMessage(requestError, '完整剧本生成失败'))
       setCurrentStep(0)
     } finally {
@@ -1037,31 +1270,6 @@ export const ScriptPipelinePage: React.FC = () => {
     }
   }
 
-  const handleUseInputAsScript = () => {
-    const manualScript = userInput.trim()
-    if (!manualScript) {
-      return
-    }
-
-    setError(null)
-    setGeneratedScript(null)
-    setManualCharacterProfiles([])
-    setCharacterPrepareResult(null)
-    setCharacterConfirmOpen(false)
-    setConfirmedLibraryCharacterIds([])
-    setConfirmedTemporaryCharacterIds([])
-    setSavedTemporaryCharacterIds([])
-    setScriptSummary(null)
-    setScriptDraft(manualScript)
-    setSegments([])
-    setSplitValidationReport(null)
-    setKeyframes([])
-    setRenderTaskId(null)
-    setRenderStatus(null)
-    setTransitionDirection('forward')
-    setCurrentStep(1)
-  }
-
   const buildConfirmedCharacterProfiles = (
     prepareResult: PrepareCharactersResponse | null,
     libraryCharacterIds: string[],
@@ -1081,15 +1289,59 @@ export const ScriptPipelinePage: React.FC = () => {
     return [...selectedLibraryProfiles, ...selectedTemporaryProfiles]
   }
 
-  const runSplitScript = async () => {
-    if (!scriptDraft.trim()) {
+  const runReviewSplitScript = async ({
+    projectId,
+    scriptText,
+    segmentsToReview,
+    maxDuration,
+    targetDuration,
+    silentOnError = false,
+  }: {
+    projectId?: string | null
+    scriptText: string
+    segmentsToReview: SegmentItem[]
+    maxDuration: number
+    targetDuration: number | null
+    silentOnError?: boolean
+  }) => {
+    if (!scriptText.trim() || !segmentsToReview.length || splitReviewLoading) {
       return
     }
 
+    setSplitReviewLoading(true)
+    try {
+      const response = await scriptPipelineApi.reviewSplitScript({
+        project_id: projectId || undefined,
+        script_text: scriptText.trim(),
+        max_segment_duration: maxDuration,
+        target_total_duration: targetDuration || undefined,
+        segments: segmentsToReview,
+      })
+      setSegments(normalizeSegmentItems(response.data.segments || segmentsToReview))
+      setSplitValidationReport(response.data.validation_report || null)
+    } catch (requestError: unknown) {
+      setSplitValidationReport(null)
+      if (!silentOnError) {
+        message.error(extractApiErrorMessage(requestError, '片段审核失败'))
+      }
+    } finally {
+      setSplitReviewLoading(false)
+    }
+  }
+
+  const runSplitScript = async () => {
+    if (!scriptDraft.trim() || splitRequestInFlightRef.current) {
+      return
+    }
+
+    splitRequestInFlightRef.current = true
     const normalizedMaxSegmentDuration = normalizeMaxSegmentDuration(maxSegmentDuration)
+    const normalizedScriptDraft = scriptDraft.trim()
+    let ensuredProjectId: string | null = null
 
     setCurrentStep(2)
     setSplitLoading(true)
+    setSplitReviewLoading(false)
     setError(null)
     setSegments([])
     setSplitValidationReport(null)
@@ -1099,19 +1351,51 @@ export const ScriptPipelinePage: React.FC = () => {
     setMaxSegmentDuration(normalizedMaxSegmentDuration)
 
     try {
+      ensuredProjectId = await ensureProjectExists()
       const response = await scriptPipelineApi.splitScript({
-        script_text: scriptDraft,
+        project_id: ensuredProjectId,
+        script_text: normalizedScriptDraft,
         max_segment_duration: normalizedMaxSegmentDuration,
         target_total_duration: targetTotalDuration || undefined,
       })
-      setSegments(normalizeSegmentItems(response.data.segments))
+      const normalizedSegments = normalizeSegmentItems(response.data.segments)
+      setSegments(normalizedSegments)
       setSplitValidationReport(response.data.validation_report || null)
       setKeyframes([])
       setCurrentStep(2)
+      void runReviewSplitScript({
+        projectId: ensuredProjectId,
+        scriptText: normalizedScriptDraft,
+        segmentsToReview: normalizedSegments,
+        maxDuration: normalizedMaxSegmentDuration,
+        targetDuration: targetTotalDuration ?? null,
+        silentOnError: true,
+      })
     } catch (requestError: unknown) {
+      if (ensuredProjectId && isGatewayTimeoutError(requestError)) {
+        try {
+          const recovered = await recoverSplitScriptFromProject(
+            ensuredProjectId,
+            {
+              scriptText: normalizedScriptDraft,
+              maxSegmentDuration: normalizedMaxSegmentDuration,
+              targetTotalDuration: targetTotalDuration ?? null,
+            },
+            requestError,
+          )
+          if (recovered) {
+            return
+          }
+        } catch (recoveryError) {
+          setError(extractApiErrorMessage(recoveryError, '视频片段拆分失败'))
+          setCurrentStep(1)
+          return
+        }
+      }
       setError(extractApiErrorMessage(requestError, '视频片段拆分失败'))
       setCurrentStep(1)
     } finally {
+      splitRequestInFlightRef.current = false
       setSplitLoading(false)
     }
   }
@@ -1252,11 +1536,16 @@ export const ScriptPipelinePage: React.FC = () => {
   }
 
   const handleGenerateKeyframes = async () => {
-    if (!segments.length) {
+    if (!segments.length || keyframeRequestInFlightRef.current) {
       return
     }
 
+    keyframeRequestInFlightRef.current = true
     const normalizedSegments = normalizeSegmentItems(segments)
+    const normalizedStyle = stylePreference.trim()
+    const requestSelectedCharacterIds = [...selectedCharacterIds]
+    const requestSelectedSceneIds = [...selectedSceneIds]
+    let ensuredProjectId: string | null = null
 
     setCurrentStep(3)
     setKeyframeLoading(true)
@@ -1267,21 +1556,47 @@ export const ScriptPipelinePage: React.FC = () => {
     setSegments(normalizedSegments)
 
     try {
+      ensuredProjectId = await ensureProjectExists()
       const response = await scriptPipelineApi.generateKeyframes({
+        project_id: ensuredProjectId,
         project_title: projectTitle.trim() || '未命名项目',
-        style: stylePreference.trim(),
-        selected_character_ids: selectedCharacterIds,
-        selected_scene_ids: selectedSceneIds,
+        style: normalizedStyle,
+        selected_character_ids: requestSelectedCharacterIds,
+        selected_scene_ids: requestSelectedSceneIds,
         character_profiles: effectiveCharacterProfiles,
+        scene_profiles: generatedScript?.scene_profiles || [],
         reference_images: referenceImages,
         segments: normalizedSegments,
       })
       setKeyframes(response.data.keyframes)
       setCurrentStep(3)
     } catch (requestError: unknown) {
+      if (ensuredProjectId && isGatewayTimeoutError(requestError)) {
+        try {
+          const recovered = await recoverKeyframesFromProject(
+            ensuredProjectId,
+            {
+              style: normalizedStyle,
+              selectedCharacterIds: requestSelectedCharacterIds,
+              selectedSceneIds: requestSelectedSceneIds,
+              referenceImages,
+              segments: normalizedSegments,
+            },
+            requestError,
+          )
+          if (recovered) {
+            return
+          }
+        } catch (recoveryError) {
+          setError(extractApiErrorMessage(recoveryError, '首尾帧生成失败'))
+          setCurrentStep(2)
+          return
+        }
+      }
       setError(extractApiErrorMessage(requestError, '首尾帧生成失败'))
       setCurrentStep(2)
     } finally {
+      keyframeRequestInFlightRef.current = false
       setKeyframeLoading(false)
     }
   }
@@ -1500,7 +1815,6 @@ export const ScriptPipelinePage: React.FC = () => {
   const effectiveCharacterProfiles = generatedScript?.character_profiles || manualCharacterProfiles
   const temporaryCharacters = effectiveCharacterProfiles.filter((profile) => profile.source === 'ai-generated-draft')
   const characterResolution = generatedScript?.character_resolution
-  const isManualScriptMode = !generatedScript
   const finalPreviewUrl = renderStatus?.final_output?.asset_url
   const finalPreviewType = renderStatus?.final_output?.asset_type
   const previousStepIndex = Math.max(currentStep - 1, 0)
@@ -1545,8 +1859,8 @@ export const ScriptPipelinePage: React.FC = () => {
               <Alert
                 type="info"
                 showIcon
-                message="也可以直接从剧本审核开始"
-                description="如果你已经有成熟剧本，可以直接把完整剧本贴在这里，然后跳过“生成剧本”，直接进入“审核剧本”阶段。"
+                message="建议直接输入创意需求与约束"
+                description="系统会先做角色确认，再生成完整剧本，随后进入剧本审核与后续拆分流程。"
               />
               <TextArea
                 rows={7}
@@ -1706,13 +2020,6 @@ export const ScriptPipelinePage: React.FC = () => {
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
             <Button
-              size="large"
-              disabled={!userInput.trim()}
-              onClick={handleUseInputAsScript}
-            >
-              直接进入剧本审核
-            </Button>
-            <Button
               type="primary"
               size="large"
               icon={<PlayCircleOutlined />}
@@ -1756,15 +2063,6 @@ export const ScriptPipelinePage: React.FC = () => {
                       {scriptSummary.synopsis}
                     </Descriptions.Item>
                   </Descriptions>
-                ) : null}
-
-                {!scriptSummary && !generatedScript ? (
-                  <Alert
-                    type="info"
-                    showIcon
-                    message="当前使用的是手动输入剧本"
-                    description="这里不会显示自动生成摘要。继续下一步时，会先分析剧本里的角色并让你确认角色档案，再进入拆片阶段。"
-                  />
                 ) : null}
 
                 {characterResolution?.message ? (
@@ -1830,13 +2128,13 @@ export const ScriptPipelinePage: React.FC = () => {
                   type="success"
                   showIcon
                   message="剧本内容已准备完成"
-                  description="下面展示的是当前将用于拆分的完整剧本。你可以直接修改文本，再继续下一步。"
+                  description="下面展示的是当前将用于分段的完整剧本。你可以直接修改文本；下一步会按时长与约束把它切成片段。"
                 />
 
                 <Card
                   size="small"
                   title="完整剧本"
-                  extra={<Text type="secondary">可直接编辑，下一步会按当前文本拆分</Text>}
+                  extra={<Text type="secondary">可直接编辑，下一步会按约束切分剧本并生成分段结果</Text>}
                 >
                   <TextArea
                     value={scriptDraft}
@@ -1861,7 +2159,7 @@ export const ScriptPipelinePage: React.FC = () => {
                 disabled={!scriptDraft.trim()}
                 onClick={handleSplitScript}
               >
-                {isManualScriptMode ? '确认角色并拆分片段' : '继续拆分片段'}
+                按约束切分剧本
               </Button>
             </Space>
           </div>
@@ -1873,10 +2171,23 @@ export const ScriptPipelinePage: React.FC = () => {
       return (
         <Space direction="vertical" size={20} style={{ width: '100%' }}>
           <Alert
-            type="info"
+            type={splitReviewLoading ? 'warning' : 'info'}
             showIcon
-            message={`当前已拆分为 ${segments.length} 个片段。片段不做时间重叠，只保留画面连续性。`}
+            message={
+              splitReviewLoading
+                ? `当前已拆分为 ${segments.length} 个片段，正在后台审核片段质量。`
+                : `当前已拆分为 ${segments.length} 个片段。片段不做时间重叠，只保留画面连续性。`
+            }
+            description={splitReviewLoading ? '你可以先开始检查和编辑片段，审核报告会在完成后自动刷新。' : undefined}
           />
+          {splitReviewLoading ? (
+            <Card size="small" title="片段审核中">
+              <Space align="center" size={12}>
+                <Spin />
+                <Text type="secondary">正在补充片段审核报告，这一步已从“拆分接口”中拆出，不会阻塞片段显示。</Text>
+              </Space>
+            </Card>
+          ) : null}
           {splitValidationReport ? (
             <Card title="片段二次校验">
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -2120,6 +2431,21 @@ export const ScriptPipelinePage: React.FC = () => {
             <Space wrap>
               <Button loading={splitLoading} disabled={!scriptDraft.trim()} onClick={handleSplitScript}>
                 重新生成片段
+              </Button>
+              <Button
+                loading={splitReviewLoading}
+                disabled={!scriptDraft.trim() || !segments.length}
+                onClick={() =>
+                  void runReviewSplitScript({
+                    projectId: selectedProjectId || null,
+                    scriptText: scriptDraft,
+                    segmentsToReview: normalizeSegmentItems(segments),
+                    maxDuration: normalizeMaxSegmentDuration(maxSegmentDuration),
+                    targetDuration: targetTotalDuration ?? null,
+                  })
+                }
+              >
+                审核当前片段
               </Button>
               <Button type="primary" icon={<FileImageOutlined />} loading={keyframeLoading} onClick={handleGenerateKeyframes}>
                 通过片段并生成首尾帧
@@ -2765,7 +3091,7 @@ export const ScriptPipelinePage: React.FC = () => {
               loading={characterConfirmMode === 'generate_script' ? scriptLoading : splitLoading}
               onClick={() => void handleConfirmCharactersAndContinue()}
             >
-              {characterConfirmMode === 'generate_script' ? '确认角色并生成剧本' : '确认角色并拆分片段'}
+              {characterConfirmMode === 'generate_script' ? '确认角色并生成剧本' : '确认角色并生成分段'}
             </Button>
           </Space>
         }

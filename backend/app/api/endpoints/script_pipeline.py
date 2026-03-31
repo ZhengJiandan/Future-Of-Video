@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -33,6 +35,7 @@ from app.core.provider_keys import (
 from app.db import get_db
 from app.services.auth_service import get_current_user
 from app.services.pipeline_character_library import pipeline_character_library_service
+from app.services.pipeline_project_service import pipeline_project_service
 from app.services.pipeline_scene_library import pipeline_scene_library_service
 from app.services.pipeline_workflow import pipeline_workflow_service
 from app.services.profile_image_analyzer import profile_image_analyzer_service
@@ -48,6 +51,241 @@ def _raise_provider_config_http_exception(exc: MissingProviderConfigError) -> No
         detail=str(exc),
         headers={"X-Error-Code": exc.code},
     ) from exc
+
+
+def _normalize_optional_duration(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(float(value), 2)
+
+
+def _split_request_matches_state(
+    state: Dict[str, Any],
+    *,
+    script_text: str,
+    max_segment_duration: float,
+    target_total_duration: Optional[float],
+) -> bool:
+    saved_script = str(state.get("scriptDraft") or "").strip()
+    if saved_script != str(script_text or "").strip():
+        return False
+    saved_max_duration = round(float(state.get("maxSegmentDuration") or 0.0), 2)
+    if saved_max_duration != round(float(max_segment_duration), 2):
+        return False
+    raw_saved_target_duration = state.get("targetTotalDuration")
+    try:
+        saved_target_duration = _normalize_optional_duration(
+            None if raw_saved_target_duration in {None, ""} else float(raw_saved_target_duration)
+        )
+    except (TypeError, ValueError):
+        saved_target_duration = None
+    return saved_target_duration == _normalize_optional_duration(target_total_duration)
+
+
+def _build_split_state_signature(
+    *,
+    script_text: str,
+    max_segment_duration: float,
+    target_total_duration: Optional[float],
+) -> str:
+    payload = (
+        f"{str(script_text or '').strip()}|"
+        f"{round(float(max_segment_duration), 2)}|"
+        f"{_normalize_optional_duration(target_total_duration)}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _build_split_response_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    segments = state.get("segments")
+    if not isinstance(segments, list) or not segments:
+        return None
+
+    validation_report = state.get("splitValidationReport") if isinstance(state.get("splitValidationReport"), dict) else None
+    total_duration = 0.0
+    if validation_report and validation_report.get("actual_total_duration") is not None:
+        try:
+            total_duration = float(validation_report.get("actual_total_duration") or 0.0)
+        except (TypeError, ValueError):
+            total_duration = 0.0
+    if total_duration <= 0:
+        total_duration = round(
+            sum(float((segment or {}).get("duration") or 0.0) for segment in segments if isinstance(segment, dict)),
+            2,
+        )
+
+    return {
+        "script_text": str(state.get("scriptDraft") or ""),
+        "total_duration": total_duration,
+        "segment_count": len(segments),
+        "segments": segments,
+        "continuity_points": state.get("continuityPoints") if isinstance(state.get("continuityPoints"), list) else [],
+        "validation_report": validation_report,
+    }
+
+
+def _build_split_review_state_signature(
+    *,
+    script_text: str,
+    max_segment_duration: float,
+    target_total_duration: Optional[float],
+    segments: List[Dict[str, Any]],
+) -> str:
+    payload = {
+        "script_text": str(script_text or "").strip(),
+        "max_segment_duration": round(float(max_segment_duration), 2),
+        "target_total_duration": _normalize_optional_duration(target_total_duration),
+        "segments": segments or [],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _split_review_request_matches_state(
+    state: Dict[str, Any],
+    *,
+    script_text: str,
+    max_segment_duration: float,
+    target_total_duration: Optional[float],
+    segments: List[Dict[str, Any]],
+) -> bool:
+    saved_signature = str(state.get("splitReviewRequestSignature") or "").strip()
+    request_signature = _build_split_review_state_signature(
+        script_text=script_text,
+        max_segment_duration=max_segment_duration,
+        target_total_duration=target_total_duration,
+        segments=segments,
+    )
+    if saved_signature and saved_signature == request_signature:
+        return True
+
+    saved_report = state.get("splitValidationReport")
+    if not isinstance(saved_report, dict) or not saved_report:
+        return False
+
+    saved_script = str(state.get("scriptDraft") or "").strip()
+    saved_max_duration = round(float(state.get("maxSegmentDuration") or 0.0), 2)
+    raw_saved_target_duration = state.get("targetTotalDuration")
+    try:
+        saved_target_duration = _normalize_optional_duration(
+            None if raw_saved_target_duration in {None, ""} else float(raw_saved_target_duration)
+        )
+    except (TypeError, ValueError):
+        saved_target_duration = None
+    saved_segments = state.get("segments") if isinstance(state.get("segments"), list) else []
+    return (
+        saved_script == str(script_text or "").strip()
+        and saved_max_duration == round(float(max_segment_duration), 2)
+        and saved_target_duration == _normalize_optional_duration(target_total_duration)
+        and _stable_json_dumps(saved_segments) == _stable_json_dumps(segments or [])
+    )
+
+
+def _build_split_review_response_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    response = _build_split_response_from_state(state)
+    if response is None:
+        return None
+    if not isinstance(state.get("splitValidationReport"), dict):
+        return None
+    return response
+
+
+def _normalize_id_list(values: List[Any]) -> List[str]:
+    normalized: List[str] = []
+    for value in values or []:
+        item = str(value or "").strip()
+        if item:
+            normalized.append(item)
+    return normalized
+
+
+def _build_keyframe_state_signature(
+    *,
+    style: str,
+    selected_character_ids: List[str],
+    selected_scene_ids: List[str],
+    segments: List[Dict[str, Any]],
+    reference_images: List[Dict[str, Any]],
+) -> str:
+    payload = {
+        "style": str(style or "").strip(),
+        "selected_character_ids": _normalize_id_list(selected_character_ids),
+        "selected_scene_ids": _normalize_id_list(selected_scene_ids),
+        "segments": segments or [],
+        "reference_images": reference_images or [],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _stable_json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _should_use_all_library_profiles_when_unconstrained(
+    *,
+    selected_ids: List[str],
+    direct_profiles: List[Any],
+    auto_match_when_empty: bool,
+) -> bool:
+    return auto_match_when_empty and not selected_ids and not direct_profiles
+
+
+def _keyframe_request_matches_state(
+    state: Dict[str, Any],
+    *,
+    style: str,
+    selected_character_ids: List[str],
+    selected_scene_ids: List[str],
+    segments: List[Dict[str, Any]],
+    reference_images: List[Dict[str, Any]],
+) -> bool:
+    saved_signature = str(state.get("keyframeRequestSignature") or "").strip()
+    request_signature = _build_keyframe_state_signature(
+        style=style,
+        selected_character_ids=selected_character_ids,
+        selected_scene_ids=selected_scene_ids,
+        segments=segments,
+        reference_images=reference_images,
+    )
+    if saved_signature and saved_signature == request_signature:
+        return True
+
+    saved_keyframes = state.get("keyframes")
+    if not isinstance(saved_keyframes, list) or not saved_keyframes:
+        return False
+
+    saved_style = str(state.get("stylePreference") or "").strip()
+    saved_character_ids = _normalize_id_list(state.get("selectedCharacterIds") or [])
+    saved_scene_ids = _normalize_id_list(state.get("selectedSceneIds") or [])
+    saved_segments = state.get("segments") if isinstance(state.get("segments"), list) else []
+    saved_reference_images = state.get("referenceImages") if isinstance(state.get("referenceImages"), list) else []
+
+    return (
+        saved_style == str(style or "").strip()
+        and saved_character_ids == _normalize_id_list(selected_character_ids)
+        and saved_scene_ids == _normalize_id_list(selected_scene_ids)
+        and _stable_json_dumps(saved_segments) == _stable_json_dumps(segments or [])
+        and _stable_json_dumps(saved_reference_images) == _stable_json_dumps(reference_images or [])
+    )
+
+
+def _build_keyframes_response_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    keyframes = state.get("keyframes")
+    if not isinstance(keyframes, list) or not keyframes:
+        return None
+
+    generated_script = state.get("generatedScript") if isinstance(state.get("generatedScript"), dict) else {}
+    return {
+        "project_title": str(state.get("projectTitle") or "未命名项目").strip() or "未命名项目",
+        "style": str(state.get("stylePreference") or "").strip(),
+        "selected_character_ids": _normalize_id_list(state.get("selectedCharacterIds") or []),
+        "selected_scene_ids": _normalize_id_list(state.get("selectedSceneIds") or []),
+        "character_profiles": generated_script.get("character_profiles") if isinstance(generated_script.get("character_profiles"), list) else [],
+        "scene_profiles": generated_script.get("scene_profiles") if isinstance(generated_script.get("scene_profiles"), list) else [],
+        "reference_images": state.get("referenceImages") if isinstance(state.get("referenceImages"), list) else [],
+        "keyframes": keyframes,
+    }
 
 
 class ReferenceAssetPayload(BaseModel):
@@ -270,6 +508,7 @@ class AnalyzeSceneImageRequest(BaseModel):
 class GenerateScriptRequest(BaseModel):
     """完整剧本生成请求。"""
 
+    project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
     user_input: str = Field(..., min_length=1, description="用户的原始剧情描述")
     style: str = Field(default="", description="视觉风格偏好")
     target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0, description="目标总时长")
@@ -278,6 +517,8 @@ class GenerateScriptRequest(BaseModel):
     character_profiles: List[CharacterProfilePayload] = Field(default_factory=list, description="直接传入的角色档案")
     scene_profiles: List[SceneProfilePayload] = Field(default_factory=list, description="直接传入的场景档案")
     reference_images: List[ReferenceAssetPayload] = Field(default_factory=list, description="参考图列表")
+    generation_intent: Dict[str, Any] = Field(default_factory=dict, description="确认角色阶段已生成的角色意图")
+    character_resolution: Dict[str, Any] = Field(default_factory=dict, description="确认角色阶段已生成的角色确认结果")
 
 
 class PrepareCharactersRequest(BaseModel):
@@ -291,6 +532,7 @@ class PrepareCharactersRequest(BaseModel):
 class SplitScriptRequest(BaseModel):
     """剧本拆分请求。"""
 
+    project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
     script_text: str = Field(..., min_length=1, description="用户审核后的完整剧本文本")
     max_segment_duration: float = Field(default=10.0, ge=3.0, le=10.0)
     target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0)
@@ -342,6 +584,16 @@ class SegmentPayload(BaseModel):
     status: str = "ready"
 
 
+class ReviewSplitScriptRequest(BaseModel):
+    """片段审核请求。"""
+
+    project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
+    script_text: str = Field(..., min_length=1, description="用户审核后的完整剧本文本")
+    max_segment_duration: float = Field(default=10.0, ge=3.0, le=10.0)
+    target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0)
+    segments: List[SegmentPayload] = Field(..., min_length=1, description="当前片段列表")
+
+
 class KeyframeAssetPayload(BaseModel):
     asset_url: str
     asset_type: str
@@ -362,6 +614,7 @@ class KeyframeBundlePayload(BaseModel):
 
 
 class GenerateKeyframesRequest(BaseModel):
+    project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
     project_title: str = Field(default="未命名项目")
     style: str = Field(default="", description="视觉风格偏好")
     selected_character_ids: List[str] = Field(default_factory=list, description="已选角色档案 ID")
@@ -771,7 +1024,11 @@ async def upload_reference(file: UploadFile = File(...)):
 
 
 @router.post("/generate-script")
-async def generate_script(request: GenerateScriptRequest, db: AsyncSession = Depends(get_db)):
+async def generate_script(
+    request: GenerateScriptRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     """生成完整剧本，并返回可编辑文本。"""
     start_time = time.time()
 
@@ -781,15 +1038,17 @@ async def generate_script(request: GenerateScriptRequest, db: AsyncSession = Dep
             selected_character_ids=request.selected_character_ids,
             direct_character_profiles=[profile.model_dump() for profile in request.character_profiles],
         )
-        if not resolved_profiles and not request.selected_character_ids and not request.character_profiles:
+        if _should_use_all_library_profiles_when_unconstrained(
+            selected_ids=request.selected_character_ids,
+            direct_profiles=request.character_profiles,
+            auto_match_when_empty=True,
+        ) and not resolved_profiles:
             resolved_profiles = await pipeline_character_library_service.list_profiles(db)
         resolved_scene_profiles = await _resolve_scene_profiles(
             db,
             selected_scene_ids=request.selected_scene_ids,
             direct_scene_profiles=[profile.model_dump() for profile in request.scene_profiles],
         )
-        if not resolved_scene_profiles and not request.selected_scene_ids and not request.scene_profiles:
-            resolved_scene_profiles = await pipeline_scene_library_service.list_profiles(db)
         result = await pipeline_workflow_service.generate_script(
             request.user_input,
             style=request.style,
@@ -799,13 +1058,69 @@ async def generate_script(request: GenerateScriptRequest, db: AsyncSession = Dep
             selected_scene_ids=request.selected_scene_ids,
             scene_profiles=resolved_scene_profiles,
             reference_images=[reference.model_dump() for reference in request.reference_images],
+            generation_intent=request.generation_intent,
+            character_resolution=request.character_resolution,
         )
-        return {
+        response_payload = {
             "success": True,
             "message": "完整剧本生成完成，请先审核后再进入拆分阶段",
             "processing_time": time.time() - start_time,
             **result,
         }
+        existing_project = None
+        if request.project_id:
+            existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
+        if existing_project is None:
+            existing_project = await pipeline_project_service.get_current_project(db, current_user.id)
+
+        existing_state = existing_project.get("state") if isinstance(existing_project, dict) else {}
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+        summary_payload = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+        existing_project_title = existing_project.get("project_title") if isinstance(existing_project, dict) else ""
+
+        project_title = str(
+            summary_payload.get("title")
+            or existing_project_title
+            or "未命名项目"
+        ).strip() or "未命名项目"
+        summary_text = str(summary_payload.get("synopsis") or "").strip()
+        project_state = {
+            **existing_state,
+            "currentStep": 1,
+            "transitionDirection": "forward",
+            "userInput": request.user_input,
+            "stylePreference": request.style,
+            "projectTitle": project_title,
+            "targetTotalDuration": request.target_total_duration,
+            "constraintCharacterIds": request.selected_character_ids,
+            "constraintSceneIds": request.selected_scene_ids,
+            "selectedCharacterIds": result.get("selected_character_ids") or request.selected_character_ids,
+            "selectedSceneIds": result.get("selected_scene_ids") or request.selected_scene_ids,
+            "referenceImages": [reference.model_dump() for reference in request.reference_images],
+            "generatedScript": response_payload,
+            "manualCharacterProfiles": [],
+            "savedTemporaryCharacterIds": existing_state.get("savedTemporaryCharacterIds", []),
+            "scriptDraft": str(result.get("script_text") or ""),
+            "scriptSummary": result.get("summary") or None,
+            "segments": existing_state.get("segments", []),
+            "splitValidationReport": existing_state.get("splitValidationReport"),
+            "keyframes": existing_state.get("keyframes", []),
+            "renderTaskId": existing_state.get("renderTaskId"),
+            "renderStatus": existing_state.get("renderStatus"),
+        }
+        await pipeline_project_service.save_current_project(
+            db,
+            project_id=request.project_id,
+            user_id=current_user.id,
+            project_title=project_title,
+            current_step=1,
+            state=project_state,
+            status="draft",
+            last_render_task_id=str(existing_project.get("last_render_task_id") or "") if isinstance(existing_project, dict) else "",
+            summary=summary_text,
+        )
+        return response_payload
     except MissingProviderConfigError as exc:
         _raise_provider_config_http_exception(exc)
     except Exception as exc:
@@ -845,19 +1160,90 @@ async def prepare_characters(request: PrepareCharactersRequest, db: AsyncSession
 
 
 @router.post("/split-script")
-async def split_script(request: SplitScriptRequest):
+async def split_script(
+    request: SplitScriptRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     """对审核后的剧本进行拆分。"""
     start_time = time.time()
 
     try:
+        existing_project = None
+        if request.project_id:
+            existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
+        if existing_project is None:
+            existing_project = await pipeline_project_service.get_current_project(db, current_user.id)
+
+        existing_state = existing_project.get("state") if isinstance(existing_project, dict) else {}
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+
+        if existing_state and _split_request_matches_state(
+            existing_state,
+            script_text=request.script_text,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+        ):
+            cached_result = _build_split_response_from_state(existing_state)
+            if cached_result is not None:
+                return {
+                    "success": True,
+                    "message": "已直接复用上一次成功的剧本拆分结果，避免重复调用模型。",
+                    "processing_time": time.time() - start_time,
+                    **cached_result,
+                }
+
         result = await pipeline_workflow_service.split_script(
             request.script_text,
             max_segment_duration=request.max_segment_duration,
             target_total_duration=request.target_total_duration,
         )
+
+        project_title = str(
+            (existing_project or {}).get("project_title")
+            or existing_state.get("projectTitle")
+            or "未命名项目"
+        ).strip() or "未命名项目"
+        summary_payload = existing_state.get("scriptSummary") if isinstance(existing_state.get("scriptSummary"), dict) else {}
+        summary_text = str(summary_payload.get("synopsis") or (existing_project or {}).get("summary") or "").strip()
+        split_signature = _build_split_state_signature(
+            script_text=request.script_text,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+        )
+        project_state = {
+            **existing_state,
+            "currentStep": 2,
+            "transitionDirection": "forward",
+            "projectTitle": project_title,
+            "scriptDraft": request.script_text,
+            "maxSegmentDuration": request.max_segment_duration,
+            "targetTotalDuration": request.target_total_duration,
+            "segments": result.get("segments") or [],
+            "splitValidationReport": None,
+            "continuityPoints": result.get("continuity_points") or [],
+            "splitRequestSignature": split_signature,
+            "splitReviewRequestSignature": "",
+            "keyframes": [],
+            "renderTaskId": None,
+            "renderStatus": None,
+        }
+        await pipeline_project_service.save_current_project(
+            db,
+            project_id=request.project_id,
+            user_id=current_user.id,
+            project_title=project_title,
+            current_step=2,
+            state=project_state,
+            status="draft",
+            last_render_task_id="",
+            summary=summary_text,
+        )
+
         return {
             "success": True,
-            "message": "剧本拆分完成，请审核片段后生成首尾帧",
+            "message": "剧本拆分完成，正在等待片段审核",
             "processing_time": time.time() - start_time,
             **result,
         }
@@ -868,12 +1254,139 @@ async def split_script(request: SplitScriptRequest):
         raise HTTPException(status_code=500, detail="剧本拆分失败，请稍后重试") from exc
 
 
+@router.post("/review-split-script")
+async def review_split_script(
+    request: ReviewSplitScriptRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    start_time = time.time()
+
+    try:
+        existing_project = None
+        if request.project_id:
+            existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
+        if existing_project is None:
+            existing_project = await pipeline_project_service.get_current_project(db, current_user.id)
+
+        existing_state = existing_project.get("state") if isinstance(existing_project, dict) else {}
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+
+        request_segments = [segment.model_dump() for segment in request.segments]
+        if existing_state and _split_review_request_matches_state(
+            existing_state,
+            script_text=request.script_text,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+            segments=request_segments,
+        ):
+            cached_result = _build_split_review_response_from_state(existing_state)
+            if cached_result is not None:
+                return {
+                    "success": True,
+                    "message": "已直接复用上一次成功的片段审核结果。",
+                    "processing_time": time.time() - start_time,
+                    **cached_result,
+                }
+
+        result = await pipeline_workflow_service.review_split_script(
+            request.script_text,
+            segments=request_segments,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+        )
+
+        project_title = str(
+            (existing_project or {}).get("project_title")
+            or existing_state.get("projectTitle")
+            or "未命名项目"
+        ).strip() or "未命名项目"
+        summary_payload = existing_state.get("scriptSummary") if isinstance(existing_state.get("scriptSummary"), dict) else {}
+        summary_text = str(summary_payload.get("synopsis") or (existing_project or {}).get("summary") or "").strip()
+        review_signature = _build_split_review_state_signature(
+            script_text=request.script_text,
+            max_segment_duration=request.max_segment_duration,
+            target_total_duration=request.target_total_duration,
+            segments=request_segments,
+        )
+        project_state = {
+            **existing_state,
+            "currentStep": 2,
+            "transitionDirection": "forward",
+            "projectTitle": project_title,
+            "scriptDraft": request.script_text,
+            "maxSegmentDuration": request.max_segment_duration,
+            "targetTotalDuration": request.target_total_duration,
+            "segments": result.get("segments") or request_segments,
+            "splitValidationReport": result.get("validation_report"),
+            "continuityPoints": result.get("continuity_points") or [],
+            "splitReviewRequestSignature": review_signature,
+        }
+        await pipeline_project_service.save_current_project(
+            db,
+            project_id=request.project_id,
+            user_id=current_user.id,
+            project_title=project_title,
+            current_step=2,
+            state=project_state,
+            status="draft",
+            last_render_task_id="",
+            summary=summary_text,
+        )
+
+        return {
+            "success": True,
+            "message": "片段审核完成",
+            "processing_time": time.time() - start_time,
+            **result,
+        }
+    except MissingProviderConfigError as exc:
+        _raise_provider_config_http_exception(exc)
+    except Exception as exc:
+        logger.error("Review split script failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="片段审核失败，请稍后重试") from exc
+
+
 @router.post("/generate-keyframes")
-async def generate_keyframes(request: GenerateKeyframesRequest, db: AsyncSession = Depends(get_db)):
+async def generate_keyframes(
+    request: GenerateKeyframesRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     """为审核后的片段生成首尾帧。"""
     start_time = time.time()
 
     try:
+        existing_project = None
+        if request.project_id:
+            existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
+        if existing_project is None:
+            existing_project = await pipeline_project_service.get_current_project(db, current_user.id)
+
+        existing_state = existing_project.get("state") if isinstance(existing_project, dict) else {}
+        if not isinstance(existing_state, dict):
+            existing_state = {}
+
+        request_segments = [segment.model_dump() for segment in request.segments]
+        request_reference_images = [reference.model_dump() for reference in request.reference_images]
+        if existing_state and _keyframe_request_matches_state(
+            existing_state,
+            style=request.style,
+            selected_character_ids=request.selected_character_ids,
+            selected_scene_ids=request.selected_scene_ids,
+            segments=request_segments,
+            reference_images=request_reference_images,
+        ):
+            cached_result = _build_keyframes_response_from_state(existing_state)
+            if cached_result is not None:
+                return {
+                    "success": True,
+                    "message": "已直接复用上一次成功的首尾帧结果，避免重复调用模型。",
+                    "processing_time": time.time() - start_time,
+                    **cached_result,
+                }
+
         resolved_profiles = await _resolve_character_profiles(
             db,
             selected_character_ids=request.selected_character_ids,
@@ -886,15 +1399,59 @@ async def generate_keyframes(request: GenerateKeyframesRequest, db: AsyncSession
         )
         result = await pipeline_workflow_service.generate_keyframes(
             project_title=request.project_title,
-            segments=[segment.model_dump() for segment in request.segments],
+            segments=request_segments,
             style=request.style,
             selected_character_ids=request.selected_character_ids,
             character_profiles=resolved_profiles,
             selected_scene_ids=request.selected_scene_ids,
             scene_profiles=resolved_scene_profiles,
-            reference_images=[reference.model_dump() for reference in request.reference_images],
+            reference_images=request_reference_images,
+        )
+        project_title = str(
+            result.get("project_title")
+            or (existing_project or {}).get("project_title")
+            or existing_state.get("projectTitle")
+            or request.project_title
+            or "未命名项目"
+        ).strip() or "未命名项目"
+        summary_payload = existing_state.get("scriptSummary") if isinstance(existing_state.get("scriptSummary"), dict) else {}
+        summary_text = str(summary_payload.get("synopsis") or (existing_project or {}).get("summary") or "").strip()
+        keyframe_signature = _build_keyframe_state_signature(
+            style=request.style,
+            selected_character_ids=request.selected_character_ids,
+            selected_scene_ids=request.selected_scene_ids,
+            segments=request_segments,
+            reference_images=request_reference_images,
+        )
+        project_state = {
+            **existing_state,
+            "currentStep": 3,
+            "transitionDirection": "forward",
+            "projectTitle": project_title,
+            "stylePreference": request.style,
+            "selectedCharacterIds": result.get("selected_character_ids") or request.selected_character_ids,
+            "selectedSceneIds": result.get("selected_scene_ids") or request.selected_scene_ids,
+            "referenceImages": request_reference_images,
+            "segments": request_segments,
+            "keyframes": result.get("keyframes") or [],
+            "keyframeRequestSignature": keyframe_signature,
+            "renderTaskId": None,
+            "renderStatus": None,
+        }
+        await pipeline_project_service.save_current_project(
+            db,
+            project_id=request.project_id,
+            user_id=current_user.id,
+            project_title=project_title,
+            current_step=3,
+            state=project_state,
+            status="draft",
+            last_render_task_id="",
+            summary=summary_text,
         )
         return {
+            "success": True,
+            "message": result.get("message") or "关键帧生成完成，请审核首尾帧后再开始生成视频",
             "processing_time": time.time() - start_time,
             **result,
         }

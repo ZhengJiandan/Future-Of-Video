@@ -56,7 +56,11 @@ export const ProjectListPage: React.FC = () => {
       setCreateModalOpen(false)
       setNewProjectTitle('未命名项目')
       messageApi.success('项目已创建')
-      navigate('/script-pipeline')
+      navigate('/script-pipeline', {
+        state: {
+          projectId,
+        },
+      })
     } catch (requestError: unknown) {
       const responseError = requestError as { response?: { data?: { detail?: string } } }
       messageApi.error(responseError.response?.data?.detail || '项目创建失败')
@@ -67,7 +71,11 @@ export const ProjectListPage: React.FC = () => {
 
   const handleOpenProject = (projectId: string) => {
     setCurrentProjectId(projectId)
-    navigate('/script-pipeline')
+    navigate('/script-pipeline', {
+      state: {
+        projectId,
+      },
+    })
   }
 
   const handleDeleteProject = async (projectId: string) => {
