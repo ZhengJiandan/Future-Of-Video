@@ -41,7 +41,7 @@ export const MainLayout: React.FC = () => {
 
   const getSelectedMenuKey = (pathname: string) => {
     if (pathname.startsWith('/characters')) {
-      return '/characters/library'
+      return '/characters/subjects'
     }
     if (pathname.startsWith('/scenes')) {
       return '/scenes/library'
@@ -73,9 +73,9 @@ export const MainLayout: React.FC = () => {
       label: '视频生成',
     },
     {
-      key: '/characters/library',
+      key: '/characters/subjects',
       icon: <TeamOutlined />,
-      label: '角色档案',
+      label: '角色资产',
     },
     {
       key: '/scenes/library',

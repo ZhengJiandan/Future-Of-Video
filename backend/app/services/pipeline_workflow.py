@@ -49,15 +49,23 @@ from app.models.pipeline_render_task import PipelineRenderTask
 from app.services.audio_renderer import ProjectAudioRenderer
 from app.services.preferred_image_generation import PreferredImageGenerationClient
 from app.services.script_generator import FullScript, ScriptGenerator
-from app.services.script_splitter import ScriptSplitter, SplitConfig
+from app.services.script_splitter import (
+    LONG_SHOT_WORKFLOW_MODE,
+    ScriptSplitter,
+    SplitConfig,
+    normalize_workflow_mode,
+)
 from app.services.video_merger import MergeOptions, VideoMergerService, VideoSegment as MergedVideoSegment
 from app.utils.image_variants import build_upload_url, ensure_thumbnail_for_path
 
 logger = logging.getLogger(__name__)
 
-MAX_VIDEO_SEGMENT_DURATION = 10.0
+MAX_VIDEO_SEGMENT_DURATION = 15.0
 MAX_KEYFRAME_CHARACTER_ANCHOR_IMAGES = 6
 MAX_VIDEO_CHARACTER_ANCHOR_IMAGES = 4
+DEFAULT_STANDARD_RENDER_PROVIDER = "kling"
+DEFAULT_KLING_OFFICIAL_MODEL = "kling-v3-omni"
+SUPPORTED_KLING_OMNI_MODELS = {"kling-video-o1", "kling-v3-omni"}
 RECOVERABLE_QUEUED_STEPS = {
     "",
     "等待开始",
@@ -216,6 +224,12 @@ class PipelineWorkflowService:
     def uses_local_render_dispatch(self) -> bool:
         return settings.pipeline_uses_local_render_dispatch
 
+    def _normalize_workflow_mode(self, value: Any) -> str:
+        return normalize_workflow_mode(value)
+
+    def _uses_long_shot_workflow(self, value: Any) -> bool:
+        return self._normalize_workflow_mode(value) == LONG_SHOT_WORKFLOW_MODE
+
     async def save_reference_upload(
         self,
         *,
@@ -342,12 +356,14 @@ class PipelineWorkflowService:
         self,
         script_text: str,
         *,
-        max_segment_duration: float = 10.0,
+        max_segment_duration: float = 15.0,
         target_total_duration: Optional[float] = None,
+        workflow_mode: str = "standard",
     ) -> Dict[str, Any]:
         """将审核后的完整剧本拆分成片段。"""
         logger.info(
-            "Split script request received. max_segment_duration=%s target_total_duration=%s\n-----SCRIPT START-----\n%s\n-----SCRIPT END-----",
+            "Split script request received. workflow_mode=%s max_segment_duration=%s target_total_duration=%s\n-----SCRIPT START-----\n%s\n-----SCRIPT END-----",
+            workflow_mode,
             max_segment_duration,
             target_total_duration,
             script_text,
@@ -359,6 +375,7 @@ class PipelineWorkflowService:
                 prefer_scene_boundary=True,
                 preserve_dialogue=True,
                 smooth_transition=True,
+                workflow_mode=self._normalize_workflow_mode(workflow_mode),
             )
         )
 
@@ -383,8 +400,9 @@ class PipelineWorkflowService:
         script_text: str,
         *,
         segments: List[Dict[str, Any]],
-        max_segment_duration: float = 10.0,
+        max_segment_duration: float = 15.0,
         target_total_duration: Optional[float] = None,
+        workflow_mode: str = "standard",
     ) -> Dict[str, Any]:
         splitter = ScriptSplitter(
             SplitConfig(
@@ -393,6 +411,7 @@ class PipelineWorkflowService:
                 prefer_scene_boundary=True,
                 preserve_dialogue=True,
                 smooth_transition=True,
+                workflow_mode=self._normalize_workflow_mode(workflow_mode),
             )
         )
         review_result = await splitter.review_existing_segments(
@@ -429,15 +448,28 @@ class PipelineWorkflowService:
         project_title: str,
         segments: List[Dict[str, Any]],
         style: str = "",
+        workflow_mode: str = "standard",
         selected_character_ids: Optional[List[str]] = None,
         character_profiles: Optional[List[Dict[str, Any]]] = None,
         selected_scene_ids: Optional[List[str]] = None,
         scene_profiles: Optional[List[Dict[str, Any]]] = None,
         reference_images: Optional[List[Dict[str, Any]]] = None,
+        existing_keyframes: Optional[List[Dict[str, Any]]] = None,
+        target_segment_number: Optional[int] = None,
     ) -> Dict[str, Any]:
         """为片段生成首尾帧，并保证片段间首尾连续。"""
+        normalized_workflow_mode = self._normalize_workflow_mode(workflow_mode)
+        uses_long_shot_workflow = self._uses_long_shot_workflow(normalized_workflow_mode)
         normalized_segments = [self._normalize_segment(segment, index) for index, segment in enumerate(segments)]
         normalized_references = [self._normalize_reference_image(reference, index) for index, reference in enumerate(reference_images or [])]
+        normalized_existing_keyframes = [
+            self._normalize_keyframe_bundle(bundle, index)
+            for index, bundle in enumerate(existing_keyframes or [])
+        ]
+        existing_keyframe_map = {
+            int(bundle["segment_number"]): bundle
+            for bundle in normalized_existing_keyframes
+        }
         resolved_character_profiles = self._resolve_character_profiles(
             selected_character_ids=selected_character_ids or [],
             character_profiles=character_profiles or [],
@@ -454,11 +486,37 @@ class PipelineWorkflowService:
         generated_start_frame_count = 0
 
         for index, segment in enumerate(normalized_segments):
+            segment_number = int(segment["segment_number"])
+            existing_bundle = existing_keyframe_map.get(segment_number)
+            should_regenerate_segment = (
+                target_segment_number is None
+                or segment_number == int(target_segment_number)
+                or existing_bundle is None
+            )
+            if not should_regenerate_segment and existing_bundle is not None:
+                keyframe_bundles.append(
+                    SegmentKeyframes(
+                        segment_number=segment_number,
+                        title=str(existing_bundle.get("title") or segment["title"]),
+                        start_frame=KeyframeAsset(**dict(existing_bundle.get("start_frame") or {})),
+                        end_frame=KeyframeAsset(**dict(existing_bundle.get("end_frame") or {})),
+                        continuity_notes=str(existing_bundle.get("continuity_notes") or ""),
+                        status=str(existing_bundle.get("status") or "ready"),
+                    )
+                )
+                continue
+
             segment_character_profiles = self._select_character_profiles_for_segment(
                 segment=segment,
                 character_profiles=resolved_character_profiles,
             )
-            should_pre_generate_start_frame = bool(segment.get("pre_generate_start_frame", False) or index == 0)
+            should_pre_generate_start_frame = (
+                bool(segment.get("pre_generate_start_frame", False) or index == 0)
+                if uses_long_shot_workflow
+                else True
+            )
+            if target_segment_number is not None and segment_number == int(target_segment_number):
+                should_pre_generate_start_frame = True
             start_frame_reason = str(segment.get("start_frame_generation_reason") or "")
             if should_pre_generate_start_frame:
                 start_frame = await self._generate_keyframe_asset(
@@ -472,7 +530,11 @@ class PipelineWorkflowService:
                     base_asset=None,
                 )
                 generated_start_frame_count += 1
-                if start_frame_reason == "new_character_entry":
+                if not uses_long_shot_workflow:
+                    start_notes = "该图用于帮助你快速理解该片段的开场画面和内容重点，不参与跨段串联。"
+                    if not start_frame.notes:
+                        start_frame.notes = "标准流程片段首帧预览"
+                elif start_frame_reason == "new_character_entry":
                     start_notes = "该段是新角色首次正式登场段，额外预生成首帧以突出角色造型并稳定后续角色连续性"
                     if start_frame.notes:
                         start_frame.notes = f"{start_frame.notes} | 新角色首次正式登场段的额外首帧锚点"
@@ -494,28 +556,56 @@ class PipelineWorkflowService:
                 )
                 start_notes = "渲染阶段自动复用上一片段尾帧作为本片段首帧"
 
-            end_frame = KeyframeAsset(
-                asset_url="",
-                asset_type="image/png",
-                asset_filename="",
-                prompt="",
-                source="provider-return-last-frame",
-                status="pending",
-                notes="该片段尾帧由豆包视频接口在生成完成后返回，用于串联下一片段",
-            )
+            if uses_long_shot_workflow:
+                if existing_bundle and dict(existing_bundle.get("end_frame") or {}).get("asset_url"):
+                    end_frame = KeyframeAsset(**dict(existing_bundle.get("end_frame") or {}))
+                else:
+                    end_frame = KeyframeAsset(
+                        asset_url="",
+                        asset_type="image/png",
+                        asset_filename="",
+                        prompt="",
+                        source="provider-return-last-frame",
+                        status="pending",
+                        notes="该片段尾帧由豆包视频接口在生成完成后返回，用于串联下一片段",
+                    )
+                continuity_notes = f"{start_notes}；片段尾帧由视频接口返回，并自动作为下一片段首帧参考"
+            else:
+                if existing_bundle and dict(existing_bundle.get("end_frame") or {}).get("asset_url"):
+                    end_frame = KeyframeAsset(**dict(existing_bundle.get("end_frame") or {}))
+                else:
+                    end_frame = KeyframeAsset(
+                        asset_url="",
+                        asset_type="image/png",
+                        asset_filename="",
+                        prompt="",
+                        source="not-used-in-standard-workflow",
+                        status="skipped",
+                        notes="标准流程不生成尾帧，也不做跨段首尾帧串联",
+                    )
+                continuity_notes = f"{start_notes}；标准流程仅展示该段首帧预览，不生成尾帧串联。"
 
             bundle = SegmentKeyframes(
                 segment_number=segment["segment_number"],
                 title=segment["title"],
                 start_frame=start_frame,
                 end_frame=end_frame,
-                continuity_notes=f"{start_notes}；片段尾帧由视频接口返回，并自动作为下一片段首帧参考",
+                continuity_notes=continuity_notes,
             )
             keyframe_bundles.append(bundle)
 
-        message = "已生成首段首帧，后续片段将在渲染时自动串联上一段尾帧"
-        if generated_start_frame_count > 1:
-            message = "已按分段规则生成多张首帧，其余片段将在渲染时自动串联上一段尾帧"
+        if uses_long_shot_workflow:
+            message = "已生成首段首帧，后续片段将在渲染时自动串联上一段尾帧"
+            if generated_start_frame_count > 1:
+                message = "已按分段规则生成多张首帧，其余片段将在渲染时自动串联上一段尾帧"
+        else:
+            message = "已为每个片段生成首帧预览图，可先审核每段的内容重点，再开始生成视频"
+        if target_segment_number is not None:
+            message = (
+                f"已重新生成片段 {int(target_segment_number)} 首帧，请审核后再继续。"
+                if not uses_long_shot_workflow
+                else f"已重新生成片段 {int(target_segment_number)} 首帧锚点，请审核后再继续。"
+            )
 
         return {
             "success": True,
@@ -546,10 +636,27 @@ class PipelineWorkflowService:
         normalized_segments = [self._normalize_segment(segment, index) for index, segment in enumerate(segments)]
         normalized_keyframes = [self._normalize_keyframe_bundle(bundle, index) for index, bundle in enumerate(keyframes or [])]
         config = self._normalize_render_config(render_config or {})
+        resolved_character_profiles = self._resolve_character_profiles(
+            selected_character_ids=[],
+            character_profiles=character_profiles or [],
+        )
+        resolved_scene_profiles = self._resolve_scene_profiles(
+            selected_scene_ids=[],
+            scene_profiles=scene_profiles or [],
+        )
+        normalized_segments = [
+            self._apply_segment_render_generation_config(
+                segment=segment,
+                character_profiles=resolved_character_profiles,
+                scene_profiles=resolved_scene_profiles,
+                render_config=config,
+            )
+            for segment in normalized_segments
+        ]
         config["audio_plan"] = self._build_project_audio_plan(
             segments=normalized_segments,
-            character_profiles=character_profiles or [],
-            scene_profiles=scene_profiles or [],
+            character_profiles=resolved_character_profiles,
+            scene_profiles=resolved_scene_profiles,
             render_config=config,
         )
         task_id = uuid.uuid4().hex
@@ -562,14 +669,8 @@ class PipelineWorkflowService:
             project_title=project_title or "未命名项目",
             segments=normalized_segments,
             keyframes=normalized_keyframes,
-            character_profiles=self._resolve_character_profiles(
-                selected_character_ids=[],
-                character_profiles=character_profiles or [],
-            ),
-            scene_profiles=self._resolve_scene_profiles(
-                selected_scene_ids=[],
-                scene_profiles=scene_profiles or [],
-            ),
+            character_profiles=resolved_character_profiles,
+            scene_profiles=resolved_scene_profiles,
             render_config=config,
             renderer=renderer,
             clips=[
@@ -748,6 +849,7 @@ class PipelineWorkflowService:
             int(bundle["segment_number"]): bundle
             for bundle in state.keyframes
         }
+        uses_long_shot_workflow = self._uses_long_shot_workflow(state.render_config.get("workflow_mode"))
         previous_last_frame: Optional[KeyframeAsset] = None
         active_clip_index: Optional[int] = None
 
@@ -761,7 +863,7 @@ class PipelineWorkflowService:
                 if clip_state.status == "completed" and clip_state.asset_url:
                     completed_bundle = keyframe_map.get(clip_number) or {}
                     completed_end_frame = dict(completed_bundle.get("end_frame") or {})
-                    if str(completed_end_frame.get("asset_url") or "").strip():
+                    if uses_long_shot_workflow and str(completed_end_frame.get("asset_url") or "").strip():
                         previous_last_frame = KeyframeAsset(
                             asset_url=str(completed_end_frame.get("asset_url") or ""),
                             asset_type=str(completed_end_frame.get("asset_type") or "image/png"),
@@ -788,7 +890,7 @@ class PipelineWorkflowService:
                 )
 
                 runtime_bundle = keyframe_map.get(clip_number)
-                if previous_last_frame and self._should_reuse_previous_last_frame(runtime_bundle):
+                if uses_long_shot_workflow and previous_last_frame and self._should_reuse_previous_last_frame(runtime_bundle):
                     runtime_bundle = self._with_runtime_start_frame(
                         bundle=runtime_bundle,
                         segment=segment,
@@ -825,11 +927,13 @@ class PipelineWorkflowService:
                     warning = f"片段 {clip_number} 因文本风控，已自动净化提示词后重试"
                     if warning not in state.warnings:
                         state.warnings.append(warning)
-                previous_last_frame = self._build_runtime_last_frame_asset(
-                    clip_number=clip_number,
-                    segment_title=segment["title"],
-                    clip_asset=clip_asset,
-                )
+                previous_last_frame = None
+                if uses_long_shot_workflow:
+                    previous_last_frame = self._build_runtime_last_frame_asset(
+                        clip_number=clip_number,
+                        segment_title=segment["title"],
+                        clip_asset=clip_asset,
+                    )
                 if previous_last_frame:
                     self._sync_runtime_keyframe_state(
                         state=state,
@@ -2188,6 +2292,9 @@ class PipelineWorkflowService:
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
             "voice_description": self._normalize_voice_description(profile.get("voice_description") or ""),
+            "kling_subject_id": str(profile.get("kling_subject_id") or "").strip(),
+            "kling_subject_name": str(profile.get("kling_subject_name") or "").strip(),
+            "kling_subject_status": str(profile.get("kling_subject_status") or "").strip(),
             "forbidden_behaviors": str(profile.get("forbidden_behaviors") or "").strip(),
             "prompt_hint": str(profile.get("prompt_hint") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
@@ -2296,36 +2403,17 @@ class PipelineWorkflowService:
     ) -> Dict[str, str]:
         provider = self._choose_render_provider(render_config)
         if provider == "kling-official":
-            try:
-                rendered = await self._try_render_kling_video(
-                    task_dir=task_dir,
-                    segment=segment,
-                    keyframe_bundle=keyframe_bundle,
-                    character_profiles=character_profiles,
-                    scene_profiles=scene_profiles,
-                    render_config=render_config,
-                )
-                if rendered:
-                    return rendered
-                raise RuntimeError(f"片段 {segment['segment_number']} 可灵视频生成失败，未获得真实视频结果")
-            except Exception as exc:
-                if str(render_config.get("provider") or "auto") == "auto" and self._doubao_enabled():
-                    logger.warning(
-                        "Kling render failed for segment %s under auto mode, fallback to Doubao: %s",
-                        segment.get("segment_number"),
-                        exc,
-                    )
-                    rendered = await self._try_render_doubao_video(
-                        task_dir=task_dir,
-                        segment=segment,
-                        keyframe_bundle=keyframe_bundle,
-                        character_profiles=character_profiles,
-                        scene_profiles=scene_profiles,
-                        render_config=render_config,
-                    )
-                    if rendered:
-                        return rendered
-                raise
+            rendered = await self._try_render_kling_video(
+                task_dir=task_dir,
+                segment=segment,
+                keyframe_bundle=keyframe_bundle,
+                character_profiles=character_profiles,
+                scene_profiles=scene_profiles,
+                render_config=render_config,
+            )
+            if rendered:
+                return rendered
+            raise RuntimeError(f"片段 {segment['segment_number']} 可灵视频生成失败，未获得真实视频结果")
         if provider == "doubao-official":
             rendered = await self._try_render_doubao_video(
                 task_dir=task_dir,
@@ -2395,7 +2483,7 @@ class PipelineWorkflowService:
                     "watermark": bool(render_config.get("watermark", False)),
                     "camera_fixed": bool(render_config.get("camera_fixed", False)),
                     "generate_audio": bool(render_config.get("generate_audio", True)),
-                    "return_last_frame": True,
+                    "return_last_frame": bool(render_config.get("return_last_frame", False)),
                     "service_tier": str(render_config.get("service_tier") or "default"),
                 }
                 primary_content = self._build_doubao_content(
@@ -2511,7 +2599,11 @@ class PipelineWorkflowService:
             require_kling_credentials(action_label="调用可灵视频生成")
 
         try:
-            from app.services.kling_video import KlingVideoGenerator
+            from app.services.kling_video import (
+                RUNNING_VIDEO_TASK_STATUSES,
+                VIDEO_TASK_OMNI_GENERATION,
+                KlingVideoGenerator,
+            )
 
             access_key, secret_key = require_kling_credentials(action_label="调用可灵视频生成")
             generator = KlingVideoGenerator(
@@ -2523,16 +2615,15 @@ class PipelineWorkflowService:
             )
 
             try:
-                image_list = self._build_kling_image_list(
+                resolved_kling_model = self._resolve_kling_model(str(render_config.get("provider_model") or ""))
+                image_input = self._build_kling_image_input(
                     task_dir=task_dir,
                     segment=segment,
                     keyframe_bundle=keyframe_bundle,
                     character_profiles=character_profiles,
                     scene_profiles=scene_profiles,
+                    base64_only=True,
                 )
-                if not image_list:
-                    raise RuntimeError("可灵 multi-image2video 缺少可用图片输入")
-
                 prompt = self._build_segment_video_prompt(
                     segment=segment,
                     character_profiles=character_profiles,
@@ -2543,19 +2634,52 @@ class PipelineWorkflowService:
                     character_profiles=character_profiles,
                     scene_profiles=scene_profiles,
                 )
-
-                response = await generator.create_multi_image_video_task(
-                    image_list=image_list,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    duration=self._normalize_kling_duration(segment["duration"]),
-                    aspect_ratio=self._normalize_kling_aspect_ratio(str(render_config.get("aspect_ratio") or "16:9")),
-                    enable_audio=bool(render_config.get("generate_audio", True)),
-                    external_task_id=f"segment-{segment.get('segment_number')}",
+                kling_multi_shot = self._resolve_kling_multi_shot_config(
+                    segment=segment,
+                    character_profiles=character_profiles,
+                    scene_profiles=scene_profiles,
+                    render_config=render_config,
                 )
-                if response.status.lower() in {"submitted", "processing", "queued", "running"}:
+                kling_subjects = self._build_kling_subject_elements(
+                    segment=segment,
+                    character_profiles=character_profiles,
+                    scene_profiles=scene_profiles,
+                    render_config=render_config,
+                )
+                request_extra_body: Dict[str, Any] = {}
+                if bool(kling_multi_shot.get("enabled")):
+                    request_extra_body["multi_shot"] = True
+                    request_extra_body["shot_type"] = str(kling_multi_shot.get("shot_type") or "customize")
+                    request_extra_body["multi_prompt"] = [
+                        self._inject_kling_subject_prompt(str(item or ""), kling_subjects)
+                        for item in list(kling_multi_shot.get("multi_prompt") or [])
+                        if str(item or "").strip()
+                    ]
+                request_extra_body["generate_audio"] = bool(render_config.get("generate_audio", True))
+                prompt = self._inject_kling_subject_prompt(prompt, kling_subjects)
+                element_list = self._build_kling_subject_element_list(kling_subjects)
+                if element_list:
+                    request_extra_body["element_list"] = element_list
+
+                duration = self._normalize_kling_duration(segment["duration"])
+                aspect_ratio = self._normalize_kling_aspect_ratio(str(render_config.get("aspect_ratio") or "16:9"))
+                task_type = VIDEO_TASK_OMNI_GENERATION
+                response = None
+                response = await generator.create_omni_video_task(
+                    prompt=prompt,
+                    image=image_input or "",
+                    negative_prompt=negative_prompt,
+                    duration=duration,
+                    aspect_ratio=aspect_ratio,
+                    external_task_id=f"segment-{segment.get('segment_number')}",
+                    extra_body=request_extra_body,
+                    model_name=resolved_kling_model,
+                )
+
+                if response.status.lower() in RUNNING_VIDEO_TASK_STATUSES:
                     response = await generator.wait_for_completion(
                         response.task_id,
+                        task_type=task_type,
                         poll_interval=5,
                         max_wait_time=900,
                     )
@@ -2567,13 +2691,14 @@ class PipelineWorkflowService:
                     "asset_url": response.video_url,
                     "asset_type": "video/mp4",
                     "asset_filename": f"clip_{segment['segment_number']:02d}.mp4",
-                    "provider": "kling-official",
+                    "provider": f"kling-official-{task_type}",
                     "last_frame_url": "",
                 }
             raise RuntimeError(response.error_message or f"片段 {segment['segment_number']} 未返回 video_url")
         except Exception as exc:
-            logger.error("Kling render failed for segment %s: %s", segment.get("segment_number"), exc)
-            raise RuntimeError(f"片段 {segment['segment_number']} 可灵视频生成失败: {exc}") from exc
+            error_message = self._format_http_status_error(exc)
+            logger.error("Kling render failed for segment %s: %s", segment.get("segment_number"), error_message)
+            raise RuntimeError(f"片段 {segment['segment_number']} 可灵视频生成失败: {error_message}") from exc
 
     def _is_sensitive_image_error(self, exc: Exception) -> bool:
         if not isinstance(exc, httpx.HTTPStatusError) or exc.response is None:
@@ -2594,6 +2719,29 @@ class PipelineWorkflowService:
             return False
         error = payload.get("error") or {}
         return error.get("code") == "InputTextSensitiveContentDetected"
+
+    def _format_http_status_error(self, exc: Exception) -> str:
+        if not isinstance(exc, httpx.HTTPStatusError) or exc.response is None:
+            return str(exc)
+        response = exc.response
+        try:
+            payload = response.json()
+        except Exception:
+            text = response.text.strip()
+            return text or str(exc)
+        if isinstance(payload, dict):
+            error = payload.get("error") or {}
+            detail = (
+                error.get("message")
+                or payload.get("message")
+                or payload.get("msg")
+                or payload.get("detail")
+            )
+            if detail:
+                if f"Response detail: {detail}" in str(exc):
+                    return str(exc)
+                return f"{exc}. Response detail: {detail}"
+        return str(exc)
 
     def _sanitize_doubao_content_for_retry(
         self,
@@ -3362,22 +3510,51 @@ class PipelineWorkflowService:
 
     def _normalize_render_config(self, render_config: Dict[str, Any]) -> Dict[str, Any]:
         provider_generate_audio = bool(render_config.get("generate_audio", True))
+        workflow_mode = self._normalize_workflow_mode(render_config.get("workflow_mode"))
+        provider = self._normalize_render_provider(str(render_config.get("provider") or ""), workflow_mode=workflow_mode)
         return {
-            "provider": str(render_config.get("provider") or "auto"),
+            "provider": provider,
             "resolution": self._normalize_doubao_resolution(str(render_config.get("resolution") or "720p")),
             "aspect_ratio": self._normalize_doubao_aspect_ratio(str(render_config.get("aspect_ratio") or "16:9")),
             "watermark": bool(render_config.get("watermark", False)),
-            "provider_model": str(render_config.get("provider_model") or ""),
+            "provider_model": self._normalize_render_provider_model(
+                requested_model=str(render_config.get("provider_model") or ""),
+                provider=provider,
+                workflow_mode=workflow_mode,
+            ),
             "camera_fixed": bool(render_config.get("camera_fixed", False)),
             "generate_audio": provider_generate_audio,
             "requested_generate_audio": False,
             "audio_strategy": "provider_native" if provider_generate_audio else "mute",
             "audio_plan": None,
-            "return_last_frame": True,
+            "return_last_frame": workflow_mode == LONG_SHOT_WORKFLOW_MODE and bool(render_config.get("return_last_frame", False)),
             "auto_continue_segments": bool(render_config.get("auto_continue_segments", False)),
             "service_tier": self._normalize_service_tier(str(render_config.get("service_tier") or "default")),
             "seed": self._normalize_provider_seed(render_config.get("seed")),
+            "workflow_mode": workflow_mode,
         }
+
+    def _normalize_render_provider(self, requested_provider: str, *, workflow_mode: str) -> str:
+        normalized = str(requested_provider or "").strip().lower()
+        if normalized in {"kling", "doubao", "local", "auto"}:
+            return normalized
+        if workflow_mode == LONG_SHOT_WORKFLOW_MODE:
+            return "auto"
+        return DEFAULT_STANDARD_RENDER_PROVIDER
+
+    def _normalize_render_provider_model(
+        self,
+        *,
+        requested_model: str,
+        provider: str,
+        workflow_mode: str,
+    ) -> str:
+        normalized = str(requested_model or "").strip()
+        if provider == "doubao":
+            return normalized or str(getattr(settings, "DOUBAO_VIDEO_MODEL", "") or "")
+        if workflow_mode == LONG_SHOT_WORKFLOW_MODE and provider == "local":
+            return ""
+        return self._resolve_kling_model(normalized)
 
     def _build_doubao_content(
         self,
@@ -4044,6 +4221,134 @@ class PipelineWorkflowService:
             return ""
         return "Hard constraints: " + " | ".join(constraints) + ". "
 
+    def _build_kling_multi_shot_instruction(self, segment: Dict[str, Any]) -> str:
+        generation_config = dict(segment.get("generation_config") or {})
+        if not bool(generation_config.get("kling_multi_shot_enabled")):
+            return ""
+        return (
+            "Structure this clip as a coherent multi-shot cinematic sequence. "
+            "Shot changes should serve the segment's intended beats while preserving character identity, scene logic, and temporal continuity."
+        )
+
+    def _extract_kling_multi_prompt_explicit(self, segment: Dict[str, Any]) -> List[str]:
+        generation_config = dict(segment.get("generation_config") or {})
+        raw_items = generation_config.get("kling_multi_prompt")
+        if not isinstance(raw_items, list):
+            return []
+        prompts: List[str] = []
+        for item in raw_items:
+            normalized = str(item or "").strip()
+            if normalized:
+                prompts.append(normalized)
+        return prompts
+
+    def _split_kling_multi_shot_units(self, value: str) -> List[str]:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return []
+        pieces = re.split(r"(?:\s*(?:->|→|\|)\s*|[；;。]\s*|\n+)", normalized)
+        results: List[str] = []
+        for piece in pieces:
+            item = str(piece or "").strip(" -:：，,.;；。")
+            if item:
+                results.append(item)
+        return results
+
+    def _resolve_kling_multi_shot_config(
+        self,
+        *,
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+        scene_profiles: List[Dict[str, Any]],
+        render_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        generation_config = dict(segment.get("generation_config") or {})
+        workflow_mode = self._normalize_workflow_mode(render_config.get("workflow_mode"))
+        model_name = self._resolve_kling_model(str(render_config.get("provider_model") or ""))
+
+        explicit_enabled = generation_config.get("kling_multi_shot_enabled")
+        explicit_shot_type = str(generation_config.get("kling_shot_type") or "").strip()
+        explicit_multi_prompt = self._extract_kling_multi_prompt_explicit(segment)
+        explicit_reason = str(generation_config.get("kling_multi_shot_reason") or "").strip()
+        explicit_source = str(generation_config.get("kling_multi_shot_source") or "").strip()
+
+        if workflow_mode == LONG_SHOT_WORKFLOW_MODE:
+            return {
+                "enabled": False,
+                "reason": "长镜头流程保持单镜头串联，不启用可灵多镜头模式",
+                "source": "workflow_guard",
+            }
+        if model_name not in SUPPORTED_KLING_OMNI_MODELS:
+            return {
+                "enabled": False,
+                "reason": f"当前模型 {model_name or 'unknown'} 不走多镜头策略",
+                "source": "model_guard",
+            }
+
+        if isinstance(explicit_enabled, bool):
+            enabled = explicit_enabled
+            reasons = [explicit_reason] if explicit_reason else ["沿用片段 generation_config 中的多镜头显式设置"]
+            source = explicit_source or "segment_generation_config"
+        else:
+            reasons = []
+            enabled = False
+            source = explicit_source or "default_single_shot"
+
+        if explicit_multi_prompt:
+            enabled = True
+            reasons.append("片段已提供显式 multi_prompt，可直接启用多镜头模式")
+
+        if not enabled:
+            return {
+                "enabled": False,
+                "reason": "未命中多镜头判定，按单镜头片段生成",
+                "source": source,
+            }
+
+        multi_prompt = explicit_multi_prompt
+        if not multi_prompt:
+            return {
+                "enabled": False,
+                "reason": "已启用多镜头模式，但当前片段缺少 multi_prompt，回退为单镜头",
+                "source": explicit_source or "missing_multi_prompt",
+            }
+
+        return {
+            "enabled": True,
+            "reason": "；".join(reasons[:3]),
+            "source": source,
+            "shot_type": explicit_shot_type or "customize",
+            "multi_prompt": multi_prompt,
+        }
+
+    def _apply_segment_render_generation_config(
+        self,
+        *,
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+        scene_profiles: List[Dict[str, Any]],
+        render_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized_segment = dict(segment)
+        generation_config = dict(normalized_segment.get("generation_config") or {})
+        kling_multi_shot = self._resolve_kling_multi_shot_config(
+            segment=normalized_segment,
+            character_profiles=character_profiles,
+            scene_profiles=scene_profiles,
+            render_config=render_config,
+        )
+        generation_config["kling_multi_shot_enabled"] = bool(kling_multi_shot.get("enabled"))
+        generation_config["kling_multi_shot_reason"] = str(kling_multi_shot.get("reason") or "")
+        generation_config["kling_multi_shot_source"] = str(kling_multi_shot.get("source") or "")
+        if kling_multi_shot.get("enabled"):
+            generation_config["kling_shot_type"] = str(kling_multi_shot.get("shot_type") or "customize")
+            generation_config["kling_multi_prompt"] = list(kling_multi_shot.get("multi_prompt") or [])
+        else:
+            generation_config.pop("kling_shot_type", None)
+            generation_config.pop("kling_multi_prompt", None)
+        normalized_segment["generation_config"] = generation_config
+        return normalized_segment
+
     def _build_segment_video_prompt(
         self,
         *,
@@ -4067,6 +4372,9 @@ class PipelineWorkflowService:
         voice_continuity = self._build_segment_voice_continuity_instruction(segment_characters)
         if voice_continuity:
             parts.append(voice_continuity)
+        kling_multi_shot_instruction = self._build_kling_multi_shot_instruction(segment)
+        if kling_multi_shot_instruction:
+            parts.append(kling_multi_shot_instruction)
         if segment.get("prompt_focus"):
             parts.append(f"Current clip focus: {segment['prompt_focus']}")
         if segment.get("shots_summary"):
@@ -4147,10 +4455,12 @@ class PipelineWorkflowService:
         encoded = base64.b64encode(asset_path.read_bytes()).decode("utf-8")
         return f"data:{mime_type};base64,{encoded}"
 
-    def _build_kling_image_reference(self, asset_url: str) -> Optional[str]:
+    def _build_kling_image_reference(self, asset_url: str, *, base64_only: bool = False) -> Optional[str]:
         if not asset_url:
             return None
         if asset_url.startswith("http://") or asset_url.startswith("https://"):
+            if base64_only:
+                return None
             return asset_url
 
         asset_path = self._asset_url_to_path(asset_url)
@@ -4159,7 +4469,7 @@ class PipelineWorkflowService:
 
         return base64.b64encode(asset_path.read_bytes()).decode("utf-8")
 
-    def _build_kling_image_list(
+    def _build_kling_image_input(
         self,
         *,
         task_dir: Optional[Path],
@@ -4167,18 +4477,22 @@ class PipelineWorkflowService:
         keyframe_bundle: Optional[Dict[str, Any]],
         character_profiles: List[Dict[str, Any]],
         scene_profiles: List[Dict[str, Any]],
-    ) -> List[Dict[str, str]]:
+        base64_only: bool = False,
+    ) -> Optional[str]:
         segment_characters, _ = self._get_segment_profile_context(
             segment=segment,
             character_profiles=character_profiles,
             scene_profiles=scene_profiles,
         )
 
-        candidates: List[str] = []
         if keyframe_bundle:
             start_frame = str((keyframe_bundle.get("start_frame") or {}).get("asset_url") or "").strip()
             if start_frame:
-                candidates.append(start_frame)
+                payload = self._build_kling_image_reference(start_frame, base64_only=base64_only)
+                if payload:
+                    return payload
+
+        candidates: List[str] = []
 
         for item in self._build_video_character_reference_images(
             task_dir=task_dir,
@@ -4189,23 +4503,87 @@ class PipelineWorkflowService:
             if asset_url:
                 candidates.append(asset_url)
 
-        image_list: List[Dict[str, str]] = []
-        seen = set()
         for asset_url in candidates:
-            payload = self._build_kling_image_reference(asset_url)
-            if not payload or payload in seen:
+            payload = self._build_kling_image_reference(asset_url, base64_only=base64_only)
+            if not payload:
                 continue
-            seen.add(payload)
-            image_list.append({"image": payload})
-            if len(image_list) >= 4:
+            return payload
+        return None
+
+    def _build_kling_subject_elements(
+        self,
+        *,
+        segment: Dict[str, Any],
+        character_profiles: List[Dict[str, Any]],
+        scene_profiles: List[Dict[str, Any]],
+        render_config: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        workflow_mode = self._normalize_workflow_mode(render_config.get("workflow_mode"))
+        if workflow_mode == LONG_SHOT_WORKFLOW_MODE:
+            return []
+
+        segment_characters, _ = self._get_segment_profile_context(
+            segment=segment,
+            character_profiles=character_profiles,
+            scene_profiles=scene_profiles,
+        )
+
+        subjects: List[Dict[str, Any]] = []
+        seen_subject_ids: set[str] = set()
+        for profile in segment_characters:
+            subject_id = str(profile.get("kling_subject_id") or "").strip()
+            if not subject_id or subject_id in seen_subject_ids:
+                continue
+            seen_subject_ids.add(subject_id)
+            subjects.append(
+                {
+                    "subject_id": subject_id,
+                    "name": str(profile.get("kling_subject_name") or profile.get("name") or "").strip(),
+                }
+            )
+            if len(subjects) >= 3:
                 break
-        return image_list
+        return subjects
+
+    def _build_kling_subject_element_list(self, subjects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        element_list: List[Dict[str, Any]] = []
+        for item in subjects:
+            subject_id = str(item.get("subject_id") or "").strip()
+            if not subject_id:
+                continue
+            element_id: Any = int(subject_id) if subject_id.isdigit() else subject_id
+            element_list.append({"element_id": element_id})
+        return element_list
+
+    def _inject_kling_subject_prompt(self, prompt: str, subjects: List[Dict[str, Any]]) -> str:
+        normalized_prompt = str(prompt or "").strip()
+        if not subjects:
+            return normalized_prompt
+        if "<<<element_" in normalized_prompt:
+            return normalized_prompt
+
+        references: List[str] = []
+        for index, item in enumerate(subjects, start=1):
+            token = f"<<<element_{index}>>>"
+            name = str(item.get("name") or "").strip()
+            references.append(f"{token}{f' 对应{name}' if name else ''}")
+
+        prefix = (
+            "角色主体参考："
+            + "，".join(references)
+            + "。请严格保持这些角色主体的身份、面部、发型、服装与关键外观一致。"
+        )
+        return f"{prefix}\n{normalized_prompt}" if normalized_prompt else prefix
 
     def _resolve_kling_model(self, requested_model: str) -> str:
         normalized = str(requested_model or "").strip()
-        if normalized.startswith("kling-"):
-            return normalized
-        return str(getattr(settings, "KLING_VIDEO_MODEL", "") or "kling-v1-6")
+        configured = str(getattr(settings, "KLING_VIDEO_MODEL", "") or DEFAULT_KLING_OFFICIAL_MODEL).strip()
+        candidate = normalized or configured or DEFAULT_KLING_OFFICIAL_MODEL
+        if candidate in SUPPORTED_KLING_OMNI_MODELS:
+            return candidate
+        if configured in SUPPORTED_KLING_OMNI_MODELS:
+            return configured
+        return DEFAULT_KLING_OFFICIAL_MODEL
 
     def _resolve_kling_mode(self) -> str:
         mode = str(getattr(settings, "KLING_VIDEO_MODE", "") or "std").strip().lower()

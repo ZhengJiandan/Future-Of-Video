@@ -23,6 +23,7 @@ import {
   TeamOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
+import { CharacterAssetNav } from '../components/CharacterAssetNav'
 import { CharacterProfile, resolveAssetUrl, resolveDisplayAssetUrl, scriptPipelineApi } from '../services/api'
 
 const { Title, Paragraph, Text } = Typography
@@ -141,6 +142,8 @@ export const CharacterLibraryListPage: React.FC = () => {
         </Row>
       </Card>
 
+      <CharacterAssetNav current="library" />
+
       <Card style={{ borderRadius: 20 }}>
         <Space direction="vertical" size={16} style={{ width: '100%' }}>
           <Alert
@@ -220,8 +223,13 @@ export const CharacterLibraryListPage: React.FC = () => {
                   >
                     编辑
                   </Button>,
-                  <Button key="create" type="link" icon={<PlusOutlined />} onClick={() => navigate('/characters/new')}>
-                    继续创建
+                  <Button
+                    key="subject"
+                    type="link"
+                    icon={<TeamOutlined />}
+                    onClick={() => navigate(`/characters/subjects?characterId=${character.id}`)}
+                  >
+                    生成主体
                   </Button>,
                   <Button
                     key="delete"

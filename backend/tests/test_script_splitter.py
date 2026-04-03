@@ -1,4 +1,5 @@
 from typing import List, Optional
+import json
 
 import pytest
 
@@ -57,7 +58,7 @@ def splitter(monkeypatch: pytest.MonkeyPatch) -> ScriptSplitter:
     monkeypatch.setattr(script_splitter_module, "DoubaoLLM", _DummyDoubaoLLM)
     return ScriptSplitter(
         SplitConfig(
-            max_segment_duration=10.0,
+            max_segment_duration=15.0,
             min_segment_duration=3.0,
             prefer_scene_boundary=True,
             preserve_dialogue=True,
@@ -116,7 +117,7 @@ def test_segment_annotation_marks_late_entry_when_split_is_not_possible(splitter
     assert annotated_segments[0].late_entry_character_profile_ids == ["cat_b"]
 
 
-def test_build_local_video_prompt_is_model_ready(splitter: ScriptSplitter) -> None:
+def test_build_local_video_prompt_defaults_to_single_shot_without_llm_decision(splitter: ScriptSplitter) -> None:
     segment_shots = [
         _build_shot(
             shot_number=1,
@@ -147,18 +148,32 @@ def test_build_local_video_prompt_is_model_ready(splitter: ScriptSplitter) -> No
             lighting="冷色街灯",
             atmosphere="紧张",
         ),
+        _build_shot(
+            shot_number=3,
+            start_time=6.0,
+            end_time=9.0,
+            character_profile_ids=["cat_a"],
+            description="黑猫在街灯下突然回头，准备迎接来者",
+            characters_in_shot=["黑猫"],
+            actions=["黑猫回头并稳住站位准备对峙"],
+            shot_type="特写",
+            camera_angle="侧后方",
+            camera_movement="快速切近",
+            lighting="背光轮廓",
+            atmosphere="爆发前的压迫感",
+        ),
     ]
 
     prompt_payload = splitter._build_local_video_prompt(
         segment_script="测试片段",
-        point={"start_time": 0.0, "end_time": 6.0, "duration": 6.0, "prompt_focus": "黑猫雨夜对峙"},
+        point={"start_time": 0.0, "end_time": 9.0, "duration": 9.0, "prompt_focus": "黑猫雨夜对峙"},
         segment_shots=segment_shots,
         has_previous=True,
         has_next=True,
     )
 
     prompt = prompt_payload["prompt"]
-    assert "首帧画面" in prompt
+    assert "开场画面" in prompt
     assert "动作推进" in prompt
     assert "镜头设计" in prompt
     assert "结尾画面" in prompt
@@ -166,6 +181,81 @@ def test_build_local_video_prompt_is_model_ready(splitter: ScriptSplitter) -> No
     assert "time window" not in prompt
     assert "character profile ids" not in prompt
     assert "spoken lines" not in prompt
+
+    config = prompt_payload["config"]
+    assert config["kling_multi_shot_enabled"] is False
+    assert "kling_shot_type" not in config
+    assert "kling_multi_prompt" not in config
+    assert config["kling_multi_shot_reason"] == "默认按单镜头模式处理"
+    assert config["kling_multi_shot_source"] == "structured-script-splitter"
+
+
+@pytest.mark.asyncio
+async def test_generate_video_prompt_with_llm_preserves_multi_shot_decision(splitter: ScriptSplitter) -> None:
+    segment_shots = [
+        _build_shot(
+            shot_number=1,
+            start_time=0.0,
+            end_time=3.0,
+            character_profile_ids=["cat_a"],
+            description="黑猫在便利店门口停下",
+            characters_in_shot=["黑猫"],
+            actions=["黑猫停下并看向街对面"],
+        ),
+        _build_shot(
+            shot_number=2,
+            start_time=3.0,
+            end_time=6.0,
+            character_profile_ids=["cat_a"],
+            description="黑猫穿过积水走向街灯",
+            characters_in_shot=["黑猫"],
+            actions=["黑猫穿过积水走向街灯"],
+        ),
+    ]
+
+    class _FakeResponse:
+        def __init__(self, content: str) -> None:
+            self._content = content
+
+        def get_content(self) -> str:
+            return self._content
+
+    async def fake_chat_completion(*args, **kwargs):
+        return _FakeResponse(
+            json.dumps(
+                {
+                    "prompt": "",
+                    "negative_prompt": "模糊, 漂移",
+                    "config": {
+                        "style": "cinematic_realistic",
+                        "kling_multi_shot_enabled": True,
+                        "kling_shot_type": "customize",
+                        "kling_multi_prompt": ["黑猫停在门口观察街对面", "黑猫穿过积水走向街灯"],
+                        "kling_multi_shot_reason": "该片段有明显的连续镜头推进",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    splitter.llm.chat_completion = fake_chat_completion  # type: ignore[attr-defined]
+
+    payload = await splitter._generate_video_prompt_with_llm(
+        segment_script="测试片段",
+        point={"segment_number": 1, "start_time": 0.0, "end_time": 6.0, "duration": 6.0, "prompt_focus": "黑猫雨夜行动"},
+        segment_shots=segment_shots,
+        has_previous=False,
+        has_next=True,
+    )
+
+    assert payload is not None
+    config = payload["config"]
+    assert config["kling_multi_shot_enabled"] is True
+    assert config["kling_shot_type"] == "customize"
+    assert config["kling_multi_prompt"] == ["黑猫停在门口观察街对面", "黑猫穿过积水走向街灯"]
+    assert config["kling_multi_shot_reason"] == "该片段有明显的连续镜头推进"
+    assert config["kling_multi_shot_source"] == "llm-script-splitter"
+    assert payload["prompt"] == "黑猫停在门口观察街对面；黑猫穿过积水走向街灯"
 
 
 def test_rule_based_validation_flags_summary_like_video_prompt(splitter: ScriptSplitter) -> None:

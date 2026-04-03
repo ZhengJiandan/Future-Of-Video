@@ -244,9 +244,9 @@ export const HomePage: React.FC = () => {
           <Button
             size="large"
             icon={<TeamOutlined />}
-            onClick={() => navigate('/characters/library')}
+            onClick={() => navigate('/characters/subjects')}
           >
-            角色档案库
+            角色资产台
           </Button>
           <Button
             size="large"

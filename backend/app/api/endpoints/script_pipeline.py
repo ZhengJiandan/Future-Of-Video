@@ -39,10 +39,29 @@ from app.services.pipeline_project_service import pipeline_project_service
 from app.services.pipeline_scene_library import pipeline_scene_library_service
 from app.services.pipeline_workflow import pipeline_workflow_service
 from app.services.profile_image_analyzer import profile_image_analyzer_service
+from app.services.script_splitter import LONG_SHOT_WORKFLOW_MODE, normalize_workflow_mode
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
+
+
+def _infer_workflow_mode_from_state(state: Dict[str, Any]) -> str:
+    normalized = normalize_workflow_mode(state.get("workflowMode"))
+    if "workflowMode" in state:
+        return normalized
+
+    saved_keyframes = state.get("keyframes")
+    if isinstance(saved_keyframes, list) and saved_keyframes:
+        return LONG_SHOT_WORKFLOW_MODE
+
+    try:
+        current_step = int(state.get("currentStep") or 0)
+    except (TypeError, ValueError):
+        current_step = 0
+    if current_step >= 3:
+        return LONG_SHOT_WORKFLOW_MODE
+    return normalized
 
 
 def _raise_provider_config_http_exception(exc: MissingProviderConfigError) -> None:
@@ -65,7 +84,10 @@ def _split_request_matches_state(
     script_text: str,
     max_segment_duration: float,
     target_total_duration: Optional[float],
+    workflow_mode: str,
 ) -> bool:
+    if _infer_workflow_mode_from_state(state) != normalize_workflow_mode(workflow_mode):
+        return False
     saved_script = str(state.get("scriptDraft") or "").strip()
     if saved_script != str(script_text or "").strip():
         return False
@@ -87,11 +109,13 @@ def _build_split_state_signature(
     script_text: str,
     max_segment_duration: float,
     target_total_duration: Optional[float],
+    workflow_mode: str,
 ) -> str:
     payload = (
         f"{str(script_text or '').strip()}|"
         f"{round(float(max_segment_duration), 2)}|"
-        f"{_normalize_optional_duration(target_total_duration)}"
+        f"{_normalize_optional_duration(target_total_duration)}|"
+        f"{normalize_workflow_mode(workflow_mode)}"
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -130,12 +154,14 @@ def _build_split_review_state_signature(
     max_segment_duration: float,
     target_total_duration: Optional[float],
     segments: List[Dict[str, Any]],
+    workflow_mode: str,
 ) -> str:
     payload = {
         "script_text": str(script_text or "").strip(),
         "max_segment_duration": round(float(max_segment_duration), 2),
         "target_total_duration": _normalize_optional_duration(target_total_duration),
         "segments": segments or [],
+        "workflow_mode": normalize_workflow_mode(workflow_mode),
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -148,6 +174,7 @@ def _split_review_request_matches_state(
     max_segment_duration: float,
     target_total_duration: Optional[float],
     segments: List[Dict[str, Any]],
+    workflow_mode: str,
 ) -> bool:
     saved_signature = str(state.get("splitReviewRequestSignature") or "").strip()
     request_signature = _build_split_review_state_signature(
@@ -155,6 +182,7 @@ def _split_review_request_matches_state(
         max_segment_duration=max_segment_duration,
         target_total_duration=target_total_duration,
         segments=segments,
+        workflow_mode=workflow_mode,
     )
     if saved_signature and saved_signature == request_signature:
         return True
@@ -174,6 +202,8 @@ def _split_review_request_matches_state(
         saved_target_duration = None
     saved_segments = state.get("segments") if isinstance(state.get("segments"), list) else []
     return (
+        _infer_workflow_mode_from_state(state) == normalize_workflow_mode(workflow_mode)
+        and
         saved_script == str(script_text or "").strip()
         and saved_max_duration == round(float(max_segment_duration), 2)
         and saved_target_duration == _normalize_optional_duration(target_total_duration)
@@ -206,6 +236,7 @@ def _build_keyframe_state_signature(
     selected_scene_ids: List[str],
     segments: List[Dict[str, Any]],
     reference_images: List[Dict[str, Any]],
+    workflow_mode: str,
 ) -> str:
     payload = {
         "style": str(style or "").strip(),
@@ -213,6 +244,7 @@ def _build_keyframe_state_signature(
         "selected_scene_ids": _normalize_id_list(selected_scene_ids),
         "segments": segments or [],
         "reference_images": reference_images or [],
+        "workflow_mode": normalize_workflow_mode(workflow_mode),
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -239,6 +271,7 @@ def _keyframe_request_matches_state(
     selected_scene_ids: List[str],
     segments: List[Dict[str, Any]],
     reference_images: List[Dict[str, Any]],
+    workflow_mode: str,
 ) -> bool:
     saved_signature = str(state.get("keyframeRequestSignature") or "").strip()
     request_signature = _build_keyframe_state_signature(
@@ -247,6 +280,7 @@ def _keyframe_request_matches_state(
         selected_scene_ids=selected_scene_ids,
         segments=segments,
         reference_images=reference_images,
+        workflow_mode=workflow_mode,
     )
     if saved_signature and saved_signature == request_signature:
         return True
@@ -262,6 +296,8 @@ def _keyframe_request_matches_state(
     saved_reference_images = state.get("referenceImages") if isinstance(state.get("referenceImages"), list) else []
 
     return (
+        _infer_workflow_mode_from_state(state) == normalize_workflow_mode(workflow_mode)
+        and
         saved_style == str(style or "").strip()
         and saved_character_ids == _normalize_id_list(selected_character_ids)
         and saved_scene_ids == _normalize_id_list(selected_scene_ids)
@@ -322,6 +358,9 @@ class CharacterProfilePayload(BaseModel):
     common_actions: str = ""
     emotion_baseline: str = ""
     voice_description: str = ""
+    kling_subject_id: str = ""
+    kling_subject_name: str = ""
+    kling_subject_status: str = ""
     forbidden_behaviors: str = ""
     prompt_hint: str = ""
     llm_summary: str = ""
@@ -383,6 +422,12 @@ class CreateCharacterRequest(BaseModel):
     three_view_prompt: str = Field(default="", description="三视图生成提示词")
     face_closeup_image_url: str = Field(default="", description="面部特写图片 URL")
     auto_generate_identity_assets: bool = Field(default=True, description="是否自动生成三视图和面部特写")
+
+
+class BindCharacterSubjectRequest(BaseModel):
+    kling_subject_id: str = Field(..., min_length=1, description="可灵主体 ID")
+    kling_subject_name: str = Field(default="", description="可灵主体名称")
+    kling_subject_status: str = Field(default="", description="可灵主体状态")
 
 
 class SceneProfilePayload(BaseModel):
@@ -519,6 +564,7 @@ class GenerateScriptRequest(BaseModel):
     reference_images: List[ReferenceAssetPayload] = Field(default_factory=list, description="参考图列表")
     generation_intent: Dict[str, Any] = Field(default_factory=dict, description="确认角色阶段已生成的角色意图")
     character_resolution: Dict[str, Any] = Field(default_factory=dict, description="确认角色阶段已生成的角色确认结果")
+    workflow_mode: str = Field(default="standard", description="视频流程模式")
 
 
 class PrepareCharactersRequest(BaseModel):
@@ -534,8 +580,9 @@ class SplitScriptRequest(BaseModel):
 
     project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
     script_text: str = Field(..., min_length=1, description="用户审核后的完整剧本文本")
-    max_segment_duration: float = Field(default=10.0, ge=3.0, le=10.0)
+    max_segment_duration: float = Field(default=15.0, ge=3.0, le=15.0)
     target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0)
+    workflow_mode: str = Field(default="standard", description="视频流程模式")
 
 
 class SegmentDialoguePayload(BaseModel):
@@ -554,7 +601,7 @@ class SegmentPayload(BaseModel):
     description: str = ""
     start_time: float = 0.0
     end_time: float = 0.0
-    duration: float = Field(default=5.0, ge=1.0, le=10.0)
+    duration: float = Field(default=5.0, ge=1.0, le=15.0)
     shots_summary: str = ""
     key_actions: List[str] = Field(default_factory=list)
     key_dialogues: List[Union[str, SegmentDialoguePayload]] = Field(default_factory=list)
@@ -589,9 +636,10 @@ class ReviewSplitScriptRequest(BaseModel):
 
     project_id: Optional[str] = Field(default=None, description="当前项目 ID，可为空")
     script_text: str = Field(..., min_length=1, description="用户审核后的完整剧本文本")
-    max_segment_duration: float = Field(default=10.0, ge=3.0, le=10.0)
+    max_segment_duration: float = Field(default=15.0, ge=3.0, le=15.0)
     target_total_duration: Optional[float] = Field(default=None, ge=10.0, le=300.0)
     segments: List[SegmentPayload] = Field(..., min_length=1, description="当前片段列表")
+    workflow_mode: str = Field(default="standard", description="视频流程模式")
 
 
 class KeyframeAssetPayload(BaseModel):
@@ -623,6 +671,9 @@ class GenerateKeyframesRequest(BaseModel):
     scene_profiles: List[SceneProfilePayload] = Field(default_factory=list, description="直接传入的场景档案")
     reference_images: List[ReferenceAssetPayload] = Field(default_factory=list, description="参考图列表")
     segments: List[SegmentPayload] = Field(..., min_length=1)
+    existing_keyframes: List[KeyframeBundlePayload] = Field(default_factory=list, description="已有关键帧结果")
+    target_segment_number: Optional[int] = Field(default=None, ge=1, description="仅重新生成该片段的首帧")
+    workflow_mode: str = Field(default="long_shot", description="视频流程模式")
 
 
 async def _resolve_character_profiles(
@@ -717,6 +768,36 @@ async def update_character(
     except Exception as exc:
         logger.error("Update character failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="角色档案更新失败，请稍后重试") from exc
+
+
+@router.post("/characters/{character_id}/bind-subject")
+async def bind_character_subject(
+    character_id: str,
+    request: BindCharacterSubjectRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        profile = await pipeline_character_library_service.bind_kling_subject(
+            db,
+            profile_id=character_id,
+            subject_id=request.kling_subject_id,
+            subject_name=request.kling_subject_name,
+            subject_status=request.kling_subject_status,
+        )
+        if not profile:
+            raise HTTPException(status_code=404, detail="角色档案不存在")
+        return {
+            "success": True,
+            "message": "角色主体已绑定到角色档案",
+            **profile,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Bind character subject failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="角色主体绑定失败，请稍后重试") from exc
 
 
 @router.post("/characters/upload-reference")
@@ -974,17 +1055,18 @@ class RenderProjectRequest(BaseModel):
 
     project_id: str = Field(default="", description="项目 ID")
     project_title: str = Field(default="未命名项目")
-    provider: str = Field(default="auto", description="视频生成 provider")
+    provider: str = Field(default="kling", description="视频生成 provider")
     resolution: str = Field(default="720p", description="输出分辨率")
     aspect_ratio: str = Field(default="16:9", description="画幅比例")
     watermark: bool = Field(default=False, description="是否添加水印")
-    provider_model: str = Field(default="", description="provider 模型 ID")
+    provider_model: str = Field(default="kling-v3-omni", description="provider 模型 ID")
     camera_fixed: bool = Field(default=False, description="是否固定镜头")
     generate_audio: bool = Field(default=True, description="是否启用视频模型自带音频")
     return_last_frame: bool = Field(default=False, description="是否返回尾帧")
     auto_continue_segments: bool = Field(default=False, description="是否自动连续生成所有片段")
     service_tier: str = Field(default="default", description="provider 服务等级")
     seed: Optional[int] = Field(default=None, description="随机种子")
+    workflow_mode: str = Field(default="standard", description="视频流程模式")
     selected_character_ids: List[str] = Field(default_factory=list, description="已选角色档案 ID")
     selected_scene_ids: List[str] = Field(default_factory=list, description="已选场景档案 ID")
     character_profiles: List[CharacterProfilePayload] = Field(default_factory=list, description="直接传入的角色档案")
@@ -1089,6 +1171,7 @@ async def generate_script(
             **existing_state,
             "currentStep": 1,
             "transitionDirection": "forward",
+            "workflowMode": normalize_workflow_mode(request.workflow_mode),
             "userInput": request.user_input,
             "stylePreference": request.style,
             "projectTitle": project_title,
@@ -1184,6 +1267,7 @@ async def split_script(
             script_text=request.script_text,
             max_segment_duration=request.max_segment_duration,
             target_total_duration=request.target_total_duration,
+            workflow_mode=request.workflow_mode,
         ):
             cached_result = _build_split_response_from_state(existing_state)
             if cached_result is not None:
@@ -1198,6 +1282,7 @@ async def split_script(
             request.script_text,
             max_segment_duration=request.max_segment_duration,
             target_total_duration=request.target_total_duration,
+            workflow_mode=request.workflow_mode,
         )
 
         project_title = str(
@@ -1211,11 +1296,13 @@ async def split_script(
             script_text=request.script_text,
             max_segment_duration=request.max_segment_duration,
             target_total_duration=request.target_total_duration,
+            workflow_mode=request.workflow_mode,
         )
         project_state = {
             **existing_state,
             "currentStep": 2,
             "transitionDirection": "forward",
+            "workflowMode": normalize_workflow_mode(request.workflow_mode),
             "projectTitle": project_title,
             "scriptDraft": request.script_text,
             "maxSegmentDuration": request.max_segment_duration,
@@ -1280,6 +1367,7 @@ async def review_split_script(
             max_segment_duration=request.max_segment_duration,
             target_total_duration=request.target_total_duration,
             segments=request_segments,
+            workflow_mode=request.workflow_mode,
         ):
             cached_result = _build_split_review_response_from_state(existing_state)
             if cached_result is not None:
@@ -1295,6 +1383,7 @@ async def review_split_script(
             segments=request_segments,
             max_segment_duration=request.max_segment_duration,
             target_total_duration=request.target_total_duration,
+            workflow_mode=request.workflow_mode,
         )
 
         project_title = str(
@@ -1309,11 +1398,13 @@ async def review_split_script(
             max_segment_duration=request.max_segment_duration,
             target_total_duration=request.target_total_duration,
             segments=request_segments,
+            workflow_mode=request.workflow_mode,
         )
         project_state = {
             **existing_state,
             "currentStep": 2,
             "transitionDirection": "forward",
+            "workflowMode": normalize_workflow_mode(request.workflow_mode),
             "projectTitle": project_title,
             "scriptDraft": request.script_text,
             "maxSegmentDuration": request.max_segment_duration,
@@ -1354,10 +1445,12 @@ async def generate_keyframes(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """为审核后的片段生成首尾帧。"""
+    """为审核后的片段生成首帧预览或长镜头首尾帧。"""
     start_time = time.time()
 
     try:
+        normalized_workflow_mode = normalize_workflow_mode(request.workflow_mode)
+
         existing_project = None
         if request.project_id:
             existing_project = await pipeline_project_service.get_project(db, current_user.id, request.project_id)
@@ -1370,19 +1463,28 @@ async def generate_keyframes(
 
         request_segments = [segment.model_dump() for segment in request.segments]
         request_reference_images = [reference.model_dump() for reference in request.reference_images]
-        if existing_state and _keyframe_request_matches_state(
+        request_existing_keyframes = [bundle.model_dump() for bundle in request.existing_keyframes]
+        existing_keyframes_payload = request_existing_keyframes
+        if not existing_keyframes_payload and isinstance(existing_state.get("keyframes"), list):
+            existing_keyframes_payload = list(existing_state.get("keyframes") or [])
+        if request.target_segment_number is None and existing_state and _keyframe_request_matches_state(
             existing_state,
             style=request.style,
             selected_character_ids=request.selected_character_ids,
             selected_scene_ids=request.selected_scene_ids,
             segments=request_segments,
             reference_images=request_reference_images,
+            workflow_mode=normalized_workflow_mode,
         ):
             cached_result = _build_keyframes_response_from_state(existing_state)
             if cached_result is not None:
                 return {
                     "success": True,
-                    "message": "已直接复用上一次成功的首尾帧结果，避免重复调用模型。",
+                    "message": (
+                        "已直接复用上一次成功的首尾帧结果，避免重复调用模型。"
+                        if normalized_workflow_mode == LONG_SHOT_WORKFLOW_MODE
+                        else "已直接复用上一次成功的首帧预览结果，避免重复调用模型。"
+                    ),
                     "processing_time": time.time() - start_time,
                     **cached_result,
                 }
@@ -1401,11 +1503,14 @@ async def generate_keyframes(
             project_title=request.project_title,
             segments=request_segments,
             style=request.style,
+            workflow_mode=normalized_workflow_mode,
             selected_character_ids=request.selected_character_ids,
             character_profiles=resolved_profiles,
             selected_scene_ids=request.selected_scene_ids,
             scene_profiles=resolved_scene_profiles,
             reference_images=request_reference_images,
+            existing_keyframes=existing_keyframes_payload,
+            target_segment_number=request.target_segment_number,
         )
         project_title = str(
             result.get("project_title")
@@ -1422,11 +1527,13 @@ async def generate_keyframes(
             selected_scene_ids=request.selected_scene_ids,
             segments=request_segments,
             reference_images=request_reference_images,
+            workflow_mode=normalized_workflow_mode,
         )
         project_state = {
             **existing_state,
             "currentStep": 3,
             "transitionDirection": "forward",
+            "workflowMode": normalized_workflow_mode,
             "projectTitle": project_title,
             "stylePreference": request.style,
             "selectedCharacterIds": result.get("selected_character_ids") or request.selected_character_ids,
@@ -1451,7 +1558,12 @@ async def generate_keyframes(
         )
         return {
             "success": True,
-            "message": result.get("message") or "关键帧生成完成，请审核首尾帧后再开始生成视频",
+            "message": result.get("message")
+            or (
+                "关键帧生成完成，请审核首尾帧后再开始生成视频"
+                if normalized_workflow_mode == LONG_SHOT_WORKFLOW_MODE
+                else "首帧预览生成完成，请审核各片段重点后再开始生成视频"
+            ),
             "processing_time": time.time() - start_time,
             **result,
         }
@@ -1523,10 +1635,12 @@ async def render_project(
                 "provider_model": request.provider_model,
                 "camera_fixed": request.camera_fixed,
                 "generate_audio": request.generate_audio,
-                "return_last_frame": request.return_last_frame,
+                "return_last_frame": normalize_workflow_mode(request.workflow_mode) == LONG_SHOT_WORKFLOW_MODE
+                and request.return_last_frame,
                 "auto_continue_segments": request.auto_continue_segments,
                 "service_tier": request.service_tier,
                 "seed": request.seed,
+                "workflow_mode": normalize_workflow_mode(request.workflow_mode),
             },
         )
         await pipeline_workflow_service.start_render_task(task_state.task_id)

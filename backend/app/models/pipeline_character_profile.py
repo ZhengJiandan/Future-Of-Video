@@ -34,6 +34,9 @@ class PipelineCharacterProfile(BaseModel):
     emotion_baseline = Column(Text, nullable=True)
     voice_description = Column(Text, nullable=True)
     voice_profile = Column(JSON, nullable=True)
+    kling_subject_id = Column(String(100), nullable=True, index=True)
+    kling_subject_name = Column(String(255), nullable=True)
+    kling_subject_status = Column(String(100), nullable=True)
     forbidden_behaviors = Column(Text, nullable=True)
     prompt_hint = Column(Text, nullable=True)
     llm_summary = Column(Text, nullable=True)
@@ -117,6 +120,9 @@ class PipelineCharacterProfile(BaseModel):
             "common_actions": self.common_actions or "",
             "emotion_baseline": self.emotion_baseline or "",
             "voice_description": self.voice_description or "",
+            "kling_subject_id": self.kling_subject_id or "",
+            "kling_subject_name": self.kling_subject_name or "",
+            "kling_subject_status": self.kling_subject_status or "",
             "forbidden_behaviors": self.forbidden_behaviors or "",
             "prompt_hint": self.prompt_hint or "",
             "llm_summary": self.llm_summary or "",
@@ -156,6 +162,9 @@ class PipelineCharacterProfile(BaseModel):
                 "color_palette": self.color_palette or "",
                 "speaking_style": self.speaking_style or "",
                 "voice_description": self.voice_description or "",
+                "kling_subject_id": self.kling_subject_id or "",
+                "kling_subject_name": self.kling_subject_name or "",
+                "kling_subject_status": self.kling_subject_status or "",
                 "common_actions": self.common_actions or "",
                 "llm_summary": self.llm_summary or "",
                 "image_prompt_base": self.image_prompt_base or "",
