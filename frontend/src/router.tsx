@@ -5,6 +5,8 @@ import { CharacterLibraryListPage } from './pages/CharacterLibraryListPage'
 import { HomePage } from './pages/HomePage'
 import { CharacterLibraryPage } from './pages/CharacterLibraryPage'
 import { LoginPage } from './pages/LoginPage'
+import { CharacterSubjectPage } from './pages/CharacterSubjectPage'
+import { CharacterVoicePage } from './pages/CharacterVoicePage'
 import { ProjectListPage } from './pages/ProjectListPage'
 import { SceneLibraryListPage } from './pages/SceneLibraryListPage'
 import { SceneLibraryPage } from './pages/SceneLibraryPage'
@@ -32,7 +34,11 @@ export const router = createBrowserRouter([
           },
           {
             path: 'characters',
-            element: <Navigate to="/characters/library" replace />,
+            element: <Navigate to="/characters/subjects" replace />,
+          },
+          {
+            path: 'characters/subjects',
+            element: <CharacterSubjectPage />,
           },
           {
             path: 'characters/new',
@@ -45,6 +51,10 @@ export const router = createBrowserRouter([
           {
             path: 'characters/library',
             element: <CharacterLibraryListPage />,
+          },
+          {
+            path: 'characters/voices',
+            element: <CharacterVoicePage />,
           },
           {
             path: 'scenes',

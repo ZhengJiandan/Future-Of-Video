@@ -32,6 +32,7 @@ import {
   resolveDisplayAssetUrl,
   scriptPipelineApi,
 } from '../services/api'
+import { CharacterAssetNav } from '../components/CharacterAssetNav'
 
 const { Title, Paragraph, Text } = Typography
 const { TextArea } = Input
@@ -493,6 +494,9 @@ export const CharacterLibraryPage: React.FC = () => {
                   切换为新建
                 </Button>
               ) : null}
+              <Button onClick={() => navigate('/characters/subjects')}>
+                去角色主体页
+              </Button>
               <Button icon={<FolderOpenOutlined />} onClick={() => navigate('/characters/library')}>
                 查看已保存角色
               </Button>
@@ -500,6 +504,8 @@ export const CharacterLibraryPage: React.FC = () => {
           </Col>
         </Row>
       </Card>
+
+      <CharacterAssetNav current="library" />
 
       <Card title={isEditMode ? '编辑角色档案' : '新建角色档案'} style={{ borderRadius: 20 }}>
         <Space direction="vertical" size={18} style={{ width: '100%' }}>

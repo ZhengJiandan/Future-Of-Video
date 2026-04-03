@@ -347,6 +347,40 @@ class PipelineCharacterLibraryService:
         await db.commit()
         return True
 
+    async def bind_kling_subject(
+        self,
+        db: AsyncSession,
+        *,
+        profile_id: str,
+        subject_id: str,
+        subject_name: str = "",
+        subject_status: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        normalized_profile_id = str(profile_id or "").strip()
+        normalized_subject_id = str(subject_id or "").strip()
+        if not normalized_profile_id:
+            raise ValueError("角色档案不存在")
+        if not normalized_subject_id:
+            raise ValueError("主体 ID 不能为空")
+
+        result = await db.execute(
+            select(PipelineCharacterProfile).where(
+                PipelineCharacterProfile.id == normalized_profile_id,
+                PipelineCharacterProfile.deleted_at.is_(None),
+            )
+        )
+        profile = result.scalar_one_or_none()
+        if not profile:
+            return None
+
+        profile.kling_subject_id = normalized_subject_id
+        profile.kling_subject_name = str(subject_name or "").strip() or None
+        profile.kling_subject_status = str(subject_status or "").strip() or None
+        profile.updated_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(profile)
+        return profile.to_dict()
+
     async def save_reference_upload(
         self,
         *,
@@ -537,6 +571,9 @@ class PipelineCharacterLibraryService:
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "emotion_baseline": str(profile.get("emotion_baseline") or "").strip(),
             "voice_description": str(profile.get("voice_description") or "").strip(),
+            "kling_subject_id": str(profile.get("kling_subject_id") or "").strip(),
+            "kling_subject_name": str(profile.get("kling_subject_name") or "").strip(),
+            "kling_subject_status": str(profile.get("kling_subject_status") or "").strip(),
             "forbidden_behaviors": str(profile.get("forbidden_behaviors") or "").strip(),
             "prompt_hint": str(profile.get("prompt_hint") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
@@ -646,6 +683,9 @@ class PipelineCharacterLibraryService:
             "color_palette": str(profile.get("color_palette") or "").strip(),
             "speaking_style": str(profile.get("speaking_style") or "").strip(),
             "voice_description": str(profile.get("voice_description") or "").strip(),
+            "kling_subject_id": str(profile.get("kling_subject_id") or "").strip(),
+            "kling_subject_name": str(profile.get("kling_subject_name") or "").strip(),
+            "kling_subject_status": str(profile.get("kling_subject_status") or "").strip(),
             "common_actions": str(profile.get("common_actions") or "").strip(),
             "llm_summary": str(profile.get("llm_summary") or "").strip(),
             "image_prompt_base": str(profile.get("image_prompt_base") or "").strip(),

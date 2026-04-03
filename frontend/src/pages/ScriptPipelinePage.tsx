@@ -55,6 +55,7 @@ import {
   SegmentItem,
   SegmentKeyframes,
   SplitValidationReport,
+  WorkflowMode,
   resolveAssetUrl,
   resolveDisplayAssetUrl,
   scriptPipelineApi,
@@ -64,12 +65,26 @@ import { useProjectStore } from '../stores/project'
 const { Title, Paragraph, Text } = Typography
 const { TextArea } = Input
 
-const stepItems = [
+const WORKFLOW_MODE_STANDARD: WorkflowMode = 'standard'
+const WORKFLOW_MODE_LONG_SHOT: WorkflowMode = 'long_shot'
+const DEFAULT_STANDARD_PROVIDER = 'kling'
+const DEFAULT_KLING_MODEL = 'kling-v3-omni'
+const DEFAULT_DOUBAO_MODEL = 'doubao-seedance-1-5-pro-251215'
+
+const getDefaultProviderForWorkflow = (workflowMode: WorkflowMode) =>
+  workflowMode === WORKFLOW_MODE_STANDARD ? DEFAULT_STANDARD_PROVIDER : 'auto'
+
+const getDefaultProviderModel = (provider: string) =>
+  provider === 'doubao' ? DEFAULT_DOUBAO_MODEL : DEFAULT_KLING_MODEL
+
+const buildStepItems = (workflowMode: WorkflowMode) => [
   { title: '输入需求', subtitle: '创意、角色、参考图', icon: <FileTextOutlined /> },
   { title: '确认剧本', subtitle: '确认内容并按约束分段', icon: <EditOutlined /> },
   { title: '审核片段', subtitle: '审核分段结果与画面描述', icon: <CheckCircleOutlined /> },
-  { title: '审核首尾帧', subtitle: '确认关键帧连续性', icon: <FileImageOutlined /> },
-  { title: '生成视频', subtitle: '开始渲染并查看进度', icon: <VideoCameraOutlined /> },
+  workflowMode === WORKFLOW_MODE_LONG_SHOT
+    ? { title: '审核首尾帧', subtitle: '确认关键帧连续性', icon: <FileImageOutlined /> }
+    : { title: '审核首帧', subtitle: '确认各片段的内容重点', icon: <FileImageOutlined /> },
+  { title: '渲染进度', subtitle: '查看片段生成与组装状态', icon: <VideoCameraOutlined /> },
   { title: '查看结果', subtitle: '成片与片段结果', icon: <EyeOutlined /> },
 ]
 
@@ -156,7 +171,25 @@ const extractApiErrorMessage = (error: unknown, fallback: string): string => {
   return fallback
 }
 
-const MAX_SEGMENT_DURATION = 10
+const MAX_SEGMENT_DURATION = 15
+
+const normalizeWorkflowMode = (value: unknown): WorkflowMode =>
+  value === WORKFLOW_MODE_LONG_SHOT ? WORKFLOW_MODE_LONG_SHOT : WORKFLOW_MODE_STANDARD
+
+const inferWorkflowModeFromProjectState = (state: Record<string, unknown>, fallback?: unknown): WorkflowMode => {
+  if ('workflowMode' in state) {
+    return normalizeWorkflowMode(state.workflowMode)
+  }
+  const restoredKeyframes = Array.isArray(state.keyframes) ? state.keyframes : []
+  if (restoredKeyframes.length > 0) {
+    return WORKFLOW_MODE_LONG_SHOT
+  }
+  const currentStep = Number(state.currentStep ?? fallback ?? 0)
+  if (Number.isFinite(currentStep) && currentStep >= 3) {
+    return WORKFLOW_MODE_LONG_SHOT
+  }
+  return WORKFLOW_MODE_STANDARD
+}
 
 const clampSegmentDuration = (value: number): number => {
   if (!Number.isFinite(value)) {
@@ -283,10 +316,87 @@ const formatSegmentDialoguesText = (dialogues: SegmentDialogueItem[]): string =>
     .map((item) => formatSegmentDialogueLine(item))
     .join('\n')
 
+const normalizeSegmentGenerationConfig = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {}
+
+const getSegmentGenerationConfig = (segment: SegmentItem): Record<string, unknown> =>
+  normalizeSegmentGenerationConfig(segment.generation_config)
+
+const isSegmentMultiShotEnabled = (segment: SegmentItem): boolean =>
+  Boolean(getSegmentGenerationConfig(segment).kling_multi_shot_enabled)
+
+const getSegmentMultiShotPrompts = (segment: SegmentItem): string[] => {
+  const generationConfig = getSegmentGenerationConfig(segment)
+  const rawItems = generationConfig.kling_multi_prompt
+  if (!Array.isArray(rawItems)) {
+    return []
+  }
+
+  return rawItems
+    .map((item) => {
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        return String((item as { prompt?: unknown }).prompt || '').trim()
+      }
+      return String(item || '').trim()
+    })
+    .filter(Boolean)
+}
+
+const formatMultiShotPromptsText = (prompts: string[]): string => prompts.map((item) => item.trim()).filter(Boolean).join('\n')
+
+const parseMultiShotPromptsText = (value: string): string[] =>
+  value
+    .split('\n')
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+const buildVideoPromptSummaryFromMultiShot = (prompts: string[]): string =>
+  prompts
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .join('；')
+
+const buildMultiShotPatch = (segment: SegmentItem, enabled: boolean, prompts?: string[]): Partial<SegmentItem> => {
+  const generationConfig = getSegmentGenerationConfig(segment)
+  const normalizedPrompts = (prompts || []).map((item) => item.trim()).filter(Boolean)
+
+  if (!enabled) {
+    const nextGenerationConfig = { ...generationConfig }
+    delete nextGenerationConfig.kling_shot_type
+    delete nextGenerationConfig.kling_multi_prompt
+    return {
+      generation_config: {
+        ...nextGenerationConfig,
+        kling_multi_shot_enabled: false,
+        kling_multi_shot_reason: String(generationConfig.kling_multi_shot_reason || '已手动切换为单镜头模式'),
+        kling_multi_shot_source: 'manual-edit',
+      },
+    }
+  }
+
+  const nextPrompts = normalizedPrompts.length
+    ? normalizedPrompts
+    : [segment.video_prompt.trim()].filter(Boolean)
+
+  return {
+    video_prompt: buildVideoPromptSummaryFromMultiShot(nextPrompts),
+    generation_config: {
+      ...generationConfig,
+      kling_multi_shot_enabled: true,
+      kling_shot_type: 'customize',
+      kling_multi_prompt: nextPrompts,
+      kling_multi_shot_reason: String(generationConfig.kling_multi_shot_reason || '已手动切换为多镜头模式'),
+      kling_multi_shot_source: 'manual-edit',
+    },
+  }
+}
+
 const normalizeSegmentItem = (segment: SegmentItem): SegmentItem => ({
   ...segment,
   duration: clampSegmentDuration(Number(segment.duration)),
   key_dialogues: normalizeSegmentDialogues(segment.key_dialogues),
+  generation_config: normalizeSegmentGenerationConfig(segment.generation_config),
   contains_primary_character: Boolean(segment.contains_primary_character),
   ending_contains_primary_character: Boolean(segment.ending_contains_primary_character),
   pre_generate_start_frame: Boolean(segment.pre_generate_start_frame),
@@ -478,16 +588,17 @@ export const ScriptPipelinePage: React.FC = () => {
 
   const [currentStep, setCurrentStep] = useState(0)
   const [transitionDirection, setTransitionDirection] = useState<'forward' | 'backward'>('forward')
+  const [workflowMode, setWorkflowMode] = useState<WorkflowMode>(WORKFLOW_MODE_STANDARD)
   const [userInput, setUserInput] = useState('')
   const [stylePreference, setStylePreference] = useState('写实战术电影感')
   const [projectTitle, setProjectTitle] = useState('未命名项目')
-  const [maxSegmentDuration, setMaxSegmentDuration] = useState<number>(10)
+  const [maxSegmentDuration, setMaxSegmentDuration] = useState<number>(MAX_SEGMENT_DURATION)
   const [targetTotalDuration, setTargetTotalDuration] = useState<number | null>(null)
-  const [provider, setProvider] = useState('auto')
+  const [provider, setProvider] = useState(getDefaultProviderForWorkflow(WORKFLOW_MODE_STANDARD))
   const [resolution, setResolution] = useState('720p')
   const [aspectRatio, setAspectRatio] = useState('16:9')
   const [watermark, setWatermark] = useState(false)
-  const [providerModel, setProviderModel] = useState('doubao-seedance-1-5-pro-251215')
+  const [providerModel, setProviderModel] = useState(DEFAULT_KLING_MODEL)
   const [cameraFixed, setCameraFixed] = useState(false)
   const [generateAudio, setGenerateAudio] = useState(true)
   const [returnLastFrame, setReturnLastFrame] = useState(false)
@@ -507,6 +618,7 @@ export const ScriptPipelinePage: React.FC = () => {
   const [splitLoading, setSplitLoading] = useState(false)
   const [splitReviewLoading, setSplitReviewLoading] = useState(false)
   const [keyframeLoading, setKeyframeLoading] = useState(false)
+  const [keyframeRegeneratingSegmentNumber, setKeyframeRegeneratingSegmentNumber] = useState<number | null>(null)
   const [renderStarting, setRenderStarting] = useState(false)
   const [renderActionLoading, setRenderActionLoading] = useState(false)
   const [charactersLoading, setCharactersLoading] = useState(false)
@@ -536,16 +648,17 @@ export const ScriptPipelinePage: React.FC = () => {
   const resetLocalState = () => {
     setCurrentStep(0)
     setTransitionDirection('forward')
+    setWorkflowMode(WORKFLOW_MODE_STANDARD)
     setUserInput('')
     setStylePreference('写实战术电影感')
     setProjectTitle('未命名项目')
-    setMaxSegmentDuration(10)
+    setMaxSegmentDuration(MAX_SEGMENT_DURATION)
     setTargetTotalDuration(null)
-    setProvider('auto')
+    setProvider(getDefaultProviderForWorkflow(WORKFLOW_MODE_STANDARD))
     setResolution('720p')
     setAspectRatio('16:9')
     setWatermark(false)
-    setProviderModel('doubao-seedance-1-5-pro-251215')
+    setProviderModel(DEFAULT_KLING_MODEL)
     setCameraFixed(false)
     setGenerateAudio(true)
     setReturnLastFrame(false)
@@ -570,6 +683,7 @@ export const ScriptPipelinePage: React.FC = () => {
     setSplitValidationReport(null)
     setSplitReviewLoading(false)
     setKeyframes([])
+    setKeyframeRegeneratingSegmentNumber(null)
     setRenderTaskId(null)
     setRenderStatus(null)
     setRenderActionLoading(false)
@@ -583,6 +697,7 @@ export const ScriptPipelinePage: React.FC = () => {
     const restoredReferenceImages = Array.isArray(state.referenceImages)
       ? (state.referenceImages as ReferenceImageAsset[])
       : []
+    const restoredWorkflowMode = inferWorkflowModeFromProjectState(state, item.current_step)
     const restoredGeneratedScript =
       state.generatedScript && typeof state.generatedScript === 'object'
         ? (state.generatedScript as GeneratedScriptResponse)
@@ -606,6 +721,7 @@ export const ScriptPipelinePage: React.FC = () => {
 
     setCurrentStep(Number(state.currentStep ?? item.current_step ?? 0))
     setTransitionDirection(state.transitionDirection === 'backward' ? 'backward' : 'forward')
+    setWorkflowMode(restoredWorkflowMode)
     setUserInput(String(state.userInput || ''))
     setStylePreference(String(state.stylePreference || '写实战术电影感'))
     setProjectTitle(String(state.projectTitle || item.project_title || '未命名项目'))
@@ -615,14 +731,16 @@ export const ScriptPipelinePage: React.FC = () => {
         ? null
         : Number(state.targetTotalDuration),
     )
-    setProvider(String(state.provider || 'auto'))
+    setProvider(String(state.provider || getDefaultProviderForWorkflow(restoredWorkflowMode)))
     setResolution(String(state.resolution || '720p'))
     setAspectRatio(String(state.aspectRatio || '16:9'))
     setWatermark(Boolean(state.watermark))
-    setProviderModel(String(state.providerModel || 'doubao-seedance-1-5-pro-251215'))
+    setProviderModel(
+      String(state.providerModel || getDefaultProviderModel(String(state.provider || getDefaultProviderForWorkflow(restoredWorkflowMode)))),
+    )
     setCameraFixed(Boolean(state.cameraFixed))
     setGenerateAudio(state.generateAudio === false ? false : true)
-    setReturnLastFrame(Boolean(state.returnLastFrame))
+    setReturnLastFrame(restoredWorkflowMode === WORKFLOW_MODE_LONG_SHOT && Boolean(state.returnLastFrame))
     setServiceTier(String(state.serviceTier || 'default'))
     setSeedInput(
       state.seedInput === null || state.seedInput === undefined || state.seedInput === ''
@@ -652,6 +770,7 @@ export const ScriptPipelinePage: React.FC = () => {
     setSplitValidationReport(restoredSplitValidationReport)
     setSplitReviewLoading(false)
     setKeyframes(restoredKeyframes)
+    setKeyframeRegeneratingSegmentNumber(null)
     setRenderTaskId(
       typeof state.renderTaskId === 'string' && state.renderTaskId
         ? state.renderTaskId
@@ -663,6 +782,7 @@ export const ScriptPipelinePage: React.FC = () => {
   const buildProjectStateSnapshot = (overrides: Record<string, unknown> = {}) => ({
     currentStep,
     transitionDirection,
+    workflowMode,
     userInput,
     stylePreference,
     projectTitle,
@@ -774,6 +894,7 @@ export const ScriptPipelinePage: React.FC = () => {
       scriptText: string
       maxSegmentDuration: number
       targetTotalDuration: number | null
+      workflowMode: WorkflowMode
     },
     originalError: unknown,
   ) => {
@@ -792,13 +913,15 @@ export const ScriptPipelinePage: React.FC = () => {
           state.targetTotalDuration === null || state.targetTotalDuration === undefined
             ? null
             : Number(state.targetTotalDuration)
+        const savedWorkflowMode = inferWorkflowModeFromProjectState(state, item?.current_step)
 
         if (
           item &&
           restoredSegments.length > 0 &&
           savedScriptDraft === requestMeta.scriptText &&
           savedMaxSegmentDuration === requestMeta.maxSegmentDuration &&
-          savedTargetTotalDuration === requestMeta.targetTotalDuration
+          savedTargetTotalDuration === requestMeta.targetTotalDuration &&
+          savedWorkflowMode === requestMeta.workflowMode
         ) {
           applyProjectState(item)
           setCharacterPrepareResult(null)
@@ -823,6 +946,7 @@ export const ScriptPipelinePage: React.FC = () => {
       selectedSceneIds: string[]
       referenceImages: ReferenceImageAsset[]
       segments: SegmentItem[]
+      workflowMode: WorkflowMode
     },
     originalError: unknown,
   ) => {
@@ -847,12 +971,14 @@ export const ScriptPipelinePage: React.FC = () => {
         const restoredReferenceImages = Array.isArray(state.referenceImages)
           ? (state.referenceImages as ReferenceImageAsset[])
           : []
+        const restoredWorkflowMode = inferWorkflowModeFromProjectState(state, item?.current_step)
 
         if (
           item &&
           restoredKeyframes.length > 0 &&
           restoredKeyframes.length === requestMeta.segments.length &&
           restoredStyle === requestMeta.style &&
+          restoredWorkflowMode === requestMeta.workflowMode &&
           stableSerialize(restoredSegments) === expectedSegments &&
           stableSerialize(restoredCharacterIds) === expectedCharacterIds &&
           stableSerialize(restoredSceneIds) === expectedSceneIds &&
@@ -906,6 +1032,14 @@ export const ScriptPipelinePage: React.FC = () => {
   useEffect(() => {
     pendingRequestedProjectIdRef.current = readRequestedProjectId(location.state)
   }, [location.key, location.state])
+
+  useEffect(() => {
+    if (workflowMode === WORKFLOW_MODE_LONG_SHOT) {
+      setReturnLastFrame(true)
+      return
+    }
+    setReturnLastFrame(false)
+  }, [workflowMode])
 
   useEffect(() => {
     if (!projectStoreHydrated) {
@@ -1133,6 +1267,7 @@ export const ScriptPipelinePage: React.FC = () => {
     transitionDirection,
     userInput,
     watermark,
+    workflowMode,
     renderStatus,
     selectedProjectId,
     setCurrentProjectId,
@@ -1200,6 +1335,7 @@ export const ScriptPipelinePage: React.FC = () => {
         user_input: userInput.trim(),
         style: stylePreference.trim(),
         target_total_duration: targetTotalDuration || undefined,
+        workflow_mode: workflowMode,
         selected_character_ids: libraryCharacterIds,
         selected_scene_ids: constraintSceneIds,
         character_profiles: temporaryCharacters,
@@ -1315,6 +1451,7 @@ export const ScriptPipelinePage: React.FC = () => {
         script_text: scriptText.trim(),
         max_segment_duration: maxDuration,
         target_total_duration: targetDuration || undefined,
+        workflow_mode: workflowMode,
         segments: segmentsToReview,
       })
       setSegments(normalizeSegmentItems(response.data.segments || segmentsToReview))
@@ -1357,6 +1494,7 @@ export const ScriptPipelinePage: React.FC = () => {
         script_text: normalizedScriptDraft,
         max_segment_duration: normalizedMaxSegmentDuration,
         target_total_duration: targetTotalDuration || undefined,
+        workflow_mode: workflowMode,
       })
       const normalizedSegments = normalizeSegmentItems(response.data.segments)
       setSegments(normalizedSegments)
@@ -1380,6 +1518,7 @@ export const ScriptPipelinePage: React.FC = () => {
               scriptText: normalizedScriptDraft,
               maxSegmentDuration: normalizedMaxSegmentDuration,
               targetTotalDuration: targetTotalDuration ?? null,
+              workflowMode,
             },
             requestError,
           )
@@ -1535,12 +1674,13 @@ export const ScriptPipelinePage: React.FC = () => {
     )
   }
 
-  const handleGenerateKeyframes = async () => {
+  const handleGenerateKeyframes = async (targetSegmentNumber?: number) => {
     if (!segments.length || keyframeRequestInFlightRef.current) {
       return
     }
 
     keyframeRequestInFlightRef.current = true
+    const partialRegeneration = Number.isFinite(targetSegmentNumber)
     const normalizedSegments = normalizeSegmentItems(segments)
     const normalizedStyle = stylePreference.trim()
     const requestSelectedCharacterIds = [...selectedCharacterIds]
@@ -1549,11 +1689,14 @@ export const ScriptPipelinePage: React.FC = () => {
 
     setCurrentStep(3)
     setKeyframeLoading(true)
+    setKeyframeRegeneratingSegmentNumber(partialRegeneration ? Number(targetSegmentNumber) : null)
     setError(null)
-    setKeyframes([])
     setRenderTaskId(null)
     setRenderStatus(null)
     setSegments(normalizedSegments)
+    if (!partialRegeneration) {
+      setKeyframes([])
+    }
 
     try {
       ensuredProjectId = await ensureProjectExists()
@@ -1561,15 +1704,21 @@ export const ScriptPipelinePage: React.FC = () => {
         project_id: ensuredProjectId,
         project_title: projectTitle.trim() || '未命名项目',
         style: normalizedStyle,
+        workflow_mode: workflowMode,
         selected_character_ids: requestSelectedCharacterIds,
         selected_scene_ids: requestSelectedSceneIds,
         character_profiles: effectiveCharacterProfiles,
         scene_profiles: generatedScript?.scene_profiles || [],
         reference_images: referenceImages,
         segments: normalizedSegments,
+        existing_keyframes: partialRegeneration ? keyframes : [],
+        target_segment_number: partialRegeneration ? Number(targetSegmentNumber) : undefined,
       })
       setKeyframes(response.data.keyframes)
       setCurrentStep(3)
+      if (partialRegeneration) {
+        message.success(response.data.message || `已重新生成片段 ${Number(targetSegmentNumber)} 首帧`)
+      }
     } catch (requestError: unknown) {
       if (ensuredProjectId && isGatewayTimeoutError(requestError)) {
         try {
@@ -1581,6 +1730,7 @@ export const ScriptPipelinePage: React.FC = () => {
               selectedSceneIds: requestSelectedSceneIds,
               referenceImages,
               segments: normalizedSegments,
+              workflowMode,
             },
             requestError,
           )
@@ -1589,15 +1739,25 @@ export const ScriptPipelinePage: React.FC = () => {
           }
         } catch (recoveryError) {
           setError(extractApiErrorMessage(recoveryError, '首尾帧生成失败'))
-          setCurrentStep(2)
+          if (!partialRegeneration) {
+            setCurrentStep(2)
+          }
           return
         }
       }
-      setError(extractApiErrorMessage(requestError, '首尾帧生成失败'))
-      setCurrentStep(2)
+      setError(
+        extractApiErrorMessage(
+          requestError,
+          partialRegeneration ? `片段 ${Number(targetSegmentNumber)} 首帧重新生成失败` : '首尾帧生成失败',
+        ),
+      )
+      if (!partialRegeneration) {
+        setCurrentStep(2)
+      }
     } finally {
       keyframeRequestInFlightRef.current = false
       setKeyframeLoading(false)
+      setKeyframeRegeneratingSegmentNumber(null)
     }
   }
 
@@ -1638,10 +1798,11 @@ export const ScriptPipelinePage: React.FC = () => {
         provider_model: providerModel,
         camera_fixed: cameraFixed,
         generate_audio: generateAudio,
-        return_last_frame: returnLastFrame,
+        return_last_frame: isLongShotWorkflow ? returnLastFrame : false,
         auto_continue_segments: autoContinueSegments,
         service_tier: serviceTier,
         seed: seedInput === null ? undefined : seedInput,
+        workflow_mode: workflowMode,
         selected_character_ids: selectedCharacterIds,
         selected_scene_ids: selectedSceneIds,
         character_profiles: effectiveCharacterProfiles,
@@ -1810,6 +1971,18 @@ export const ScriptPipelinePage: React.FC = () => {
     return availability[stepIndex]
   }
 
+  useEffect(() => {
+    if (provider === 'doubao' && !providerModel.startsWith('doubao-')) {
+      setProviderModel(DEFAULT_DOUBAO_MODEL)
+      return
+    }
+    if (provider !== 'doubao' && !providerModel.startsWith('kling-')) {
+      setProviderModel(DEFAULT_KLING_MODEL)
+    }
+  }, [provider, providerModel])
+
+  const stepItems = buildStepItems(workflowMode)
+  const isLongShotWorkflow = workflowMode === WORKFLOW_MODE_LONG_SHOT
   const constrainedCharacters = characterProfiles.filter((profile) => constraintCharacterIds.includes(profile.id))
   const constrainedScenes = sceneProfiles.filter((profile) => constraintSceneIds.includes(profile.id))
   const effectiveCharacterProfiles = generatedScript?.character_profiles || manualCharacterProfiles
@@ -1885,6 +2058,18 @@ export const ScriptPipelinePage: React.FC = () => {
                     value={projectTitle}
                     onChange={(event) => setProjectTitle(event.target.value)}
                     placeholder="用于最终成片命名"
+                  />
+                </Col>
+                <Col xs={24} md={12}>
+                  <Text>视频流程</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={workflowMode}
+                    onChange={(value) => setWorkflowMode(value)}
+                    options={[
+                      { value: WORKFLOW_MODE_STANDARD, label: '标准视频' },
+                      { value: WORKFLOW_MODE_LONG_SHOT, label: '长镜头视频' },
+                    ]}
                   />
                 </Col>
                 <Col xs={24} md={12}>
@@ -2090,7 +2275,13 @@ export const ScriptPipelinePage: React.FC = () => {
                   <Card
                     size="small"
                     title="自动生成角色建议"
-                    extra={<Text type="secondary">可直接用于本次创作；生成视频后可按首帧造型保存到角色库</Text>}
+                    extra={
+                      <Text type="secondary">
+                        {isLongShotWorkflow
+                          ? '可直接用于本次创作；生成视频后可按首帧造型保存到角色库'
+                          : '可直接用于本次创作；标准流程默认不生成角色首帧锚点'}
+                      </Text>
+                    }
                   >
                     <Space direction="vertical" size={12} style={{ width: '100%' }}>
                       {temporaryCharacters.map((profile) => (
@@ -2338,12 +2529,66 @@ export const ScriptPipelinePage: React.FC = () => {
                         }
                         placeholder={'对白（每行一条）\n角色名 [角色ID]: 台词\n角色名 [情绪 / 语气]: 台词\n角色名 [角色ID] [情绪 / 语气]: 台词'}
                       />
-                      <TextArea
-                        rows={6}
-                        value={segment.video_prompt}
-                        onChange={(event) => handleSegmentChange(index, { video_prompt: event.target.value })}
-                        placeholder="视频画面描述"
-                      />
+                      {(() => {
+                        const generationConfig = getSegmentGenerationConfig(segment)
+                        const isMultiShot = isSegmentMultiShotEnabled(segment)
+                        const multiShotPrompts = getSegmentMultiShotPrompts(segment)
+                        const multiShotReason = String(generationConfig.kling_multi_shot_reason || '').trim()
+                        const multiShotSource = String(generationConfig.kling_multi_shot_source || '').trim()
+
+                        return (
+                          <Card
+                            size="small"
+                            title="视频生成模式"
+                            extra={
+                              <Space size={8}>
+                                <Text type="secondary">多镜头模式</Text>
+                                <Switch
+                                  checked={isMultiShot}
+                                  onChange={(checked) =>
+                                    handleSegmentChange(index, buildMultiShotPatch(segment, checked, multiShotPrompts))
+                                  }
+                                />
+                              </Space>
+                            }
+                          >
+                            <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                              <Space wrap>
+                                <Tag color={isMultiShot ? 'processing' : 'default'}>
+                                  {isMultiShot ? '多镜头 multi_prompt' : '单镜头 prompt'}
+                                </Tag>
+                                {multiShotSource ? <Tag>{multiShotSource}</Tag> : null}
+                              </Space>
+                              {multiShotReason ? (
+                                <Alert
+                                  type={isMultiShot ? 'info' : 'success'}
+                                  showIcon
+                                  message={isMultiShot ? '当前片段将按多镜头模式生成' : '当前片段将按单镜头模式生成'}
+                                  description={multiShotReason}
+                                />
+                              ) : null}
+                              {isMultiShot ? (
+                                <TextArea
+                                  rows={6}
+                                  value={formatMultiShotPromptsText(multiShotPrompts)}
+                                  onChange={(event) => {
+                                    const nextPrompts = parseMultiShotPromptsText(event.target.value)
+                                    handleSegmentChange(index, buildMultiShotPatch(segment, true, nextPrompts))
+                                  }}
+                                  placeholder={'多镜头分镜提示词（每行一个）\n分镜 1 prompt\n分镜 2 prompt\n分镜 3 prompt'}
+                                />
+                              ) : (
+                                <TextArea
+                                  rows={6}
+                                  value={segment.video_prompt}
+                                  onChange={(event) => handleSegmentChange(index, { video_prompt: event.target.value })}
+                                  placeholder="视频画面描述"
+                                />
+                              )}
+                            </Space>
+                          </Card>
+                        )
+                      })()}
                       <Row gutter={[12, 12]}>
                         <Col xs={24} md={12}>
                           <TextArea
@@ -2447,8 +2692,13 @@ export const ScriptPipelinePage: React.FC = () => {
               >
                 审核当前片段
               </Button>
-              <Button type="primary" icon={<FileImageOutlined />} loading={keyframeLoading} onClick={handleGenerateKeyframes}>
-                通过片段并生成首尾帧
+              <Button
+                type="primary"
+                icon={<FileImageOutlined />}
+                loading={keyframeLoading}
+                onClick={() => void handleGenerateKeyframes()}
+              >
+                {isLongShotWorkflow ? '通过片段并生成首尾帧' : '通过片段并生成首帧预览'}
               </Button>
             </Space>
           </div>
@@ -2457,8 +2707,228 @@ export const ScriptPipelinePage: React.FC = () => {
     }
 
     if (currentStep === 3) {
+      if (!isLongShotWorkflow) {
+        const previewKeyframes = keyframes.filter((bundle) => Boolean(bundle.start_frame.asset_url))
+        const isFullKeyframeGenerationLoading = keyframeLoading && keyframeRegeneratingSegmentNumber === null
+        return (
+          <Space direction="vertical" size={20} style={{ width: '100%' }}>
+            <Alert
+              type="info"
+              showIcon
+              message="标准视频流程会为每个片段生成首帧预览"
+              description="这些图片用于帮助你快速理解每段视频的开场画面和内容重点，不参与跨段串联，也不会要求生成尾帧。"
+            />
+
+            <Card title="片段首帧预览">
+              {isFullKeyframeGenerationLoading ? (
+                <div style={{ padding: '72px 0', textAlign: 'center' }}>
+                  <Spin size="large" />
+                  <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>正在生成每个片段的首帧预览</Paragraph>
+                </div>
+              ) : previewKeyframes.length ? (
+                <Space direction="vertical" size={20} style={{ width: '100%' }}>
+                  {previewKeyframes.map((bundle) => (
+                    <Card
+                      key={`preview-${bundle.segment_number}`}
+                      type="inner"
+                      title={
+                        <Space wrap>
+                          <Tag color="processing">片段 {bundle.segment_number}</Tag>
+                          <Text>{bundle.title}</Text>
+                          <Tag color="success">首帧预览</Tag>
+                        </Space>
+                      }
+                      extra={
+                        <Button
+                          size="small"
+                          loading={keyframeRegeneratingSegmentNumber === bundle.segment_number}
+                          disabled={keyframeLoading && keyframeRegeneratingSegmentNumber !== bundle.segment_number}
+                          onClick={() => void handleGenerateKeyframes(bundle.segment_number)}
+                        >
+                          重新生成这一段
+                        </Button>
+                      }
+                    >
+                      <Row gutter={[20, 20]}>
+                        <Col xs={24} lg={13}>
+                          <Text strong>片段开场预览</Text>
+                          <div style={{ marginTop: 12 }}>
+                            <PreviewAsset
+                              assetUrl={bundle.start_frame.asset_url}
+                              thumbnailUrl={bundle.start_frame.thumbnail_url}
+                              assetType={bundle.start_frame.asset_type}
+                              title={`${bundle.title} 首帧预览`}
+                            />
+                          </div>
+                        </Col>
+                        <Col xs={24} lg={11}>
+                          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                            <Alert
+                              type="success"
+                              showIcon
+                              message="这张图用于帮助你确认该片段的视觉重点"
+                              description={bundle.continuity_notes}
+                            />
+                            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                              {bundle.start_frame.prompt || '未提供提示词'}
+                            </Paragraph>
+                            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                              来源: {bundle.start_frame.source || 'unknown'}
+                              {bundle.start_frame.notes ? ` | ${bundle.start_frame.notes}` : ''}
+                            </Paragraph>
+                          </Space>
+                        </Col>
+                      </Row>
+                    </Card>
+                  ))}
+                </Space>
+              ) : (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先生成首帧预览" />
+              )}
+            </Card>
+
+            <Card title="渲染参数">
+              <Row gutter={[16, 16]}>
+                <Col xs={24} md={8}>
+                  <Text>视频引擎</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={provider}
+                    onChange={setProvider}
+                    options={[
+                      { value: 'auto', label: '自动选择（可灵优先）' },
+                      { value: 'kling', label: '可灵 Kling' },
+                      { value: 'doubao', label: '豆包 Seedance' },
+                      { value: 'local', label: '本地快速预览' },
+                    ]}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <Text>输出分辨率</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={resolution}
+                    onChange={setResolution}
+                    options={[
+                      { value: '480p', label: '480p' },
+                      { value: '720p', label: '720p' },
+                      { value: '1080p', label: '1080p' },
+                    ]}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <Text>画幅比例</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={aspectRatio}
+                    onChange={setAspectRatio}
+                    options={[
+                      { value: '16:9', label: '16:9' },
+                      { value: '9:16', label: '9:16' },
+                      { value: '1:1', label: '1:1' },
+                      { value: '4:3', label: '4:3' },
+                    ]}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <Text>模型 ID</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={providerModel}
+                    onChange={setProviderModel}
+                    options={[
+                      { value: 'kling-video-o1', label: 'Kling Video O1' },
+                      { value: 'kling-v3-omni', label: 'Kling 3 Omni' },
+                      { value: 'doubao-seedance-1-5-pro-251215', label: 'Seedance 1.5 Pro' },
+                      { value: 'doubao-seedance-1-5-lite-241115', label: 'Seedance 1.5 Lite' },
+                      { value: 'doubao-seedance-1-0-lite-i2v-250428', label: 'Seedance 1.0 Lite I2V' },
+                    ]}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <Text>服务等级</Text>
+                  <Select
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={serviceTier}
+                    onChange={setServiceTier}
+                    options={[
+                      { value: 'default', label: 'default' },
+                      { value: 'flex', label: 'flex' },
+                    ]}
+                  />
+                </Col>
+                <Col xs={24} md={8}>
+                  <Text>随机种子</Text>
+                  <InputNumber
+                    style={{ width: '100%', marginTop: 8 }}
+                    value={seedInput}
+                    onChange={(value) => setSeedInput(value === null ? null : Number(value))}
+                    placeholder="留空则随机"
+                  />
+                </Col>
+                <Col xs={24}>
+                  <Space wrap size="large">
+                    <Space>
+                      <Switch checked={watermark} onChange={setWatermark} />
+                      <Text>水印</Text>
+                    </Space>
+                    <Space>
+                      <Switch checked={cameraFixed} onChange={setCameraFixed} />
+                      <Text>固定镜头</Text>
+                    </Space>
+                    <Space>
+                      <Switch checked={generateAudio} onChange={setGenerateAudio} />
+                      <Text>视频模型音频</Text>
+                    </Space>
+                  </Space>
+                  <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                    开启后优先使用视频模型自带的音频能力；关闭后仅生成纯视频画面。
+                  </Paragraph>
+                </Col>
+              </Row>
+            </Card>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+              <Button onClick={() => setCurrentStep(2)}>返回片段</Button>
+              <Space wrap>
+                <Button loading={keyframeLoading} disabled={!segments.length} onClick={() => void handleGenerateKeyframes()}>
+                  重新生成首帧预览
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<VideoCameraOutlined />}
+                  loading={renderStarting || renderActionLoading}
+                  disabled={Boolean(renderStatus && ['queued', 'dispatching', 'processing'].includes(renderStatus.status))}
+                  onClick={() => void handleStartRender(false)}
+                >
+                  {canResumeRender && awaitingClipConfirmation
+                    ? '继续生成下一段'
+                    : hasExistingRenderTask && hasCompletedRenderClips
+                      ? '继续当前生成任务'
+                      : '生成第一段视频'}
+                </Button>
+                <Button
+                  loading={renderStarting || renderActionLoading}
+                  disabled={
+                    !segments.length || Boolean(renderStatus && ['queued', 'dispatching', 'processing'].includes(renderStatus.status))
+                  }
+                  onClick={() => void handleStartRender(true)}
+                >
+                  {canResumeRender && awaitingClipConfirmation
+                    ? '一键全部生成剩余片段'
+                    : hasExistingRenderTask && hasCompletedRenderClips
+                      ? '继续生成剩余片段'
+                      : '一键全部生成'}
+                </Button>
+              </Space>
+            </div>
+          </Space>
+        )
+      }
+
       const generatedKeyframes = keyframes.filter((bundle) => Boolean(bundle.start_frame.asset_url))
       const chainedKeyframes = keyframes.filter((bundle) => !bundle.start_frame.asset_url)
+      const isFullKeyframeGenerationLoading = keyframeLoading && keyframeRegeneratingSegmentNumber === null
 
       return (
         <Space direction="vertical" size={20} style={{ width: '100%' }}>
@@ -2468,7 +2938,7 @@ export const ScriptPipelinePage: React.FC = () => {
             message="系统会按分段规则预生成必要的首帧；其余片段首帧会在渲染时自动复用上一段返回的尾帧。"
           />
           <Card title="首帧与串联方式确认">
-            {keyframeLoading ? (
+            {isFullKeyframeGenerationLoading ? (
               <div style={{ padding: '72px 0', textAlign: 'center' }}>
                 <Spin size="large" />
                 <Paragraph style={{ marginTop: 16, marginBottom: 0 }}>正在生成预设首帧</Paragraph>
@@ -2485,6 +2955,16 @@ export const ScriptPipelinePage: React.FC = () => {
                         <Text>{bundle.title}</Text>
                         <Tag color="success">{index === 0 ? '预生成首帧' : '额外首帧锚点'}</Tag>
                       </Space>
+                    }
+                    extra={
+                      <Button
+                        size="small"
+                        loading={keyframeRegeneratingSegmentNumber === bundle.segment_number}
+                        disabled={keyframeLoading && keyframeRegeneratingSegmentNumber !== bundle.segment_number}
+                        onClick={() => void handleGenerateKeyframes(bundle.segment_number)}
+                      >
+                        重新生成这一段
+                      </Button>
                     }
                   >
                     <Row gutter={[20, 20]}>
@@ -2528,6 +3008,16 @@ export const ScriptPipelinePage: React.FC = () => {
                           key={`chain-${bundle.segment_number}`}
                           size="small"
                           className="pipeline-chain-card"
+                          extra={
+                            <Button
+                              size="small"
+                              loading={keyframeRegeneratingSegmentNumber === bundle.segment_number}
+                              disabled={keyframeLoading && keyframeRegeneratingSegmentNumber !== bundle.segment_number}
+                              onClick={() => void handleGenerateKeyframes(bundle.segment_number)}
+                            >
+                              为这一段生成首帧
+                            </Button>
+                          }
                         >
                           <Space direction="vertical" size={6} style={{ width: '100%' }}>
                             <Space wrap>
@@ -2596,12 +3086,14 @@ export const ScriptPipelinePage: React.FC = () => {
                 />
               </Col>
               <Col xs={24} md={8}>
-                <Text>模型 ID（仅豆包时生效）</Text>
+                <Text>模型 ID</Text>
                 <Select
                   style={{ width: '100%', marginTop: 8 }}
                   value={providerModel}
                   onChange={setProviderModel}
                   options={[
+                    { value: 'kling-video-o1', label: 'Kling Video O1' },
+                    { value: 'kling-v3-omni', label: 'Kling 3 Omni' },
                     { value: 'doubao-seedance-1-5-pro-251215', label: 'Seedance 1.5 Pro' },
                     { value: 'doubao-seedance-1-5-lite-241115', label: 'Seedance 1.5 Lite' },
                     { value: 'doubao-seedance-1-0-lite-i2v-250428', label: 'Seedance 1.0 Lite I2V' },
@@ -2658,7 +3150,7 @@ export const ScriptPipelinePage: React.FC = () => {
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
             <Button onClick={() => setCurrentStep(2)}>返回片段</Button>
             <Space wrap>
-              <Button loading={keyframeLoading} disabled={!segments.length} onClick={handleGenerateKeyframes}>
+              <Button loading={keyframeLoading} disabled={!segments.length} onClick={() => void handleGenerateKeyframes()}>
                 重新生成首帧
               </Button>
               <Button
@@ -2723,7 +3215,7 @@ export const ScriptPipelinePage: React.FC = () => {
                     type="warning"
                     showIcon
                     message="本次任务已自动调整生成方式。"
-                    description={(renderStatus.warnings || []).join('；') || '请检查渲染设置、账号权限和关键帧输入。'}
+                    description={(renderStatus.warnings || []).join('；') || '请检查渲染设置、账号权限和片段输入。'}
                   />
                 ) : null}
                 {renderStatus.status === 'failed' && renderStatus.error ? (
@@ -3031,11 +3523,12 @@ export const ScriptPipelinePage: React.FC = () => {
   }
 
   const projectStats = [
+    { label: '流程', value: workflowMode === WORKFLOW_MODE_LONG_SHOT ? '长镜头' : '标准' },
     { label: '已选角色', value: selectedCharacterIds.length },
     { label: '已选场景', value: selectedSceneIds.length },
     { label: '参考图', value: referenceImages.length },
     { label: '片段数', value: segments.length },
-    { label: '关键帧组', value: keyframes.length },
+    { label: '关键帧组', value: isLongShotWorkflow ? keyframes.length : '-' },
   ]
 
   return (
@@ -3054,10 +3547,13 @@ export const ScriptPipelinePage: React.FC = () => {
               视频生成主流程
             </Title>
             <Paragraph style={{ color: 'rgba(255,255,255,0.82)', fontSize: 15, marginBottom: 0 }}>
-              当前页面只保留单条可执行主链。每次只处理一个步骤，减少来回滚动和跨步骤干扰。
+              默认使用标准视频流程；如果你需要首尾帧串联，可以切换到「长镜头视频」作为可选项。
             </Paragraph>
             <Space wrap style={{ marginTop: 16 }}>
               <Tag color="gold">项目：{projectTitle || '未命名项目'}</Tag>
+              <Tag color={isLongShotWorkflow ? 'purple' : 'cyan'}>
+                流程：{isLongShotWorkflow ? '长镜头视频' : '标准视频'}
+              </Tag>
               <Tag color="blue">{selectedProjectId ? `ID: ${selectedProjectId}` : '尚未持久化，编辑后会自动创建草稿'}</Tag>
             </Space>
           </Col>
@@ -3113,7 +3609,9 @@ export const ScriptPipelinePage: React.FC = () => {
               <Text type="secondary">
                 {characterConfirmMode === 'generate_script'
                   ? '勾选后会参与本次剧本生成'
-                  : '勾选后会参与后续分段、关键帧和视频生成'}
+                  : isLongShotWorkflow
+                    ? '勾选后会参与后续分段、关键帧和视频生成'
+                    : '勾选后会参与后续分段和视频生成'}
               </Text>
             }
           >
@@ -3149,7 +3647,13 @@ export const ScriptPipelinePage: React.FC = () => {
           <Card
             size="small"
             title={`自动生成角色建议 (${characterPrepareResult?.temporary_character_profiles?.length || 0})`}
-            extra={<Text type="secondary">仅用于本次创作；生成视频后可按首帧造型保存到角色库</Text>}
+            extra={
+              <Text type="secondary">
+                {isLongShotWorkflow
+                  ? '仅用于本次创作；生成视频后可按首帧造型保存到角色库'
+                  : '仅用于本次创作；标准流程默认不生成角色首帧锚点'}
+              </Text>
+            }
           >
             {characterPrepareResult?.temporary_character_profiles?.length ? (
               <Checkbox.Group
@@ -3187,7 +3691,9 @@ export const ScriptPipelinePage: React.FC = () => {
             description={
               characterConfirmMode === 'generate_script'
                 ? '你勾选的已保存角色和角色建议会一起进入本次剧本生成。未勾选的角色不会参与生成。'
-                : '你勾选的已保存角色和角色建议会进入后续分段、关键帧和视频生成。未勾选的角色不会参与后续流程。'
+                : isLongShotWorkflow
+                  ? '你勾选的已保存角色和角色建议会进入后续分段、关键帧和视频生成。未勾选的角色不会参与后续流程。'
+                  : '你勾选的已保存角色和角色建议会进入后续分段和视频生成。未勾选的角色不会参与后续流程。'
             }
           />
         </Space>

@@ -18,6 +18,7 @@ def test_split_request_matches_state_when_script_and_params_match() -> None:
         script_text="镜头 1\n镜头 2",
         max_segment_duration=10.0,
         target_total_duration=42.0,
+        workflow_mode="standard",
     )
 
 
@@ -33,18 +34,21 @@ def test_split_request_matches_state_returns_false_when_params_differ() -> None:
         script_text="镜头 1\n镜头 2\n镜头 3",
         max_segment_duration=10.0,
         target_total_duration=42.0,
+        workflow_mode="standard",
     )
     assert not _split_request_matches_state(
         state,
         script_text="镜头 1\n镜头 2",
         max_segment_duration=8.0,
         target_total_duration=42.0,
+        workflow_mode="standard",
     )
     assert not _split_request_matches_state(
         state,
         script_text="镜头 1\n镜头 2",
         max_segment_duration=10.0,
         target_total_duration=40.0,
+        workflow_mode="standard",
     )
 
 
@@ -89,6 +93,7 @@ def test_split_review_request_matches_state_when_segments_and_report_match() -> 
         max_segment_duration=10.0,
         target_total_duration=42.0,
         segments=[{"segment_number": 1, "title": "片段 1", "duration": 4.0}],
+        workflow_mode="standard",
     )
 
 

@@ -67,6 +67,8 @@ export interface AuthResponse {
   user: AuthUser
 }
 
+export type WorkflowMode = 'standard' | 'long_shot'
+
 export interface MeResponse {
   success: boolean
   user: AuthUser
@@ -129,6 +131,9 @@ export interface CharacterProfile {
   common_actions: string
   emotion_baseline: string
   voice_description: string
+  kling_subject_id?: string
+  kling_subject_name?: string
+  kling_subject_status?: string
   forbidden_behaviors: string
   prompt_hint: string
   llm_summary: string
@@ -383,6 +388,27 @@ export interface CharacterMutationResponse extends CharacterProfile {
   message: string
 }
 
+export interface KlingEntityRecord {
+  [key: string]: unknown
+}
+
+export interface KlingCollectionResponse {
+  items?: KlingEntityRecord[]
+  total?: number
+  page_num?: number
+  page_size?: number
+  [key: string]: unknown
+}
+
+export interface KlingVideoTaskResponse {
+  task_id: string
+  status: string
+  video_url?: string
+  cover_url?: string
+  error_message?: string
+  raw_payload?: Record<string, unknown>
+}
+
 export interface SceneListResponse {
   success: boolean
   items: SceneProfile[]
@@ -620,6 +646,7 @@ export interface RenderStatusResponse {
     auto_continue_segments?: boolean
     service_tier?: string
     seed?: number | null
+    workflow_mode?: WorkflowMode
   }
   error: string
   created_at: string
@@ -791,6 +818,14 @@ export const scriptPipelineApi = {
       auto_generate_identity_assets?: boolean
     },
   ) => apiClient.put<CharacterMutationResponse>(`/pipeline/characters/${characterId}`, data),
+  bindCharacterSubject: (
+    characterId: string,
+    data: {
+      kling_subject_id: string
+      kling_subject_name?: string
+      kling_subject_status?: string
+    },
+  ) => apiClient.post<CharacterMutationResponse>(`/pipeline/characters/${characterId}/bind-subject`, data),
 
   uploadSceneReference: async (file: File) => {
     const formData = new FormData()
@@ -929,6 +964,7 @@ export const scriptPipelineApi = {
     user_input: string
     style?: string
     target_total_duration?: number
+    workflow_mode?: WorkflowMode
     selected_character_ids?: string[]
     selected_scene_ids?: string[]
     character_profiles?: CharacterProfile[]
@@ -951,6 +987,7 @@ export const scriptPipelineApi = {
     script_text: string
     max_segment_duration?: number
     target_total_duration?: number
+    workflow_mode?: WorkflowMode
   }) => apiClient.post<SplitScriptResponse>('/pipeline/split-script', data),
 
   reviewSplitScript: (data: {
@@ -959,6 +996,7 @@ export const scriptPipelineApi = {
     max_segment_duration?: number
     target_total_duration?: number
     segments: SegmentItem[]
+    workflow_mode?: WorkflowMode
   }) => apiClient.post<SplitScriptResponse>('/pipeline/review-split-script', data),
 
   generateKeyframes: (data: {
@@ -971,6 +1009,9 @@ export const scriptPipelineApi = {
     scene_profiles?: SceneProfile[]
     reference_images?: ReferenceImageAsset[]
     segments: SegmentItem[]
+    existing_keyframes?: SegmentKeyframes[]
+    target_segment_number?: number
+    workflow_mode?: WorkflowMode
   }) => apiClient.post<GenerateKeyframesResponse>('/pipeline/generate-keyframes', data),
 
   renderProject: (data: {
@@ -987,6 +1028,7 @@ export const scriptPipelineApi = {
     auto_continue_segments?: boolean
     service_tier?: string
     seed?: number
+    workflow_mode?: WorkflowMode
     selected_character_ids?: string[]
     selected_scene_ids?: string[]
     character_profiles?: CharacterProfile[]
@@ -1005,6 +1047,62 @@ export const scriptPipelineApi = {
   retryRenderTask: (taskId: string) => apiClient.post<RenderStartResponse>(`/pipeline/render/${taskId}/retry`),
 
   healthCheck: () => apiClient.get('/pipeline/health'),
+}
+
+export const klingApi = {
+  createOmniVideo: (data: {
+    model_name?: 'kling-video-o1' | 'kling-v3-omni'
+    multi_shot?: boolean
+    shot_type?: 'customize' | 'intelligence'
+    prompt?: string
+    multi_prompt?: Array<{ index: number; prompt: string; duration: number | string }>
+    image_list?: Array<{ image_url: string; type?: 'first_frame' | 'end_frame' }>
+    element_list?: Array<{ element_id: number }>
+    video_list?: Array<{ video_url: string; refer_type?: 'feature' | 'base'; keep_original_sound?: 'yes' | 'no' }>
+    sound?: 'on' | 'off'
+    mode?: 'std' | 'pro'
+    aspect_ratio?: '16:9' | '9:16' | '1:1'
+    duration?: number | string
+    watermark_info?: { enabled: boolean }
+    callback_url?: string
+    external_task_id?: string
+    extra_body?: Record<string, unknown>
+  }) => apiClient.post<KlingVideoTaskResponse>('/kling/videos/omni-video', data),
+  getOmniVideo: (taskId: string) => apiClient.get<KlingVideoTaskResponse>(`/kling/videos/omni-video/${taskId}`),
+  listSubjects: (params?: {
+    page_num?: number
+    page_size?: number
+    name?: string
+    status?: string
+  }) => apiClient.get<KlingCollectionResponse>('/kling/subjects', { params }),
+  getSubject: (subjectId: string) => apiClient.get<KlingEntityRecord>(`/kling/subjects/${subjectId}`),
+  createSubject: (data: {
+    name: string
+    image: string
+    extra_body?: Record<string, unknown>
+  }) => apiClient.post<KlingEntityRecord>('/kling/subjects', data),
+  deleteSubject: (subjectId: string) => apiClient.delete<KlingEntityRecord>(`/kling/subjects/${subjectId}`),
+  listCustomVoices: (params?: {
+    page_num?: number
+    page_size?: number
+    name?: string
+    status?: string
+  }) => apiClient.get<KlingCollectionResponse>('/kling/voices', { params }),
+  getCustomVoice: (voiceId: string) => apiClient.get<KlingEntityRecord>(`/kling/voices/${voiceId}`),
+  createCustomVoice: (data: {
+    name?: string
+    voice_name?: string
+    audio_file?: string
+    text?: string
+    prompt_text?: string
+    extra_body?: Record<string, unknown>
+  }) => apiClient.post<KlingEntityRecord>('/kling/voices', data),
+  deleteCustomVoice: (voiceId: string) => apiClient.delete<KlingEntityRecord>(`/kling/voices/${voiceId}`),
+  listPresetVoices: (params?: {
+    page_num?: number
+    page_size?: number
+    language?: string
+  }) => apiClient.get<KlingCollectionResponse>('/kling/voices/presets', { params }),
 }
 
 export const resolveAssetUrl = (assetUrl?: string) => {

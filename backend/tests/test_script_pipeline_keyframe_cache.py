@@ -9,6 +9,7 @@ def test_keyframe_request_matches_state_when_signature_matches() -> None:
             selected_scene_ids=["scene-a"],
             segments=[{"segment_number": 1, "title": "片段 1"}],
             reference_images=[{"id": "ref-1", "url": "/uploads/ref-1.png"}],
+            workflow_mode="long_shot",
         )
     }
 
@@ -19,6 +20,7 @@ def test_keyframe_request_matches_state_when_signature_matches() -> None:
         selected_scene_ids=["scene-a"],
         segments=[{"segment_number": 1, "title": "片段 1"}],
         reference_images=[{"id": "ref-1", "url": "/uploads/ref-1.png"}],
+        workflow_mode="long_shot",
     )
 
 
@@ -30,6 +32,7 @@ def test_keyframe_request_matches_state_returns_false_when_request_differs() -> 
             selected_scene_ids=["scene-a"],
             segments=[{"segment_number": 1, "title": "片段 1"}],
             reference_images=[{"id": "ref-1", "url": "/uploads/ref-1.png"}],
+            workflow_mode="long_shot",
         )
     }
 
@@ -40,6 +43,7 @@ def test_keyframe_request_matches_state_returns_false_when_request_differs() -> 
         selected_scene_ids=["scene-a"],
         segments=[{"segment_number": 1, "title": "片段 1"}],
         reference_images=[{"id": "ref-1", "url": "/uploads/ref-1.png"}],
+        workflow_mode="long_shot",
     )
     assert not _keyframe_request_matches_state(
         state,
@@ -48,6 +52,7 @@ def test_keyframe_request_matches_state_returns_false_when_request_differs() -> 
         selected_scene_ids=["scene-a"],
         segments=[{"segment_number": 1, "title": "片段 1"}],
         reference_images=[{"id": "ref-1", "url": "/uploads/ref-1.png"}],
+        workflow_mode="long_shot",
     )
     assert not _keyframe_request_matches_state(
         state,
@@ -56,6 +61,7 @@ def test_keyframe_request_matches_state_returns_false_when_request_differs() -> 
         selected_scene_ids=["scene-a"],
         segments=[{"segment_number": 2, "title": "片段 2"}],
         reference_images=[{"id": "ref-1", "url": "/uploads/ref-1.png"}],
+        workflow_mode="long_shot",
     )
 
 

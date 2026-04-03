@@ -31,7 +31,16 @@ from app.services.doubao_llm import DoubaoLLM, DoubaoMessage
 
 logger = logging.getLogger(__name__)
 
-MAX_VIDEO_SEGMENT_DURATION = 10.0
+STANDARD_WORKFLOW_MODE = "standard"
+LONG_SHOT_WORKFLOW_MODE = "long_shot"
+MAX_VIDEO_SEGMENT_DURATION = 15.0
+
+
+def normalize_workflow_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"long_shot", "long-shot", "longshot"}:
+        return LONG_SHOT_WORKFLOW_MODE
+    return STANDARD_WORKFLOW_MODE
 
 
 @dataclass
@@ -94,6 +103,7 @@ class SplitConfig:
     prefer_scene_boundary: bool = True    # 优先在场景边界处拆分
     preserve_dialogue: bool = True        # 保持对话完整性
     smooth_transition: bool = True        # 启用平滑过渡
+    workflow_mode: str = STANDARD_WORKFLOW_MODE
 
 
 @dataclass
@@ -180,7 +190,11 @@ class ScriptSplitter:
     def __init__(self, config: Optional[SplitConfig] = None):
         self.config = config or SplitConfig()
         self.config.max_segment_duration = min(float(self.config.max_segment_duration), MAX_VIDEO_SEGMENT_DURATION)
+        self.config.workflow_mode = normalize_workflow_mode(self.config.workflow_mode)
         self.llm = DoubaoLLM()
+
+    def uses_long_shot_workflow(self) -> bool:
+        return self.config.workflow_mode == LONG_SHOT_WORKFLOW_MODE
     
     async def split_script(
         self,
@@ -229,11 +243,12 @@ class ScriptSplitter:
             parsed_shots=analysis.get("parsed_shots", []) or [],
             target_duration=effective_target_duration,
         )
-        split_points = self._optimize_split_points_for_first_frame_character_stability(
-            split_points=split_points,
-            parsed_shots=analysis.get("parsed_shots", []) or [],
-            target_duration=effective_target_duration,
-        )
+        if self.uses_long_shot_workflow():
+            split_points = self._optimize_split_points_for_first_frame_character_stability(
+                split_points=split_points,
+                parsed_shots=analysis.get("parsed_shots", []) or [],
+                target_duration=effective_target_duration,
+            )
         
         # 步骤3: 生成分段
         logger.info("步骤3: 生成视频片段...")
@@ -939,6 +954,117 @@ class ScriptSplitter:
             for dialogue in dialogues
             if str(dialogue.text or "").strip()
         ]
+
+    def _split_multi_shot_units(self, value: str) -> List[str]:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return []
+        pieces = re.split(r"(?:\s*(?:->|→|\|)\s*|[；;。]\s*|\n+)", normalized)
+        results: List[str] = []
+        for piece in pieces:
+            item = str(piece or "").strip(" -:：，,.;；。")
+            if item:
+                results.append(item)
+        return results
+
+    def _normalize_kling_multi_prompt_items(self, raw_items: Any) -> List[str]:
+        if not isinstance(raw_items, list):
+            return []
+
+        prompts: List[str] = []
+        for item in raw_items:
+            if isinstance(item, dict):
+                normalized = str(item.get("prompt") or "").strip()
+            else:
+                normalized = str(item or "").strip()
+            if normalized:
+                prompts.append(normalized)
+            if len(prompts) >= 6:
+                break
+        return prompts
+
+    def _build_default_kling_multi_prompt(
+        self,
+        *,
+        point: Dict[str, Any],
+        segment_shots: List[ParsedShot],
+    ) -> List[str]:
+        prompt_focus = str(point.get("prompt_focus") or "").strip()
+        selected_shots = segment_shots[: 2 if float(point.get("duration") or 0.0) < 8.0 else 3]
+        prompts: List[str] = []
+
+        for shot in selected_shots:
+            parts: List[str] = []
+            if prompt_focus:
+                parts.append(prompt_focus)
+            if shot.characters_in_shot:
+                parts.append("主体：" + "、".join(shot.characters_in_shot[:3]))
+            if shot.description:
+                parts.append(shot.description)
+            if shot.actions:
+                parts.append("动作：" + "；".join(shot.actions[:2]))
+            camera_parts = [item for item in [shot.shot_type, shot.camera_angle, shot.camera_movement] if item]
+            if camera_parts:
+                parts.append("镜头：" + " / ".join(camera_parts))
+            prompt = "。".join(part.strip() for part in parts if part.strip())
+            if prompt:
+                prompts.append(prompt)
+
+        return prompts
+
+    def _build_display_video_prompt_from_multi_prompt(self, prompts: List[str]) -> str:
+        normalized = [str(item or "").strip() for item in prompts if str(item or "").strip()]
+        if not normalized:
+            return ""
+        return "；".join(normalized[:3])
+
+    def _merge_kling_multi_shot_config(
+        self,
+        *,
+        config: Dict[str, Any],
+        point: Dict[str, Any],
+        segment_shots: List[ParsedShot],
+        source: str,
+    ) -> Dict[str, Any]:
+        merged = dict(config or {})
+        explicit_enabled = merged.get("kling_multi_shot_enabled")
+        explicit_prompts = self._normalize_kling_multi_prompt_items(merged.get("kling_multi_prompt"))
+        explicit_reason = str(merged.get("kling_multi_shot_reason") or "").strip()
+        explicit_shot_type = str(merged.get("kling_shot_type") or "").strip() or "customize"
+
+        if isinstance(explicit_enabled, bool):
+            merged["kling_multi_shot_enabled"] = explicit_enabled
+            merged["kling_multi_shot_source"] = str(merged.get("kling_multi_shot_source") or source).strip() or source
+            if explicit_enabled:
+                if explicit_prompts:
+                    merged["kling_shot_type"] = explicit_shot_type
+                    merged["kling_multi_prompt"] = explicit_prompts
+                    merged["kling_multi_shot_reason"] = explicit_reason or "LLM 判定当前片段使用多镜头表现更优"
+                else:
+                    merged["kling_multi_shot_enabled"] = False
+                    merged.pop("kling_shot_type", None)
+                    merged.pop("kling_multi_prompt", None)
+                    merged["kling_multi_shot_reason"] = explicit_reason or "未提供 multi_prompt，默认按单镜头模式处理"
+            else:
+                merged.pop("kling_shot_type", None)
+                merged.pop("kling_multi_prompt", None)
+                merged["kling_multi_shot_reason"] = explicit_reason or "LLM 判定当前片段保持单镜头更稳定"
+            return merged
+
+        if explicit_prompts:
+            merged["kling_multi_shot_enabled"] = True
+            merged["kling_shot_type"] = explicit_shot_type
+            merged["kling_multi_prompt"] = explicit_prompts
+            merged["kling_multi_shot_reason"] = explicit_reason or "已提供 multi_prompt，按多镜头模式处理"
+            merged["kling_multi_shot_source"] = str(merged.get("kling_multi_shot_source") or source).strip() or source
+            return merged
+
+        merged["kling_multi_shot_enabled"] = False
+        merged.pop("kling_shot_type", None)
+        merged.pop("kling_multi_prompt", None)
+        merged["kling_multi_shot_reason"] = explicit_reason or "默认按单镜头模式处理"
+        merged["kling_multi_shot_source"] = str(merged.get("kling_multi_shot_source") or source).strip() or source
+        return merged
     
     async def _generate_video_prompt(
         self, 
@@ -1475,12 +1601,16 @@ class ScriptSplitter:
             segment.ending_contains_primary_character = ending_contains_primary
             segment.new_character_profile_ids = new_character_ids
             segment.late_entry_character_profile_ids = late_entry_character_ids
-            segment.pre_generate_start_frame = index == 0
-            segment.start_frame_generation_reason = "opening_segment" if index == 0 else ""
-            segment.prefer_primary_character_end_frame = index < len(segments) - 1 and contains_primary
-            if index > 0 and set(new_character_ids).intersection(set(first_shot_character_ids)):
-                segment.pre_generate_start_frame = True
-                segment.start_frame_generation_reason = "new_character_entry"
+            segment.pre_generate_start_frame = False
+            segment.start_frame_generation_reason = ""
+            segment.prefer_primary_character_end_frame = False
+            if self.uses_long_shot_workflow():
+                segment.pre_generate_start_frame = index == 0
+                segment.start_frame_generation_reason = "opening_segment" if index == 0 else ""
+                segment.prefer_primary_character_end_frame = index < len(segments) - 1 and contains_primary
+                if index > 0 and set(new_character_ids).intersection(set(first_shot_character_ids)):
+                    segment.pre_generate_start_frame = True
+                    segment.start_frame_generation_reason = "new_character_entry"
 
             seen_character_ids.update(character_ids)
             segment_character_ids.append(character_ids)
@@ -1495,12 +1625,15 @@ class ScriptSplitter:
             next_character_ids = segment_character_ids[index + 1]
             handoff_character_ids = [profile_id for profile_id in segment_character_ids[index] if profile_id in next_character_ids]
             segment.handoff_character_profile_ids = handoff_character_ids
-            segment.prefer_character_handoff_end_frame = bool(handoff_character_ids)
-            segment.ending_contains_handoff_characters = bool(
-                set(handoff_character_ids).intersection(set(segment_ending_character_ids[index]))
-            )
-            if segment.prefer_character_handoff_end_frame:
-                segment.prefer_primary_character_end_frame = True
+            segment.prefer_character_handoff_end_frame = False
+            segment.ending_contains_handoff_characters = False
+            if self.uses_long_shot_workflow():
+                segment.prefer_character_handoff_end_frame = bool(handoff_character_ids)
+                segment.ending_contains_handoff_characters = bool(
+                    set(handoff_character_ids).intersection(set(segment_ending_character_ids[index]))
+                )
+                if segment.prefer_character_handoff_end_frame:
+                    segment.prefer_primary_character_end_frame = True
 
         return segments
 
@@ -1654,7 +1787,7 @@ class ScriptSplitter:
             if first and any([first.scene_title, locations, lighting, atmosphere])
             else "",
             f"出场主体：{'、'.join(characters)}。" if characters else "",
-            f"首帧画面：{opening_clause}。" if opening_clause else "",
+            f"{'首帧画面' if self.uses_long_shot_workflow() else '开场画面'}：{opening_clause}。" if opening_clause else "",
             f"动作推进：{action_progression}。" if action_progression else "",
             f"镜头设计：{camera_clause}。" if camera_clause else "",
             f"视觉重点：{prompt_focus}。" if prompt_focus else "",
@@ -1671,9 +1804,9 @@ class ScriptSplitter:
             prompt_sentences.append("开头要自然承接上一段的动作和情绪，不要重新起势或突然换位。")
         if has_next:
             prompt_sentences.append("结尾要留出清晰可延续的动作、视线或人物在位状态，方便下一段无缝接续。")
-        if point.get("prefer_character_handoff_end_frame"):
+        if self.uses_long_shot_workflow() and point.get("prefer_character_handoff_end_frame"):
             prompt_sentences.append("结尾保持下一段仍会继续出现的角色清楚留在画面内，作为交接尾帧。")
-        elif point.get("prefer_primary_character_end_frame"):
+        elif self.uses_long_shot_workflow() and point.get("prefer_primary_character_end_frame"):
             prompt_sentences.append("结尾保持主角色清楚留在画面内，作为下一段承接尾帧。")
         if ending_clause:
             prompt_sentences.append(f"结尾画面：{ending_clause}。")
@@ -1686,12 +1819,17 @@ class ScriptSplitter:
                 "卡通化, 二次元, 信息图排版, 分屏, 多宫格, 字幕烧录, 水印, 低清晰度, 模糊, 解剖错误, "
                 "角色漂移, 服装突变, 跳切, 重复动作循环, 镜头逻辑断裂, 空间关系错误"
             ),
-            "config": {
-                "duration": min(point["duration"], self.config.max_segment_duration),
-                "aspect_ratio": "16:9",
-                "style": "cinematic_realistic",
-                "source": "structured-script-splitter",
-            },
+            "config": self._merge_kling_multi_shot_config(
+                config={
+                    "duration": min(point["duration"], self.config.max_segment_duration),
+                    "aspect_ratio": "16:9",
+                    "style": "cinematic_realistic",
+                    "source": "structured-script-splitter",
+                },
+                point=point,
+                segment_shots=segment_shots,
+                source="structured-script-splitter",
+            ),
             "segment_script": segment_script,
         }
 
@@ -1743,6 +1881,18 @@ class ScriptSplitter:
         candidate_boundaries = self._build_candidate_boundaries(parsed_shots, target_duration)
         timeline = self._build_shot_timeline_for_llm(parsed_shots, target_duration)
 
+        workflow_specific_rules = (
+            "9. 任何新角色首次正式登场时，优先从该角色出镜镜头开始新起一段，让该段首帧可以清楚承载角色造型\n"
+            "10. 除最后一个片段外，若下一段继续使用同一批角色，尽量让本段结尾仍保留这些角色在画面内，方便下一段延续角色一致性\n"
+            "11. 尽量不要让首镜头里没有出现的角色在同一段中途入场；如果某角色会在段内首次出镜，优先从该角色出镜镜头开始新起一段\n"
+            "12. 片段 description 和 prompt_focus 必须面向视频模型理解：写清楚首帧主体、动作推进、镜头运动、空间关系、结尾停点，不要写成抽象剧情总结\n"
+            if self.uses_long_shot_workflow()
+            else "9. 任何新角色首次正式登场时，优先从该角色出镜镜头开始新起一段，避免在片段中段突然入场\n"
+            "10. 除最后一个片段外，优先让每段结尾形成自然的动作、情绪或叙事停点，方便后续组装\n"
+            "11. 尽量不要让开场镜头里没有出现的角色在同一段中途入场；如果某角色会在段内首次出镜，优先从该角色出镜镜头开始新起一段\n"
+            "12. 片段 description 和 prompt_focus 必须面向视频模型理解：写清楚开场主体、动作推进、镜头运动、空间关系、结尾停点，不要写成抽象剧情总结\n"
+        )
+
         system_prompt = f"""你是一位专业的视频分段导演。你的任务是把完整剧本拆成多个高质量视频片段，用于逐段生成视频。
 
 拆分规则：
@@ -1752,12 +1902,9 @@ class ScriptSplitter:
 4. 每个片段内部的镜头必须形成一个“单次视频模型可理解、可直接生成”的完整小节奏
 5. 必须只使用候选边界中的时间点作为片段起止时间
 6. 输出每个片段的优化信息：标题、片段描述、关键动作、关键对话、与前后片段衔接说明、该片段视频生成 prompt_focus
-7. 除最后一个片段外，不要把片段平均切短。像 6 秒 + 7 秒 这种拆法不理想，应优先改成接近 10 秒 + 剩余片段时长
-8. 如果总时长有余量，优先让前面的片段更接近 10 秒，最后一个片段再承担剩余的 3-9 秒
-9. 任何新角色首次正式登场时，优先从该角色出镜镜头开始新起一段，让该段首帧可以清楚承载角色造型
-10. 除最后一个片段外，若下一段继续使用同一批角色，尽量让本段结尾仍保留这些角色在画面内，方便下一段延续角色一致性
-11. 尽量不要让首镜头里没有出现的角色在同一段中途入场；如果某角色会在段内首次出镜，优先从该角色出镜镜头开始新起一段
-12. 片段 description 和 prompt_focus 必须面向视频模型理解：写清楚首帧主体、动作推进、镜头运动、空间关系、结尾停点，不要写成抽象剧情总结
+7. 除最后一个片段外，不要把片段平均切短。像 6 秒 + 7 秒 这种拆法不理想，应优先改成接近 {self.config.max_segment_duration:.0f} 秒 + 剩余片段时长
+8. 如果总时长有余量，优先让前面的片段更接近 {self.config.max_segment_duration:.0f} 秒，最后一个片段再承担剩余时长
+{workflow_specific_rules}
 
 输出必须是合法 JSON，格式：
 {{
@@ -2357,6 +2504,23 @@ class ScriptSplitter:
             for segment in segments
         ]
 
+        workflow_specific_checks = (
+            "6. 如果有新角色首次正式登场，审核时要判断该角色是否被单独起段，是否适合额外生成角色锚定首帧\n"
+            "7. 除最后一段外，优先检查每段结尾是否仍保留下一段会继续出现的角色，避免下一段角色漂移\n"
+            "8. 优先检查每一段是否存在“首镜头未出现的角色在段内中途入场”，如有则应建议在该角色首次出镜处切段\n"
+            if self.uses_long_shot_workflow()
+            else "6. 如果有新角色在段内中途首次正式出场，优先检查是否应该从该角色首次出镜处重新起段\n"
+            "7. 除最后一段外，优先检查每段结尾是否已经形成自然的动作、情绪或叙事停点\n"
+            "8. 优先检查每一段是否存在“开场未出现的角色在段内中途突然入场”，如有则应建议在该角色首次出镜处切段\n"
+        )
+        prompt_fit_instruction = (
+            "9. 重点审核每一段的 video_prompt 是否真的适合视频模型：要像单次生成指令，"
+            "能看出首帧、动作推进、镜头语言与结尾承接，而不是结构化摘要或调试字段"
+            if self.uses_long_shot_workflow()
+            else "9. 重点审核每一段的 video_prompt 是否真的适合视频模型：要像单次生成指令，"
+            "能看出开场状态、动作推进、镜头语言与结尾停点，而不是结构化摘要或调试字段"
+        )
+
         system_prompt = f"""你是一位专业的短剧后期总导演，负责审核“剧本拆分成视频片段”的结果是否适合进入视频生成阶段。
 
 审核重点：
@@ -2365,10 +2529,7 @@ class ScriptSplitter:
 3. 多个片段之间要具备剧情连续性、动作衔接性、情绪延续性
 4. 如果给了目标总时长，要判断拆分后的总时长是否合理贴合目标
 5. 输出要指出问题最严重的片段，并给出明确修改建议
-6. 如果有新角色首次正式登场，审核时要判断该角色是否被单独起段，是否适合额外生成角色锚定首帧
-7. 除最后一段外，优先检查每段结尾是否仍保留下一段会继续出现的角色，避免下一段角色漂移
-8. 优先检查每一段是否存在“首镜头未出现的角色在段内中途入场”，如有则应建议在该角色首次出镜处切段
-9. 重点审核每一段的 video_prompt 是否真的适合视频模型：要像单次生成指令，能看出首帧、动作推进、镜头语言与结尾承接，而不是结构化摘要或调试字段
+{workflow_specific_checks}{prompt_fit_instruction}
 
 输出必须是合法 JSON，格式：
 {{
@@ -2482,7 +2643,7 @@ class ScriptSplitter:
                 status = "warning"
                 content_check_status = "warning" if content_check_status == "pass" else content_check_status
                 summary = "片段内容密度偏高，建议压缩剧情或拉长时长。"
-            if segment.prefer_character_handoff_end_frame and not segment.ending_contains_handoff_characters:
+            if self.uses_long_shot_workflow() and segment.prefer_character_handoff_end_frame and not segment.ending_contains_handoff_characters:
                 status = "warning"
                 content_check_status = "warning" if content_check_status == "pass" else content_check_status
                 segment_issues.append("该段结尾镜头未保留下一段仍会继续出现的角色，下一段角色连续性存在漂移风险。")
@@ -2490,10 +2651,19 @@ class ScriptSplitter:
                 status = "warning"
                 content_check_status = "warning" if content_check_status == "pass" else content_check_status
                 segment_issues.append(
-                    "该段存在首镜头未出现的角色在段内中途入场，建议从这些角色首次出镜的镜头开始新起一段："
+                    (
+                        "该段存在首镜头未出现的角色在段内中途入场，建议从这些角色首次出镜的镜头开始新起一段："
+                        if self.uses_long_shot_workflow()
+                        else "该段存在开场未出现的角色在段内中途入场，建议从这些角色首次出镜的镜头开始新起一段："
+                    )
                     + "、".join(segment.late_entry_character_profile_ids)
                 )
-            if index > 0 and segment.pre_generate_start_frame and segment.start_frame_generation_reason == "new_character_entry":
+            if (
+                self.uses_long_shot_workflow()
+                and index > 0
+                and segment.pre_generate_start_frame
+                and segment.start_frame_generation_reason == "new_character_entry"
+            ):
                 summary = "该段被识别为新角色正式登场段，已建议额外预生成首帧稳定角色造型。"
             segment_reviews.append(
                 {
@@ -2510,17 +2680,21 @@ class ScriptSplitter:
                     )
                     + (
                         ["把该段结尾调整为下一段仍会继续出现的角色仍在画面内的镜头，方便下一段承接。"]
-                        if segment.prefer_character_handoff_end_frame and not segment.ending_contains_handoff_characters
+                        if self.uses_long_shot_workflow()
+                        and segment.prefer_character_handoff_end_frame
+                        and not segment.ending_contains_handoff_characters
                         else []
                     )
                     + (
-                        ["将该段中途入场的角色改为从新片段首镜头开始出镜，避免首帧未出现角色在段内突然进入。"]
+                        ["将该段中途入场的角色改为从新片段开场镜头开始出镜，避免角色在段内突然进入。"]
                         if segment.late_entry_character_profile_ids
                         else []
                     )
                     + (
                         ["保留该段的额外首帧生成，用于新角色首次正式出场时稳定造型。"]
-                        if segment.pre_generate_start_frame and segment.start_frame_generation_reason == "new_character_entry"
+                        if self.uses_long_shot_workflow()
+                        and segment.pre_generate_start_frame
+                        and segment.start_frame_generation_reason == "new_character_entry"
                         else []
                     ),
                 }
@@ -2551,7 +2725,11 @@ class ScriptSplitter:
             segment_review["suggestions"] = self._dedupe_text_items(
                 [
                     *segment_review["suggestions"],
-                    "把该段 prompt 改成单段视频生成指令，明确首帧主体、动作推进、镜头运动和结尾停点。",
+                    (
+                        "把该段 prompt 改成单段视频生成指令，明确首帧主体、动作推进、镜头运动和结尾停点。"
+                        if self.uses_long_shot_workflow()
+                        else "把该段 prompt 改成单段视频生成指令，明确开场主体、动作推进、镜头运动和结尾停点。"
+                    ),
                 ]
             )
 
@@ -2623,7 +2801,11 @@ class ScriptSplitter:
         )
 
         if not suggestions and any(check["status"] != "pass" for check in checks):
-            suggestions.append("根据审核报告调整片段划分，再进入首尾帧生成。")
+            suggestions.append(
+                "根据审核报告调整片段划分，再进入首尾帧生成。"
+                if self.uses_long_shot_workflow()
+                else "根据审核报告调整片段划分，再进入视频生成。"
+            )
 
         overall_status = self._merge_statuses(
             [check["status"] for check in checks] + [item["status"] for item in segment_reviews]
@@ -2778,7 +2960,11 @@ class ScriptSplitter:
 
         start_keywords = ("首帧", "开场", "起始", "一开始", "画面开始", "opening frame", "opening shot", "start frame")
         if not any(keyword in normalized or keyword in prompt for keyword in start_keywords):
-            issues.append("video_prompt 缺少明确首帧/开场状态，视频模型较难稳定起画。")
+            issues.append(
+                "video_prompt 缺少明确首帧/开场状态，视频模型较难稳定起画。"
+                if self.uses_long_shot_workflow()
+                else "video_prompt 缺少明确开场状态，视频模型较难稳定起画。"
+            )
 
         progression_keywords = ("动作推进", "随后", "接着", "然后", "先", "再", "最终", "结尾", "progression", "then", "finally")
         if len(segment.key_actions) + len(segment.key_dialogues) >= 2 and not any(
@@ -2829,7 +3015,9 @@ class ScriptSplitter:
             return issues[0] if issues else "片段审核未通过，建议先调整拆分结果。"
         if status == "warning":
             return issues[0] if issues else "片段审核存在风险，建议人工确认后再继续。"
-        return "片段拆分通过二次校验，可继续生成首尾帧。"
+        if self.uses_long_shot_workflow():
+            return "片段拆分通过二次校验，可继续生成首尾帧。"
+        return "片段拆分通过二次校验，可继续生成视频。"
 
     async def _generate_video_prompt_with_llm(
         self,
@@ -2848,23 +3036,40 @@ class ScriptSplitter:
         ending_clause = self._build_segment_ending_clause(segment_shots)
         dialogue_clause = self._build_segment_dialogue_clause(segment_shots)
 
-        system_prompt = """你是一位 AI 视频导演，负责把一个视频片段整理成可直接喂给视频生成模型的高质量 Prompt。
+        opening_requirement = "必须明确首帧/开场状态、主体角色、场景环境、动作推进、镜头运动、结尾停点"
+        opening_hint_label = "建议首帧信息"
+        if not self.uses_long_shot_workflow():
+            opening_requirement = "必须明确开场状态、主体角色、场景环境、动作推进、镜头运动、结尾停点"
+            opening_hint_label = "建议开场信息"
+
+        system_prompt = f"""你是一位 AI 视频导演，负责把一个视频片段整理成可直接喂给视频生成模型的高质量 Prompt。
 
 要求：
 1. Prompt 必须像“单次视频生成指令”，而不是剧情摘要、字段清单或镜头笔记
-2. 必须明确首帧/开场状态、主体角色、场景环境、动作推进、镜头运动、结尾停点
+2. {opening_requirement}
 3. 要把多个镜头信息整理成一个连续可生成的视频段落，不要逐条复述“镜头1/镜头2”
 4. 重点强调角色一致性、空间连续性、动作连贯、镜头语言、光线氛围
 5. 如果存在上下段衔接，需要在 prompt 里明确“如何接上段、如何留给下段”
 6. 不要输出调试字段，不要出现 start_time、end_time、scene profile、character profile ids、spoken lines 这类元信息标签
-7. 输出 JSON：
-{
+7. 你需要同时判断这个片段是否更适合用多镜头视频生成。如果多镜头明显更优，就在 config 里设置对应字段；否则明确写 false
+8. 输出 JSON：
+{{
   "prompt": "...",
   "negative_prompt": "...",
-  "config": {
-    "style": "cinematic_realistic"
-  }
-}
+  "config": {{
+    "style": "cinematic_realistic",
+    "kling_multi_shot_enabled": true,
+    "kling_shot_type": "customize",
+    "kling_multi_prompt": ["分镜1 prompt", "分镜2 prompt"],
+    "kling_multi_shot_reason": "为什么这个片段更适合多镜头"
+  }}
+}}
+当 kling_multi_shot_enabled=true 且已经给出 kling_multi_prompt 时，prompt 可以为空字符串；此时每个 multi_prompt 都必须可直接喂给视频模型。
+如果不适合多镜头，则在 config 中输出：
+{{
+  "kling_multi_shot_enabled": false,
+  "kling_multi_shot_reason": "为什么保持单镜头更好"
+}}
 只输出 JSON，不要额外解释。"""
 
         user_prompt = (
@@ -2874,7 +3079,7 @@ class ScriptSplitter:
             f"前段衔接：{'是' if has_previous else '否'}\n"
             f"后段衔接：{'是' if has_next else '否'}\n"
             f"重点方向：{prompt_focus or '无'}\n\n"
-            f"建议首帧信息：{opening_clause or '无'}\n"
+            f"{opening_hint_label}：{opening_clause or '无'}\n"
             f"建议动作推进：{action_progression or '无'}\n"
             f"建议镜头设计：{camera_clause or '无'}\n"
             f"建议结尾停点：{ending_clause or '无'}\n"
@@ -2894,15 +3099,25 @@ class ScriptSplitter:
                 max_tokens=11800,
             )
             parsed = self._parse_llm_json(response.get_content().strip())
-            prompt = str(parsed.get("prompt") or "").strip()
-            if not prompt:
-                return None
-            negative_prompt = str(parsed.get("negative_prompt") or "").strip()
             config = dict(parsed.get("config") or {})
+            prompt = str(parsed.get("prompt") or "").strip()
+            negative_prompt = str(parsed.get("negative_prompt") or "").strip()
             config.setdefault("duration", min(point["duration"], self.config.max_segment_duration))
             config.setdefault("aspect_ratio", "16:9")
             config.setdefault("style", "cinematic_realistic")
             config.setdefault("source", "llm-script-splitter")
+            config = self._merge_kling_multi_shot_config(
+                config=config,
+                point=point,
+                segment_shots=segment_shots,
+                source="llm-script-splitter",
+            )
+            if not prompt and bool(config.get("kling_multi_shot_enabled")):
+                prompt = self._build_display_video_prompt_from_multi_prompt(
+                    self._normalize_kling_multi_prompt_items(config.get("kling_multi_prompt"))
+                )
+            if not prompt:
+                return None
             return {
                 "prompt": prompt,
                 "negative_prompt": negative_prompt or (

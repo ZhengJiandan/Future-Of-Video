@@ -83,6 +83,9 @@ CHARACTER_PROFILE_COMPAT_COLUMNS = {
     "face_closeup_image_url": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `face_closeup_image_url` VARCHAR(500) NULL AFTER `three_view_prompt`",
     "face_closeup_image_path": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `face_closeup_image_path` VARCHAR(500) NULL AFTER `face_closeup_image_url`",
     "voice_description": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `voice_description` TEXT NULL AFTER `emotion_baseline`",
+    "kling_subject_id": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `kling_subject_id` VARCHAR(100) NULL AFTER `voice_profile`",
+    "kling_subject_name": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `kling_subject_name` VARCHAR(255) NULL AFTER `kling_subject_id`",
+    "kling_subject_status": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `kling_subject_status` VARCHAR(100) NULL AFTER `kling_subject_name`",
     "deleted_at": "ALTER TABLE `pipeline_character_profiles` ADD COLUMN `deleted_at` DATETIME NULL AFTER `face_closeup_image_path`",
 }
 
@@ -193,6 +196,9 @@ async def _ensure_schema_compatibility(conn: AsyncSession) -> None:
                 "face_closeup_image_url": "ALTER TABLE pipeline_character_profiles ADD COLUMN face_closeup_image_url VARCHAR(500)",
                 "face_closeup_image_path": "ALTER TABLE pipeline_character_profiles ADD COLUMN face_closeup_image_path VARCHAR(500)",
                 "voice_description": "ALTER TABLE pipeline_character_profiles ADD COLUMN voice_description TEXT",
+                "kling_subject_id": "ALTER TABLE pipeline_character_profiles ADD COLUMN kling_subject_id VARCHAR(100)",
+                "kling_subject_name": "ALTER TABLE pipeline_character_profiles ADD COLUMN kling_subject_name VARCHAR(255)",
+                "kling_subject_status": "ALTER TABLE pipeline_character_profiles ADD COLUMN kling_subject_status VARCHAR(100)",
                 "deleted_at": "ALTER TABLE pipeline_character_profiles ADD COLUMN deleted_at DATETIME",
             },
             "pipeline_scene_profiles": {

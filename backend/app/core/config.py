@@ -60,11 +60,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("KLING_SECRET_KEY", "KELING_SECRET_KEY"),
     )
     KLING_BASE_URL: str = Field(
-        default="https://api-singapore.klingai.com",
+        default="https://api-beijing.klingai.com",
         validation_alias=AliasChoices("KLING_BASE_URL", "KELING_BASE_URL"),
     )
     KLING_VIDEO_MODEL: str = Field(
-        default="kling-v1-6",
+        default="kling-v3-omni",
         validation_alias=AliasChoices("KLING_VIDEO_MODEL", "KELING_VIDEO_MODEL"),
     )
     KLING_VIDEO_MODE: str = Field(
