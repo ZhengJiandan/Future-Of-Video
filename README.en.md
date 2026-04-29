@@ -16,7 +16,7 @@ The repository currently uses a separated frontend/backend architecture:
 
 ## Online Demo
 
-- Demo URL: [http://82.156.153.123/](http://82.156.153.123/)
+- Demo URL: [http://fov2.chat/](http://fov2.chat/)
 - User: `test`, password: `123456`
 - For demonstration only.
 
